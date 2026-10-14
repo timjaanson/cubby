@@ -222,7 +222,8 @@ func parseFlags(in []string, withValue, boolean []string) (*flags, error) {
 			f.args = append(f.args, in[i+1:]...)
 			break
 		}
-		if len(a) < 2 || a[0] != '-' {
+		// Values like -5 or -0.5 are arguments, not flags.
+		if len(a) < 2 || a[0] != '-' || (a[1] >= '0' && a[1] <= '9') || a[1] == '.' {
 			f.args = append(f.args, a)
 			continue
 		}

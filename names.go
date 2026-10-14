@@ -16,6 +16,7 @@ var (
 	keyRe     = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 	patternRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{0,127}\*$`)
 	visitorRe = regexp.MustCompile(`^u_[a-z2-7]{16}$`)
+	tokenRe   = regexp.MustCompile(`^kv_[A-Za-z0-9_-]{43}$`)
 )
 
 const alnum = "abcdefghijklmnopqrstuvwxyz0123456789"
@@ -38,7 +39,12 @@ func validSpace(name string) bool {
 	return digits >= 2 && letters >= 2
 }
 
-func validKey(k string) bool     { return keyRe.MatchString(k) && k != "watch" }
+// validKey also rules out "." and "..", which browsers, fetch and curl
+// collapse as path segments, so such a key could never be reached and would
+// send the request somewhere else.
+func validKey(k string) bool {
+	return keyRe.MatchString(k) && k != "watch" && k != "." && k != ".."
+}
 func validPattern(p string) bool { return patternRe.MatchString(p) }
 func validVisitor(id string) bool {
 	return visitorRe.MatchString(id)

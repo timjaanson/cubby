@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -170,7 +171,12 @@ func (s *Store) touch(name string) {
 func nowMs() int64 { return time.Now().UnixMilli() }
 func nowS() int64  { return time.Now().Unix() }
 
+// spacePath maps a space to its file. Names are checked here as well as in
+// the router, so no caller can ever produce a path outside spaces/.
 func (s *Store) spacePath(name string) string {
+	if !validSpace(name) {
+		panic("tiny-kv: unchecked space name " + strconv.Quote(name))
+	}
 	return filepath.Join(s.dir, "spaces", name+".db")
 }
 
@@ -296,6 +302,9 @@ func (s *Store) initSpace(db *sql.DB, name, keyHash string) error {
 // acquire returns an open space with its gate held shared. It returns nil if
 // the space doesn't exist and create is false. Call release when done.
 func (s *Store) acquire(name string, create bool, keyHash string) (sp *spaceDB, created bool, err error) {
+	if !validSpace(name) {
+		return nil, false, &apiError{Status: 400, Code: "invalid_space", Message: "Not a valid space name."}
+	}
 	for {
 		s.mu.Lock()
 		sp = s.open[name]
@@ -1002,7 +1011,7 @@ func (s *Store) write(ctx context.Context, r writeReq) (res writeResult, err err
 	if err != nil {
 		return res, err
 	}
-	if m.keyHash != "" && r.area == "s" && (r.spaceKey == "" || hashSecret(r.spaceKey) != m.keyHash) {
+	if m.keyHash != "" && r.area == "s" && (r.spaceKey == "" || subtle.ConstantTimeCompare([]byte(hashSecret(r.spaceKey)), []byte(m.keyHash)) != 1) {
 		return res, errSpaceLocked
 	}
 

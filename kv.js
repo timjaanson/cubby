@@ -17,6 +17,21 @@ export class KvError extends Error {
 }
 
 const SPACE_RE = /^([a-z0-9]+(-[a-z0-9]+)*-)?[a-z0-9]{8}$/
+const KEY_RE = /^[A-Za-z0-9._:-]{1,128}$/
+const PATTERN_RE = /^[A-Za-z0-9._:-]{0,127}\*$/
+const VISITOR_RE = /^u_[a-z2-7]{16}$/
+
+const validKey = k => typeof k === "string" && KEY_RE.test(k) && k !== "watch" && k !== "." && k !== ".."
+const validTarget = t => validKey(t) || (typeof t === "string" && PATTERN_RE.test(t))
+
+// Checked before any request. Keys go into the URL, where "#", "?", "/" or
+// ".." would silently address something else.
+function checkKey(k, patternOk = false) {
+  if (patternOk ? validTarget(k) : validKey(k)) return
+  throw new KvError(0, "invalid_key",
+    `${JSON.stringify(k)} isn't a valid ${patternOk ? "key or pattern" : "key"}. Keys are 1 to 128 of A-Z a-z 0-9 . _ : - and can't be ".", ".." or "watch".` +
+    (patternOk ? " A pattern is a prefix followed by *." : ""))
+}
 const ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 function validSpace(name) {
@@ -154,6 +169,7 @@ export function kv(space, opts = {}) {
 
     const a = {
       async getEntry(key) {
+        checkKey(key)
         const res = await request("GET", await pathOf(key), { auth: needsAuth })
         if (res.status === 404) return null
         if (!res.ok) throw await fail(res)
@@ -167,6 +183,7 @@ export function kv(space, opts = {}) {
         return e ? e.value : null
       },
       async set(key, value, o = {}) {
+        checkKey(key)
         checkWrite()
         const body = JSON.stringify(value)
         if (body === undefined) throw new KvError(0, "invalid_value", "That value can't be stored as JSON.")
@@ -175,6 +192,7 @@ export function kv(space, opts = {}) {
         return (await res.json()).version
       },
       async delete(key, o = {}) {
+        checkKey(key)
         checkWrite()
         const res = await request("DELETE", await pathOf(key), { auth: true, shared, query: { ifVersion: o.ifVersion } })
         if (res.status === 404) return false
@@ -203,6 +221,7 @@ export function kv(space, opts = {}) {
   }
 
   async function list(pathOf, auth, target, o = {}) {
+    checkKey(target, true)
     const limit = o.limit ?? Infinity
     const items = []
     let after, version
@@ -220,6 +239,7 @@ export function kv(space, opts = {}) {
   }
 
   function watch(pathOf, auth, target, onChange, o = {}) {
+    checkKey(target, true)
     let stopped = false
     let controller = null
     let from = o.from === undefined ? 0 : o.from
@@ -331,6 +351,9 @@ export function kv(space, opts = {}) {
     me: area("me", { needsAuth: true }),
     user(id) {
       if (id === undefined) return area(myArea)
+      if (typeof id !== "string" || !VISITOR_RE.test(id)) {
+        throw new KvError(0, "invalid_key", `${JSON.stringify(id)} isn't a visitor ID. IDs look like u_k7m2x9q4p1r8t3w6.`)
+      }
       const cur = ident.current()
       return area("users/" + id, { readOnly: !cur || cur.id !== id })
     },

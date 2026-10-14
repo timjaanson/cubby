@@ -307,7 +307,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !strings.HasPrefix(r.URL.Path, "/v1/") {
+	if !strings.HasPrefix(r.URL.EscapedPath(), "/v1/") {
 		c.fail(&apiError{Status: 404, Code: "not_found", Message: "No such route."})
 		return
 	}
@@ -317,12 +317,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Token: header wins over the query parameter.
 	tok := ""
-	if a := r.Header.Get("Authorization"); strings.HasPrefix(a, "Bearer ") {
-		tok = strings.TrimSpace(strings.TrimPrefix(a, "Bearer "))
+	if scheme, cred, ok := strings.Cut(strings.TrimSpace(r.Header.Get("Authorization")), " "); ok && strings.EqualFold(scheme, "Bearer") {
+		tok = strings.TrimSpace(cred)
 	} else if t := r.URL.Query().Get("token"); t != "" {
 		tok = t
 	}
-	if tok != "" {
+	if tok != "" && !tokenRe.MatchString(tok) {
+		c.tokErr = errInvalidTok // malformed, no need to look it up
+	} else if tok != "" {
 		id, err := s.store.visitorByToken(tok)
 		if err != nil {
 			c.fail(err)
@@ -357,10 +359,16 @@ func (s *Server) route(c *reqCtx) error {
 			if m != http.MethodPost {
 				return methodErr("POST")
 			}
+			if err := checkParams(c.r); err != nil {
+				return err
+			}
 			return s.anon(c)
 		case "whoami":
 			if m != http.MethodGet && m != http.MethodHead {
 				return methodErr("GET, HEAD")
+			}
+			if err := checkParams(c.r); err != nil {
+				return err
 			}
 			id, err := c.needVisitor()
 			if err != nil {
@@ -371,6 +379,9 @@ func (s *Server) route(c *reqCtx) error {
 		case "spaces":
 			if m != http.MethodPost {
 				return methodErr("POST")
+			}
+			if err := checkParams(c.r, "label", "locked"); err != nil {
+				return err
 			}
 			return s.createSpace(c)
 		}
@@ -428,12 +439,15 @@ func (s *Server) route(c *reqCtx) error {
 		t.key = name
 	default:
 		return &apiError{Status: 400, Code: "invalid_key",
-			Message: "A key is 1 to 128 of A-Z a-z 0-9 . _ : - (and not \"watch\"). A pattern is a prefix followed by *."}
+			Message: "A key is 1 to 128 of A-Z a-z 0-9 . _ : - and can't be \".\", \"..\" or \"watch\". A pattern is a prefix followed by *."}
 	}
 
 	if watch {
 		if m != http.MethodGet {
 			return methodErr("GET")
+		}
+		if err := checkParams(c.r, "version", "timeout"); err != nil {
+			return err
 		}
 		return s.watch(c, t)
 	}
@@ -442,15 +456,71 @@ func (s *Server) route(c *reqCtx) error {
 		if !isRead {
 			return methodErr("GET, HEAD")
 		}
+		if err := checkParams(c.r, "limit", "order", "after"); err != nil {
+			return err
+		}
 		return s.list(c, t)
 	}
 	switch m {
 	case http.MethodGet, http.MethodHead:
+		if err := checkParams(c.r); err != nil {
+			return err
+		}
 		return s.read(c, t)
 	case http.MethodPut, http.MethodDelete:
+		if err := checkParams(c.r, "ifVersion"); err != nil {
+			return err
+		}
 		return s.write(c, t)
 	}
 	return methodErr("GET, HEAD, PUT, DELETE")
+}
+
+// checkParams rejects query parameters a route doesn't take, and any given
+// twice. A typo like ifversion=0 would otherwise turn a conditional write into
+// an unconditional one. token is accepted everywhere, and _ is ignored so
+// cache-busting libraries work.
+func checkParams(r *http.Request, allowed ...string) error {
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return badParam("query", "The query string is malformed.")
+	}
+	for k, vs := range q {
+		if k == "token" || k == "_" {
+			continue
+		}
+		known := false
+		for _, a := range allowed {
+			known = known || k == a
+		}
+		if !known {
+			msg := fmt.Sprintf("Unknown parameter %q here.", k)
+			if len(allowed) > 0 {
+				msg += " This route takes: " + strings.Join(allowed, ", ") + "."
+			}
+			return badParam(k, msg)
+		}
+		if len(vs) > 1 {
+			return badParam(k, fmt.Sprintf("Parameter %q is given more than once.", k))
+		}
+	}
+	return nil
+}
+
+// parseUint accepts plain decimal digits only: no sign, no spaces, no hex,
+// at most 16 digits (versions stay below 2^53).
+func parseUint(s string) (int64, bool) {
+	if s == "" || len(s) > 16 {
+		return 0, false
+	}
+	var n int64
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+		n = n*10 + int64(s[i]-'0')
+	}
+	return n, true
 }
 
 func methodErr(allow string) error {
@@ -562,8 +632,8 @@ func parseIfVersion(r *http.Request) (*int64, error) {
 		}
 		raw = strings.Trim(strings.TrimPrefix(im, "W/"), `"`)
 	}
-	n, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || n < 0 {
+	n, ok := parseUint(raw)
+	if !ok {
 		return nil, badParam("ifVersion", "ifVersion must be a version number, or 0 for \"only if it doesn't exist\".")
 	}
 	return &n, nil
@@ -689,12 +759,12 @@ func (s *Server) list(c *reqCtx, t target) error {
 	}
 	q := c.r.URL.Query()
 	limit := 1000
-	if v := q.Get("limit"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > 1000 {
+	if q.Has("limit") {
+		n, ok := parseUint(q.Get("limit"))
+		if !ok || n < 1 || n > 1000 {
 			return badParam("limit", "limit is 1 to 1000.")
 		}
-		limit = n
+		limit = int(n)
 	}
 	desc := false
 	switch q.Get("order") {
@@ -733,17 +803,17 @@ func (s *Server) watch(c *reqCtx, t target) error {
 	}
 	q := c.r.URL.Query()
 	timeout := 25 * time.Second
-	if v := q.Get("timeout"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > 55 {
+	if q.Has("timeout") {
+		n, ok := parseUint(q.Get("timeout"))
+		if !ok || n < 1 || n > 55 {
 			return badParam("timeout", "timeout is 1 to 55 seconds.")
 		}
 		timeout = time.Duration(n) * time.Second
 	}
 	var from int64
 	if q.Has("version") {
-		n, err := strconv.ParseInt(q.Get("version"), 10, 64)
-		if err != nil || n < 0 {
+		n, ok := parseUint(q.Get("version"))
+		if !ok {
 			return badParam("version", "version is the version from your last list or watch response, or 0.")
 		}
 		from = n

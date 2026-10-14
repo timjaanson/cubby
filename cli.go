@@ -81,14 +81,17 @@ type client struct {
 	http     *http.Client
 }
 
-func newClient(f *flags) *client {
+func newClient(f *flags) (*client, error) {
 	var cfg cliConfig
 	toml.DecodeFile(filepath.Join(configDir(), "config.toml"), &cfg)
 	server := firstNonEmpty(f.str("server"), os.Getenv("TINY_KV_SERVER"), cfg.Server, defaultServer)
-	server = strings.TrimRight(server, "/")
 	if !strings.Contains(server, "://") {
 		server = "http://" + server
 	}
+	if u, err := url.Parse(server); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
+		return nil, &cliError{code: 64, msg: fmt.Sprintf("server %q isn't a URL like https://kv.example.com", server)}
+	}
+	server = strings.TrimRight(server, "/")
 	creds := loadCreds()
 	sc := creds.Servers[server]
 	if sc == nil {
@@ -102,7 +105,7 @@ func newClient(f *flags) *client {
 		envToken: firstNonEmpty(f.str("token"), os.Getenv("TINY_KV_TOKEN")),
 		spaceKey: firstNonEmpty(f.str("space-key"), os.Getenv("TINY_KV_SPACE_KEY")),
 		http:     &http.Client{Timeout: 70 * time.Second},
-	}
+	}, nil
 }
 
 // cliError carries an exit code and the message for stderr.
@@ -261,7 +264,17 @@ type kvPath struct {
 }
 
 func (p kvPath) String() string { return p.space + "/" + p.area + "/" + p.name }
-func (p kvPath) url() string    { return "/v1/" + p.String() }
+
+// url escapes every segment. The parser already allows only URL-safe
+// characters, so this is a second guard against ?, # or % changing the target.
+func (p kvPath) url() string {
+	esc := func(seg string) string { return strings.ReplaceAll(url.PathEscape(seg), "%2A", "*") }
+	segs := []string{esc(p.space)}
+	for _, a := range strings.Split(p.area, "/") {
+		segs = append(segs, esc(a))
+	}
+	return "/v1/" + strings.Join(append(segs, esc(p.name)), "/")
+}
 func (p kvPath) isPattern() bool {
 	return strings.HasSuffix(p.name, "*")
 }
@@ -275,6 +288,9 @@ func (c *client) parsePath(s string) (kvPath, error) {
 		return kvPath{}, bad
 	}
 	p := kvPath{space: seg[0]}
+	if !validSpace(p.space) {
+		return kvPath{}, &cliError{code: 5, err: "invalid_space", msg: fmt.Sprintf("%q isn't a valid space name. Try %s.", p.space, suggestFor(p.space))}
+	}
 	switch seg[1] {
 	case "shared", "me":
 		if len(seg) != 3 {
@@ -286,18 +302,24 @@ func (c *client) parsePath(s string) (kvPath, error) {
 			return kvPath{}, bad
 		}
 		id := seg[2]
-		if id == "me" {
-			var err error
-			if id, err = c.visitorID(); err != nil {
-				return kvPath{}, err
-			}
+		if id != "me" && id != "*" && !validVisitor(id) {
+			return kvPath{}, &cliError{code: 5, err: "invalid_key", msg: fmt.Sprintf("%q isn't a visitor ID. Use an ID like u_k7m2x9q4p1r8t3w6, me, or *.", id)}
 		}
 		p.area, p.name = "users/"+id, seg[3]
 	default:
 		return kvPath{}, bad
 	}
-	if !validSpace(p.space) {
-		return kvPath{}, &cliError{code: 5, err: "invalid_space", msg: fmt.Sprintf("%q isn't a valid space name. Try %s.", p.space, suggestFor(p.space))}
+	// Checked before anything is sent: a # or ? in a key would otherwise
+	// silently address a different key.
+	if !validKey(p.name) && !validPattern(p.name) {
+		return kvPath{}, &cliError{code: 5, err: "invalid_key", msg: fmt.Sprintf("%q isn't a valid key. Keys are 1 to 128 of A-Z a-z 0-9 . _ : - and can't be \".\", \"..\" or \"watch\". Patterns end in *.", p.name)}
+	}
+	if p.area == "users/me" {
+		id, err := c.visitorID()
+		if err != nil {
+			return kvPath{}, err
+		}
+		p.area = "users/" + id
 	}
 	return p, nil
 }
@@ -381,7 +403,12 @@ func runClient(cmd string, args []string) int {
 	if err != nil {
 		return usageErr(err)
 	}
-	c := newClient(f)
+	c, err := newClient(f)
+	if err != nil {
+		var ce *cliError
+		errors.As(err, &ce)
+		return usageErr(errors.New(ce.msg))
+	}
 	switch cmd {
 	case "name":
 		if len(f.args) > 1 {
@@ -680,6 +707,9 @@ func (c *client) newSpace(f *flags) error {
 	}
 	q := url.Values{}
 	if l := f.str("label"); l != "" {
+		if !labelRe.MatchString(l) || len(l) > 54 {
+			return &cliError{code: 5, err: "invalid_parameter", msg: "a label is lowercase letters, digits and single hyphens, at most 54 characters"}
+		}
 		q.Set("label", l)
 	}
 	u := "/v1/spaces"

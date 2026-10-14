@@ -53,7 +53,7 @@ space                 notes-k7m2x9q4
 ```
 
 - A visitor is an anonymous identity. `POST /v1/anon` gives a token. The CLI and the JS client get one by themselves when they need it.
-- A key is up to 128 of `A-Z a-z 0-9 . _ : -`. Group with dots (`msg.1791449600123`), because listing and watching select by prefix (`msg.*`).
+- A key is up to 128 of `A-Z a-z 0-9 . _ : -`, and can't be `.`, `..` or `watch`. Group with dots (`msg.1791449600123`), because listing and watching select by prefix (`msg.*`).
 - A value is UTF-8 text up to 64 KB. Valid JSON comes back as `application/json`, anything else as `text/plain`, always byte for byte as written.
 - Every write gets a version number. Pass it back with `ifVersion` to write only if nobody changed the key meanwhile.
 - Data isn't secret. Anyone who knows a space name can read its `shared/` and `users/` data.
@@ -113,7 +113,7 @@ Everything the CLI does is a single request.
 | wait for changes | `GET /v1/{space}/shared/msg.*/watch?version=N` (long poll, 25 s) |
 | create a locked space | `POST /v1/spaces?label=poll&locked` → `{"space": ..., "key": "sk_..."}` |
 
-Writes to `shared/` of a locked space also need `Space-Key: sk_...`. Errors are JSON with a stable `error` code and a `message`. CORS is open, so pages on any origin can call it.
+Writes to `shared/` of a locked space also need `Space-Key: sk_...`. Unknown or repeated query parameters are rejected with 400, so a typo like `ifversion=0` fails instead of overwriting. Errors are JSON with a stable `error` code and a `message`. CORS is open, so pages on any origin can call it.
 
 The full contract is in [../SPEC.md](../SPEC.md), with worked examples in [../SCENARIOS.md](../SCENARIOS.md).
 
