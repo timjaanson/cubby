@@ -72,11 +72,13 @@ type Server struct {
 }
 
 func newServer(cfg *Config, store *Store, logger *log.Logger) *Server {
-	return &Server{
+	s := &Server{
 		cfg: cfg, store: store, lim: newLimits(), log: logger,
 		watches: watchCounter{perIP: map[string]int{}},
 		notify:  notifier{spaces: map[string]*spaceSignal{}},
 	}
+	store.onChange = s.notify.fire
+	return s
 }
 
 // ---------- notifier ----------
@@ -746,11 +748,11 @@ func (s *Server) watch(c *reqCtx, t target) error {
 		}
 		from = n
 	} else {
-		si, err := s.store.spaceInfo(s.store.db, t.space)
+		seq, err := s.store.currentSeq(t.space)
 		if err != nil {
 			return err
 		}
-		from = si.seq
+		from = seq
 	}
 
 	if !s.watches.acquire(c.ip) {
@@ -759,7 +761,9 @@ func (s *Server) watch(c *reqCtx, t target) error {
 	defer s.watches.release(c.ip)
 	s.notify.join(t.space)
 	defer s.notify.leave(t.space)
-	s.store.touchSpace(t.space)
+	s.store.pin(t.space)
+	defer s.store.unpin(t.space)
+	s.store.touch(t.space)
 
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
@@ -773,8 +777,8 @@ func (s *Server) watch(c *reqCtx, t target) error {
 		if err != nil {
 			return err
 		}
-		if len(changes) > 0 {
-			if woken {
+		if len(changes) > 0 || from == 0 {
+			if woken && len(changes) > 0 {
 				// A burst of writes goes out together.
 				time.Sleep(50 * time.Millisecond)
 				woken = false
@@ -788,7 +792,10 @@ func (s *Server) watch(c *reqCtx, t target) error {
 			for _, e := range changes {
 				out = append(out, toItem(e))
 			}
-			v := max(seq, changes[len(changes)-1].Version)
+			v := seq
+			if len(changes) > 0 {
+				v = max(seq, changes[len(changes)-1].Version)
+			}
 			if more {
 				v = changes[len(changes)-1].Version
 			}
@@ -799,11 +806,11 @@ func (s *Server) watch(c *reqCtx, t target) error {
 		case <-sig:
 			woken = true
 		case <-deadline.C:
-			si, err := s.store.spaceInfo(s.store.db, t.space)
+			seq, err := s.store.currentSeq(t.space)
 			if err != nil {
 				return err
 			}
-			c.json(200, map[string]any{"changes": []any{}, "version": max(si.seq, from), "more": false})
+			c.json(200, map[string]any{"changes": []any{}, "version": max(seq, from), "more": false})
 			return nil
 		case <-c.r.Context().Done():
 			return nil

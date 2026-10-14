@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -25,7 +26,7 @@ var buildTime = time.Now()
 const usage = `tiny-kv: a key-value store over plain HTTP, server and client in one binary.
 
 Server:
-  tiny-kv serve                     run the server on :8080, data in ~/.local/share/tiny-kv
+  tiny-kv serve                     run the server on :8080 (see 'tiny-kv help serve')
   tiny-kv admin <command>           look after the server's data (spaces, export, delete, rekey, stats, cleanup)
 
 Client (talks to $TINY_KV_SERVER, default http://localhost:8080):
@@ -75,6 +76,9 @@ func main() {
 
 func cmdServe(args []string) int {
 	f, err := parseFlags(args, []string{"listen", "data", "config"}, []string{"quiet", "q"})
+	if err == nil && len(f.args) > 0 {
+		err = fmt.Errorf("serve takes no arguments, got %q", f.args[0])
+	}
 	if err != nil {
 		return usageErr(err)
 	}
@@ -89,12 +93,20 @@ func cmdServe(args []string) int {
 	if v := f.str("data"); v != "" {
 		cfg.Server.DataDir = v
 	}
+	if abs, err := filepath.Abs(cfg.Server.DataDir); err == nil {
+		cfg.Server.DataDir = abs
+	}
 	store, err := openStore(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tiny-kv:", err)
 		return 6
 	}
 	defer store.Close()
+	adminLn, err := listenAdmin(cfg.Server.DataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "tiny-kv:", err)
+		return 6
+	}
 
 	var reqLog *log.Logger
 	if !f.bool("quiet") && !f.bool("q") {
@@ -117,7 +129,7 @@ func cmdServe(args []string) int {
 		fmt.Fprintln(os.Stderr, "tiny-kv:", err)
 		return 6
 	}
-	log.Printf("tiny-kv %s listening on %s, data in %s", version, displayAddr(ln.Addr()), cfg.Server.DataDir)
+	log.Printf("tiny-kv %s listening on %s, data in %s (%d spaces)", version, displayAddr(ln.Addr()), cfg.Server.DataDir, store.spaceCount())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -142,6 +154,10 @@ func cmdServe(args []string) int {
 			}
 		}
 	}()
+
+	admin := &http.Server{Handler: srv.adminHandler(), ReadHeaderTimeout: 10 * time.Second}
+	go admin.Serve(adminLn)
+	defer admin.Close()
 
 	errc := make(chan error, 1)
 	go func() { errc <- hs.Serve(ln) }()

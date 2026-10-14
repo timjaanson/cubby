@@ -10,7 +10,7 @@ The same binary is the server and a command-line client.
 ./tiny-kv serve
 ```
 
-That's the whole setup. It listens on port 8080 and keeps its data in `~/.local/share/tiny-kv/`. No config file is needed.
+That's the whole setup. It listens on port 8080 and keeps its data in the usual place for your OS (see [Where data lives](#where-data-lives)), creating the directory on first start. No config file is needed.
 
 Try it from another terminal:
 
@@ -143,7 +143,7 @@ Nothing is required. These cover what most setups change:
 | Flag | Environment | Default |
 |---|---|---|
 | `--listen` | `TINY_KV_LISTEN` | `:8080` |
-| `--data` | `TINY_KV_DATA` | `~/.local/share/tiny-kv` |
+| `--data` | `TINY_KV_DATA` | see [Where data lives](#where-data-lives) |
 | `--config` | `TINY_KV_CONFIG` | none |
 | `--quiet` | | logs each request to stderr |
 
@@ -175,6 +175,32 @@ max_bytes = "100MB"
 max_value_size = "256KB"
 ```
 
+## Where data lives
+
+Without `--data` or `TINY_KV_DATA`, the server picks the first that applies, and creates it if it's missing:
+
+| Situation | Directory |
+|---|---|
+| under systemd with `StateDirectory=` | `$STATE_DIRECTORY` |
+| Linux, running as root | `/var/lib/tiny-kv` |
+| `XDG_DATA_HOME` is set | `$XDG_DATA_HOME/tiny-kv` |
+| macOS | `~/Library/Application Support/tiny-kv` |
+| Linux and other Unix | `~/.local/share/tiny-kv` |
+
+`tiny-kv help serve` prints the one it would use. Inside it:
+
+```
+server.db               visitors and their tokens
+spaces/{name}.db        one SQLite file per space, holding everything about it
+admin.sock              how `tiny-kv admin` reaches the running server
+```
+
+A space file is self-contained: its keys, version counter and lock key. So spaces are easy to handle one by one:
+
+- **Delete one** with `tiny-kv admin delete <space>`, which also tells watchers it's gone. Removing the file by hand works too, but stop the server first.
+- **Move or copy one** to another server by copying `spaces/{name}.db`, with the source server stopped or after `sqlite3 {name}.db "PRAGMA wal_checkpoint(TRUNCATE)"`. The other server picks it up on the next request for that space. Versions continue where they were, and a locked space keeps its key. Visitor IDs don't travel, since tokens live in `server.db`: the `users/` data stays readable, but its owners can't write it on the new server.
+- **Back up** by copying the whole directory with the server stopped, or with `sqlite3 file.db ".backup copy.db"` per file while it runs.
+
 ## Running it for real
 
 Put it behind a TLS proxy. Caddy is two lines and also gives browsers HTTP/2, which matters because each open watch holds a connection:
@@ -193,7 +219,7 @@ Description=tiny-kv
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/tiny-kv serve --listen 127.0.0.1:8080 --data /var/lib/tiny-kv
+ExecStart=/usr/local/bin/tiny-kv serve --listen 127.0.0.1:8080
 DynamicUser=yes
 StateDirectory=tiny-kv
 Restart=on-failure
@@ -202,11 +228,11 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
-Back up by copying `tiny-kv.db` from the data directory, or with `sqlite3 tiny-kv.db ".backup copy.db"` while it runs.
+`StateDirectory=tiny-kv` puts the data in `/var/lib/tiny-kv` with no flag needed. That's also where root looks by default, so `sudo tiny-kv admin spaces` works as is.
 
 ## Admin
 
-Runs on the server machine against the data directory. Safe while the server runs.
+`tiny-kv admin` is a client of the running server. It sends each command through `admin.sock` in the data directory, and the server carries it out like any other request, so watchers learn about deleted spaces at once. Only the server's OS user can open the socket, which is the only access check. Admin has no HTTP route, so it can't be reached over the network.
 
 ```sh
 tiny-kv admin spaces            # name, kind, size, keys, last activity
@@ -217,7 +243,7 @@ tiny-kv admin rekey <space>     # lock a space or replace its key
 tiny-kv admin cleanup           # run the hourly cleanup now
 ```
 
-Pass `--data DIR` if the server uses a non-default data directory.
+Run it on the server machine, as the server's user or root. Pass `--data DIR` if the server uses a non-default data directory. `--json` prints the raw response. If no server is running, admin says so and exits with 6.
 
 ## Build
 
@@ -231,9 +257,9 @@ go build .          # just for this machine
 
 ## Differences from the design docs
 
-- **One SQLite file** (`tiny-kv.db`) instead of a file per space. Fewer moving parts, and fine at the default limits.
-- **Admin opens the database directly**, with no Unix socket. SQLite's WAL mode makes this safe next to a running server. Watchers aren't woken by admin changes.
-- **Default data directory** is `~/.local/share/tiny-kv` rather than `./data`, so `serve` and `admin` find the same data from any directory.
-- **Activity times** are written straight to the database, at most once an hour per space or visitor, instead of being buffered.
+- **Default data directory** follows the OS convention (see [Where data lives](#where-data-lives)) instead of `./data`, so `serve` and `admin` find the same data from any directory.
+- **`visitors.db` is called `server.db`.** Besides visitors, it remembers which spaces each visitor wrote to, and the last counter of deleted spaces so a recreated space never reuses versions.
+- **Admin needs the running server.** It doesn't fall back to opening files directly. That keeps one path for every change.
 - **When `watch --from now` hits an expired version** it continues from now instead of replaying the current state, so an `--exec` deploy hook never reruns old requests.
+- **Visitor cleanup turns their `users/` keys into tombstones**, so watchers see them go, instead of deleting rows silently.
 - Not built yet: proof of work on `/v1/anon`, and everything else under "Later" in the spec.

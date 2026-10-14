@@ -6,8 +6,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,31 +18,41 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Store keeps everything in one SQLite file in WAL mode. The spec sketches a
-// file per space. One file is simpler and is plenty for the default limits
-// (1000 spaces, 1 GB).
-type Store struct {
-	db  *sql.DB
-	cfg *Config
-	wmu sync.Mutex // serializes write transactions inside this process
+// Data layout:
+//
+//	{data}/server.db           visitors, which spaces each visitor wrote to, deleted-space counters
+//	{data}/spaces/{name}.db    one SQLite file per space, self-contained
+//	{data}/admin.sock          Unix socket for `tiny-kv admin`
+//
+// A space file holds everything about the space, including its counter and
+// lock key, so it can be copied to another server or deleted on its own.
 
-	touchMu sync.Mutex
-	touched map[string]int64 // "s:name" or "v:id" -> unix seconds last written to disk
-}
+const serverSchema = `
+CREATE TABLE IF NOT EXISTS visitors (
+  id           TEXT PRIMARY KEY,
+  token_hash   TEXT NOT NULL UNIQUE,
+  created_at   INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  stored       INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS visitor_spaces (
+  visitor TEXT NOT NULL,
+  space   TEXT NOT NULL,
+  PRIMARY KEY (visitor, space)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS visitor_spaces_by_space ON visitor_spaces (space);
+CREATE TABLE IF NOT EXISTS graveyard (
+  name TEXT PRIMARY KEY,
+  seq  INTEGER NOT NULL
+);
+`
 
-const schema = `
-CREATE TABLE IF NOT EXISTS spaces (
-  name            TEXT PRIMARY KEY,
-  seq             INTEGER NOT NULL,
-  key_hash        TEXT,
-  created_at      INTEGER NOT NULL,
-  last_active_at  INTEGER NOT NULL,
-  tombstone_floor INTEGER NOT NULL DEFAULT 0,
-  bytes           INTEGER NOT NULL DEFAULT 0,
-  keys            INTEGER NOT NULL DEFAULT 0
+const spaceSchema = `
+CREATE TABLE IF NOT EXISTS meta (
+  k TEXT PRIMARY KEY,   -- seq, created_at, last_active_at, tombstone_floor, bytes, keys, key_hash
+  v
 );
 CREATE TABLE IF NOT EXISTS kv (
-  space      TEXT NOT NULL,
   area       TEXT NOT NULL,      -- 's', 'u:{id}', 'm:{id}'
   key        TEXT NOT NULL,
   value      BLOB,               -- NULL is a tombstone
@@ -48,60 +61,450 @@ CREATE TABLE IF NOT EXISTS kv (
   writer     TEXT NOT NULL,
   size       INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  PRIMARY KEY (space, area, key)
+  PRIMARY KEY (area, key)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS kv_by_version ON kv (space, version);
-CREATE INDEX IF NOT EXISTS kv_by_key ON kv (space, key, area);
-CREATE INDEX IF NOT EXISTS kv_by_area ON kv (area);
+CREATE INDEX IF NOT EXISTS kv_by_version ON kv (area, version);
+CREATE INDEX IF NOT EXISTS kv_users ON kv (key, area) WHERE area >= 'u:' AND area < 'u;';
 CREATE INDEX IF NOT EXISTS kv_tombstones ON kv (updated_at) WHERE value IS NULL;
-CREATE TABLE IF NOT EXISTS visitors (
-  id           TEXT PRIMARY KEY,
-  token_hash   TEXT NOT NULL UNIQUE,
-  created_at   INTEGER NOT NULL,
-  last_seen_at INTEGER NOT NULL,
-  stored       INTEGER NOT NULL DEFAULT 0,
-  bytes        INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS graveyard (
-  name TEXT PRIMARY KEY,
-  seq  INTEGER NOT NULL
-);
+CREATE TABLE IF NOT EXISTS usage (writer TEXT PRIMARY KEY, bytes INTEGER NOT NULL);
 `
 
-func openStore(cfg *Config) (*Store, error) {
-	dir := cfg.Server.DataDir
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
-	}
-	path := filepath.Join(dir, "tiny-kv.db")
+const maxOpenSpaces = 64
+
+type spaceDB struct {
+	name string
+	db   *sql.DB
+	gate sync.RWMutex // held shared while in use, exclusively to close or delete
+	wmu  sync.Mutex   // serializes writes to this file
+	dead bool         // closed; whoever holds a stale pointer must look it up again
+
+	lastUsed   time.Time // guarded by Store.mu
+	metaActive int64     // last_active_at as written to the file, guarded by wmu
+}
+
+type spaceStat struct {
+	bytes      int64
+	keys       int
+	lastActive int64
+	locked     bool
+}
+
+type Store struct {
+	cfg *Config
+	dir string
+	srv *sql.DB
+	// onChange is called after the server itself changes a space outside a
+	// client write (cleanup, admin), so watchers wake up.
+	onChange func(space string)
+
+	mu    sync.Mutex
+	open  map[string]*spaceDB
+	stats map[string]*spaceStat
+	pins  map[string]int // spaces with waiting watches stay open
+	total int64
+
+	cacheMu  sync.Mutex
+	vbytes   map[string]int64 // visitor ID -> bytes across spaces, recounted on a miss
+	vspaces  map[string]bool  // "id space" pairs already in visitor_spaces
+	vtouched map[string]int64 // visitor ID -> last_seen_at written
+}
+
+func openDB(path string) (*sql.DB, error) {
 	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=journal_size_limit(4194304)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(8)
-	if _, err := db.Exec("PRAGMA auto_vacuum = INCREMENTAL"); err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
-	}
-	if _, err := db.Exec(schema); err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
-	}
-	return &Store{db: db, cfg: cfg, touched: map[string]int64{}}, nil
+	db.SetMaxOpenConns(4)
+	db.SetConnMaxIdleTime(time.Minute)
+	return db, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func openStore(cfg *Config) (*Store, error) {
+	dir := cfg.Server.DataDir
+	if err := os.MkdirAll(filepath.Join(dir, "spaces"), 0o700); err != nil {
+		return nil, fmt.Errorf("data directory: %w", err)
+	}
+	srv, err := openDB(filepath.Join(dir, "server.db"))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := srv.Exec(serverSchema); err != nil {
+		srv.Close()
+		return nil, fmt.Errorf("open %s: %w", filepath.Join(dir, "server.db"), err)
+	}
+	s := &Store{
+		cfg: cfg, dir: dir, srv: srv, onChange: func(string) {},
+		open: map[string]*spaceDB{}, stats: map[string]*spaceStat{}, pins: map[string]int{},
+		vbytes: map[string]int64{}, vspaces: map[string]bool{}, vtouched: map[string]int64{},
+	}
+	if err := s.rescan(); err != nil {
+		srv.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Store) Close() error {
+	s.mu.Lock()
+	open := s.open
+	s.open = map[string]*spaceDB{}
+	s.mu.Unlock()
+	for _, sp := range open {
+		sp.gate.Lock()
+		sp.dead = true
+		sp.db.Close()
+		sp.gate.Unlock()
+	}
+	return s.srv.Close()
+}
+
+// touch records activity on a space without reading it.
+func (s *Store) touch(name string) {
+	if sp, _, err := s.acquire(name, false, ""); err == nil && sp != nil {
+		s.touchSpace(sp)
+		s.release(sp)
+	}
+}
 
 func nowMs() int64 { return time.Now().UnixMilli() }
 func nowS() int64  { return time.Now().Unix() }
+
+func (s *Store) spacePath(name string) string {
+	return filepath.Join(s.dir, "spaces", name+".db")
+}
+
+// ---------- space files ----------
+
+type spaceMeta struct {
+	seq, createdAt, lastActive, floor, bytes int64
+	keys                                     int
+	keyHash                                  string
+}
+
+type queryer interface {
+	Query(string, ...any) (*sql.Rows, error)
+	QueryRow(string, ...any) *sql.Row
+}
+
+func readMeta(q queryer) (spaceMeta, error) {
+	var m spaceMeta
+	rows, err := q.Query(`SELECT k, v FROM meta`)
+	if err != nil {
+		return m, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		var v any
+		if err := rows.Scan(&k, &v); err != nil {
+			return m, err
+		}
+		n := toInt(v)
+		switch k {
+		case "seq":
+			m.seq = n
+		case "created_at":
+			m.createdAt = n
+		case "last_active_at":
+			m.lastActive = n
+		case "tombstone_floor":
+			m.floor = n
+		case "bytes":
+			m.bytes = n
+		case "keys":
+			m.keys = int(n)
+		case "key_hash":
+			if str, ok := v.(string); ok {
+				m.keyHash = str
+			}
+		}
+	}
+	return m, rows.Err()
+}
+
+func toInt(v any) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case float64:
+		return int64(x)
+	case string:
+		n, _ := strconv.ParseInt(x, 10, 64)
+		return n
+	case []byte:
+		n, _ := strconv.ParseInt(string(x), 10, 64)
+		return n
+	}
+	return 0
+}
+
+type execer interface {
+	Exec(string, ...any) (sql.Result, error)
+}
+
+func setMeta(e execer, k string, v any) error {
+	_, err := e.Exec(`INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v`, k, v)
+	return err
+}
+
+// graveSeq is the last counter of a deleted space with this name, or 0.
+func (s *Store) graveSeq(name string) int64 {
+	var g int64
+	s.srv.QueryRow(`SELECT seq FROM graveyard WHERE name = ?`, name).Scan(&g)
+	return g
+}
+
+// phantomSeq is the counter a space that doesn't exist pretends to have: the
+// current time, but always above anything already handed out for the name.
+func (s *Store) phantomSeq(name string) int64 {
+	return max(nowMs(), s.graveSeq(name)+1)
+}
+
+// initSpace creates the tables of a new space file.
+func (s *Store) initSpace(db *sql.DB, name, keyHash string) error {
+	if _, err := db.Exec(`PRAGMA auto_vacuum = INCREMENTAL`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(spaceSchema); err != nil {
+		return err
+	}
+	g := s.graveSeq(name)
+	now := nowS()
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for k, v := range map[string]any{
+		"seq": max(nowMs(), g+1), "created_at": now, "last_active_at": now,
+		// Watchers from a deleted space of the same name must start over.
+		"tombstone_floor": g + 1, "bytes": 0, "keys": 0,
+	} {
+		if err := setMeta(tx, k, v); err != nil {
+			return err
+		}
+	}
+	if keyHash != "" {
+		if err := setMeta(tx, "key_hash", keyHash); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// acquire returns an open space with its gate held shared. It returns nil if
+// the space doesn't exist and create is false. Call release when done.
+func (s *Store) acquire(name string, create bool, keyHash string) (sp *spaceDB, created bool, err error) {
+	for {
+		s.mu.Lock()
+		sp = s.open[name]
+		if sp == nil {
+			path := s.spacePath(name)
+			_, statErr := os.Stat(path)
+			exists := statErr == nil
+			if !exists && !create {
+				s.mu.Unlock()
+				return nil, false, nil
+			}
+			db, err := openDB(path)
+			if err != nil {
+				s.mu.Unlock()
+				return nil, false, err
+			}
+			if !exists {
+				if err := s.initSpace(db, name, keyHash); err != nil {
+					db.Close()
+					os.Remove(path)
+					s.mu.Unlock()
+					return nil, false, fmt.Errorf("create space %s: %w", name, err)
+				}
+				created = true
+			}
+			m, err := readMeta(db)
+			if err != nil {
+				db.Close()
+				s.mu.Unlock()
+				return nil, false, fmt.Errorf("open space %s: %w", name, err)
+			}
+			sp = &spaceDB{name: name, db: db, metaActive: m.lastActive, lastUsed: time.Now()}
+			s.open[name] = sp
+			if s.stats[name] == nil {
+				s.stats[name] = &spaceStat{bytes: m.bytes, keys: m.keys, lastActive: m.lastActive, locked: m.keyHash != ""}
+				s.total += m.bytes
+			}
+			s.evictLocked(name)
+		}
+		sp.lastUsed = time.Now()
+		s.mu.Unlock()
+
+		sp.gate.RLock()
+		if sp.dead {
+			sp.gate.RUnlock()
+			continue
+		}
+		return sp, created, nil
+	}
+}
+
+func (s *Store) release(sp *spaceDB) { sp.gate.RUnlock() }
+
+// evictLocked closes the least recently used idle files beyond the limit.
+func (s *Store) evictLocked(keep string) {
+	if len(s.open) <= maxOpenSpaces {
+		return
+	}
+	var idle []*spaceDB
+	for n, sp := range s.open {
+		if s.pins[n] == 0 && n != keep {
+			idle = append(idle, sp)
+		}
+	}
+	sort.Slice(idle, func(i, j int) bool { return idle[i].lastUsed.Before(idle[j].lastUsed) })
+	for _, sp := range idle {
+		if len(s.open) <= maxOpenSpaces {
+			return
+		}
+		if sp.gate.TryLock() {
+			sp.dead = true
+			sp.db.Close()
+			delete(s.open, sp.name)
+			sp.gate.Unlock()
+		}
+	}
+}
+
+func (s *Store) pin(name string) {
+	s.mu.Lock()
+	s.pins[name]++
+	s.mu.Unlock()
+}
+
+func (s *Store) unpin(name string) {
+	s.mu.Lock()
+	if s.pins[name]--; s.pins[name] <= 0 {
+		delete(s.pins, name)
+	}
+	s.mu.Unlock()
+}
+
+func (s *Store) spaceExists(name string) bool {
+	s.mu.Lock()
+	_, ok := s.stats[name]
+	s.mu.Unlock()
+	if ok {
+		return true
+	}
+	_, err := os.Stat(s.spacePath(name))
+	return err == nil
+}
+
+func (s *Store) spaceCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.stats)
+}
+
+// rescan syncs the in-memory totals with the files in spaces/. Files copied
+// in are picked up, files removed by hand are forgotten.
+func (s *Store) rescan() error {
+	entries, err := os.ReadDir(filepath.Join(s.dir, "spaces"))
+	if err != nil {
+		return err
+	}
+	onDisk := map[string]bool{}
+	for _, e := range entries {
+		name, ok := strings.CutSuffix(e.Name(), ".db")
+		if !ok || e.IsDir() {
+			continue
+		}
+		if !validSpace(name) {
+			log.Printf("ignoring spaces/%s: not a valid space name", e.Name())
+			continue
+		}
+		onDisk[name] = true
+		s.mu.Lock()
+		known := s.stats[name] != nil
+		s.mu.Unlock()
+		if known {
+			continue
+		}
+		db, err := openDB(s.spacePath(name))
+		if err != nil {
+			return err
+		}
+		m, err := readMeta(db)
+		db.Close()
+		if err != nil {
+			log.Printf("ignoring spaces/%s: %v", e.Name(), err)
+			continue
+		}
+		s.mu.Lock()
+		if s.stats[name] == nil {
+			s.stats[name] = &spaceStat{bytes: m.bytes, keys: m.keys, lastActive: m.lastActive, locked: m.keyHash != ""}
+			s.total += m.bytes
+		}
+		s.mu.Unlock()
+	}
+	s.mu.Lock()
+	var gone []string
+	for name := range s.stats {
+		if !onDisk[name] {
+			gone = append(gone, name)
+		}
+	}
+	s.mu.Unlock()
+	for _, name := range gone {
+		s.forget(name)
+	}
+	return nil
+}
+
+// forget drops a space from memory after its file disappeared.
+func (s *Store) forget(name string) {
+	s.mu.Lock()
+	sp := s.open[name]
+	if st := s.stats[name]; st != nil {
+		s.total -= st.bytes
+		delete(s.stats, name)
+	}
+	delete(s.open, name)
+	s.mu.Unlock()
+	if sp != nil {
+		sp.gate.Lock()
+		sp.dead = true
+		sp.db.Close()
+		sp.gate.Unlock()
+	}
+	s.cacheMu.Lock()
+	s.vbytes = map[string]int64{}
+	s.cacheMu.Unlock()
+	s.onChange(name)
+}
+
+// touchSpace records activity, writing it to the file at most once an hour.
+func (s *Store) touchSpace(sp *spaceDB) {
+	now := nowS()
+	s.mu.Lock()
+	if st := s.stats[sp.name]; st != nil {
+		st.lastActive = now
+	}
+	s.mu.Unlock()
+	sp.wmu.Lock()
+	defer sp.wmu.Unlock()
+	if now-sp.metaActive >= 3600 {
+		if setMeta(sp.db, "last_active_at", now) == nil {
+			sp.metaActive = now
+		}
+	}
+}
 
 // ---------- visitors ----------
 
 func (s *Store) newVisitor() (token, id string, err error) {
 	token, id = randomToken("kv_"), newVisitorID()
 	now := nowS()
-	s.wmu.Lock()
-	defer s.wmu.Unlock()
-	_, err = s.db.Exec(`INSERT INTO visitors (id, token_hash, created_at, last_seen_at) VALUES (?, ?, ?, ?)`,
+	_, err = s.srv.Exec(`INSERT INTO visitors (id, token_hash, created_at, last_seen_at) VALUES (?, ?, ?, ?)`,
 		id, hashSecret(token), now, now)
 	return
 }
@@ -109,132 +512,219 @@ func (s *Store) newVisitor() (token, id string, err error) {
 // visitorByToken returns "" for an unknown token.
 func (s *Store) visitorByToken(token string) (string, error) {
 	var id string
-	err := s.db.QueryRow(`SELECT id FROM visitors WHERE token_hash = ?`, hashSecret(token)).Scan(&id)
+	err := s.srv.QueryRow(`SELECT id FROM visitors WHERE token_hash = ?`, hashSecret(token)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
-	if err == nil {
-		s.touch("v:"+id, `UPDATE visitors SET last_seen_at = ? WHERE id = ?`, id)
+	if err != nil {
+		return "", err
 	}
-	return id, err
-}
-
-// touch records activity at most once an hour per space or visitor.
-func (s *Store) touch(k, query, arg string) {
 	now := nowS()
-	s.touchMu.Lock()
-	last := s.touched[k]
-	if now-last < 3600 {
-		s.touchMu.Unlock()
-		return
+	s.cacheMu.Lock()
+	stale := now-s.vtouched[id] >= 3600
+	if stale {
+		s.vtouched[id] = now
 	}
-	s.touched[k] = now
-	s.touchMu.Unlock()
-	s.wmu.Lock()
-	s.db.Exec(query, now, arg)
-	s.wmu.Unlock()
+	s.cacheMu.Unlock()
+	if stale {
+		s.srv.Exec(`UPDATE visitors SET last_seen_at = ? WHERE id = ?`, now, id)
+	}
+	return id, nil
 }
 
-func (s *Store) touchSpace(name string) {
-	s.touch("s:"+name, `UPDATE spaces SET last_active_at = ? WHERE name = ?`, name)
+// visitorTotal is a visitor's storage use across every space.
+func (s *Store) visitorTotal(id string) (int64, error) {
+	s.cacheMu.Lock()
+	if n, ok := s.vbytes[id]; ok {
+		s.cacheMu.Unlock()
+		return n, nil
+	}
+	s.cacheMu.Unlock()
+	rows, err := s.srv.Query(`SELECT space FROM visitor_spaces WHERE visitor = ?`, id)
+	if err != nil {
+		return 0, err
+	}
+	var spaces []string
+	for rows.Next() {
+		var n string
+		rows.Scan(&n)
+		spaces = append(spaces, n)
+	}
+	rows.Close()
+	var total int64
+	for _, name := range spaces {
+		sp, _, err := s.acquire(name, false, "")
+		if err != nil {
+			return 0, err
+		}
+		if sp == nil {
+			continue
+		}
+		var b int64
+		sp.db.QueryRow(`SELECT bytes FROM usage WHERE writer = ?`, id).Scan(&b)
+		s.release(sp)
+		total += b
+	}
+	s.cacheMu.Lock()
+	if len(s.vbytes) >= 100_000 {
+		s.vbytes = map[string]int64{}
+	}
+	s.vbytes[id] = total
+	s.cacheMu.Unlock()
+	return total, nil
+}
+
+func (s *Store) adjustVisitor(id string, delta int64) {
+	s.cacheMu.Lock()
+	if n, ok := s.vbytes[id]; ok {
+		s.vbytes[id] = max(0, n+delta)
+	}
+	s.cacheMu.Unlock()
+}
+
+// noteVisitorSpace remembers that a visitor has data in a space, so cleanup
+// and usage counting know where to look.
+func (s *Store) noteVisitorSpace(id, space string) {
+	k := id + " " + space
+	s.cacheMu.Lock()
+	seen := s.vspaces[k]
+	if !seen {
+		if len(s.vspaces) >= 100_000 {
+			s.vspaces = map[string]bool{}
+		}
+		s.vspaces[k] = true
+	}
+	s.cacheMu.Unlock()
+	if !seen {
+		s.srv.Exec(`INSERT OR IGNORE INTO visitor_spaces (visitor, space) VALUES (?, ?)`, id, space)
+		s.srv.Exec(`UPDATE visitors SET stored = 1 WHERE id = ? AND stored = 0`, id)
+	}
 }
 
 // ---------- spaces ----------
 
-type spaceInfo struct {
-	exists  bool
-	seq     int64
-	locked  bool
-	keyHash string
-	floor   int64
-}
-
-func (s *Store) spaceInfo(q interface {
-	QueryRow(string, ...any) *sql.Row
-}, name string) (spaceInfo, error) {
-	var si spaceInfo
-	var kh sql.NullString
-	err := q.QueryRow(`SELECT seq, key_hash, tombstone_floor FROM spaces WHERE name = ?`, name).Scan(&si.seq, &kh, &si.floor)
-	if errors.Is(err, sql.ErrNoRows) {
-		// A space that doesn't exist acts as if its counter were the current
-		// time, but never below a version already handed out for that name.
-		si.seq = nowMs()
-		var g int64
-		if q.QueryRow(`SELECT seq FROM graveyard WHERE name = ?`, name).Scan(&g) == nil && g > si.seq {
-			si.seq = g
-		}
-		return si, nil
-	}
-	if err != nil {
-		return si, err
-	}
-	si.exists, si.locked, si.keyHash = true, kh.Valid, kh.String
-	return si, nil
-}
-
-func (s *Store) startSeq(tx *sql.Tx, name string) int64 {
-	seq := nowMs()
-	var g int64
-	if tx.QueryRow(`SELECT seq FROM graveyard WHERE name = ?`, name).Scan(&g) == nil && g > seq {
-		seq = g
-	}
-	return seq
-}
-
-func (s *Store) spaceCount(q interface {
-	QueryRow(string, ...any) *sql.Row
-}) (n int) {
-	q.QueryRow(`SELECT count(*) FROM spaces`).Scan(&n)
-	return
-}
-
 // createSpace makes a new empty space with a generated name. With locked it
 // also returns the space key.
 func (s *Store) createSpace(label string, locked bool) (name, key string, err error) {
-	s.wmu.Lock()
-	defer s.wmu.Unlock()
-	tx, err := s.db.Begin()
-	if err != nil {
-		return "", "", err
-	}
-	defer tx.Rollback()
-	if s.spaceCount(tx) >= s.cfg.Limits.MaxSpaces {
+	if s.spaceCount() >= s.cfg.Limits.MaxSpaces {
 		return "", "", errServerFull
 	}
 	for range 10 {
 		name = newSpaceName(label)
-		var x int
-		if tx.QueryRow(`SELECT 1 FROM spaces WHERE name = ?`, name).Scan(&x) == nil {
+		if s.spaceExists(name) {
 			continue
 		}
-		var kh any
+		kh := ""
 		if locked {
 			key = randomToken("sk_")
 			kh = hashSecret(key)
 		}
-		now := nowS()
-		if _, err = tx.Exec(`INSERT INTO spaces (name, seq, key_hash, created_at, last_active_at) VALUES (?, ?, ?, ?, ?)`,
-			name, s.startSeq(tx, name), kh, now, now); err != nil {
+		sp, created, err := s.acquire(name, true, kh)
+		if err != nil {
 			return "", "", err
 		}
-		return name, key, tx.Commit()
+		s.release(sp)
+		if created {
+			return name, key, nil
+		}
 	}
 	return "", "", errors.New("could not generate a free name")
 }
 
-// rekey locks a space or replaces its key. Used by admin.
+var errNoSpace = &apiError{Status: 404, Code: "not_found", Message: "No such space."}
+
+// rekey locks a space or replaces its key.
 func (s *Store) rekey(name string) (string, error) {
-	key := randomToken("sk_")
-	s.wmu.Lock()
-	defer s.wmu.Unlock()
-	res, err := s.db.Exec(`UPDATE spaces SET key_hash = ? WHERE name = ?`, hashSecret(key), name)
+	sp, _, err := s.acquire(name, false, "")
 	if err != nil {
 		return "", err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return "", fmt.Errorf("no space named %s", name)
+	if sp == nil {
+		return "", errNoSpace
 	}
+	defer s.release(sp)
+	key := randomToken("sk_")
+	sp.wmu.Lock()
+	err = setMeta(sp.db, "key_hash", hashSecret(key))
+	sp.wmu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	if st := s.stats[name]; st != nil {
+		st.locked = true
+	}
+	s.mu.Unlock()
 	return key, nil
+}
+
+// deleteSpace removes a space's file. Its counter is remembered, so a space
+// created later under the same name continues above it.
+func (s *Store) deleteSpace(name string) error {
+	for {
+		sp, _, err := s.acquire(name, false, "")
+		if err != nil {
+			return err
+		}
+		if sp == nil {
+			return errNoSpace
+		}
+		s.release(sp)
+		sp.gate.Lock()
+		if sp.dead {
+			sp.gate.Unlock()
+			continue
+		}
+		m, _ := readMeta(sp.db)
+		sp.dead = true
+		sp.db.Close()
+		s.mu.Lock()
+		delete(s.open, name)
+		if st := s.stats[name]; st != nil {
+			s.total -= st.bytes
+			delete(s.stats, name)
+		}
+		s.mu.Unlock()
+		path := s.spacePath(name)
+		for _, suf := range []string{"", "-wal", "-shm"} {
+			os.Remove(path + suf)
+		}
+		sp.gate.Unlock()
+
+		s.srv.Exec(`INSERT INTO graveyard (name, seq) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET seq = max(seq, excluded.seq)`, name, m.seq)
+		s.srv.Exec(`DELETE FROM visitor_spaces WHERE space = ?`, name)
+		s.cacheMu.Lock()
+		s.vbytes = map[string]int64{}
+		for k := range s.vspaces {
+			if strings.HasSuffix(k, " "+name) {
+				delete(s.vspaces, k)
+			}
+		}
+		s.cacheMu.Unlock()
+		s.onChange(name)
+		return nil
+	}
+}
+
+type spaceRow struct {
+	Name       string `json:"name"`
+	Locked     bool   `json:"locked"`
+	Pinned     bool   `json:"pinned"`
+	Bytes      int64  `json:"bytes"`
+	Keys       int    `json:"keys"`
+	LastActive int64  `json:"lastActive"`
+}
+
+func (s *Store) spaces() []spaceRow {
+	s.rescan()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]spaceRow, 0, len(s.stats))
+	for n, st := range s.stats {
+		out = append(out, spaceRow{Name: n, Locked: st.locked, Pinned: s.cfg.pinned(n), Bytes: st.bytes, Keys: st.keys, LastActive: st.lastActive})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // ---------- reads ----------
@@ -245,19 +735,27 @@ type Entry struct {
 	IsJSON  bool
 	Version int64
 	User    string
+	Writer  string
+	Area    string
 }
 
 func (s *Store) get(space, area, key string) (*Entry, error) {
+	sp, _, err := s.acquire(space, false, "")
+	if err != nil || sp == nil {
+		return nil, err
+	}
+	defer s.release(sp)
 	e := &Entry{Key: key}
-	err := s.db.QueryRow(`SELECT value, is_json, version FROM kv WHERE space = ? AND area = ? AND key = ? AND value IS NOT NULL`,
-		space, area, key).Scan(&e.Value, &e.IsJSON, &e.Version)
+	err = sp.db.QueryRow(`SELECT value, is_json, version FROM kv WHERE area = ? AND key = ? AND value IS NOT NULL`,
+		area, key).Scan(&e.Value, &e.IsJSON, &e.Version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	if err == nil {
-		s.touchSpace(space)
+	if err != nil {
+		return nil, err
 	}
-	return e, err
+	s.touchSpace(sp)
+	return e, nil
 }
 
 // target selects keys in an area. allUsers means users/*/.
@@ -271,12 +769,11 @@ type target struct {
 
 func (t target) where() (string, []any) {
 	var b strings.Builder
-	args := []any{t.space}
-	b.WriteString("space = ?")
+	var args []any
 	if t.allUsers {
-		b.WriteString(" AND area >= 'u:' AND area < 'u;'")
+		b.WriteString("area >= 'u:' AND area < 'u;'")
 	} else {
-		b.WriteString(" AND area = ?")
+		b.WriteString("area = ?")
 		args = append(args, t.area)
 	}
 	if t.pattern {
@@ -297,25 +794,46 @@ func scanEntries(rows *sql.Rows, allUsers bool) ([]Entry, error) {
 	var out []Entry
 	for rows.Next() {
 		var e Entry
-		var area string
-		if err := rows.Scan(&area, &e.Key, &e.Value, &e.IsJSON, &e.Version); err != nil {
+		if err := rows.Scan(&e.Area, &e.Key, &e.Value, &e.IsJSON, &e.Version); err != nil {
 			return nil, err
 		}
 		if allUsers {
-			e.User = strings.TrimPrefix(area, "u:")
+			e.User = strings.TrimPrefix(e.Area, "u:")
 		}
 		out = append(out, e)
 	}
 	return out, rows.Err()
 }
 
+// currentSeq is the space's counter, or the phantom counter if it doesn't exist.
+func (s *Store) currentSeq(space string) (int64, error) {
+	sp, _, err := s.acquire(space, false, "")
+	if err != nil {
+		return 0, err
+	}
+	if sp == nil {
+		return s.phantomSeq(space), nil
+	}
+	defer s.release(sp)
+	m, err := readMeta(sp.db)
+	return m.seq, err
+}
+
 // list returns live entries in key order, plus a cursor if there are more.
 func (s *Store) list(t target, after string, limit int, desc bool) (items []Entry, next string, version int64, err error) {
-	si, err := s.spaceInfo(s.db, t.space)
-	if err != nil || !si.exists {
-		return nil, "", si.seq, err
+	sp, _, err := s.acquire(t.space, false, "")
+	if err != nil {
+		return nil, "", 0, err
 	}
-	s.touchSpace(t.space)
+	if sp == nil {
+		return nil, "", s.phantomSeq(t.space), nil
+	}
+	defer s.release(sp)
+	s.touchSpace(sp)
+	m, err := readMeta(sp.db)
+	if err != nil {
+		return nil, "", 0, err
+	}
 	where, args := t.where()
 	where += " AND value IS NOT NULL"
 	cmp, ord := ">", "ASC"
@@ -332,7 +850,7 @@ func (s *Store) list(t target, after string, limit int, desc bool) (items []Entr
 		}
 	}
 	q := fmt.Sprintf(`SELECT area, key, value, is_json, version FROM kv WHERE %s ORDER BY key %s, area %s LIMIT ?`, where, ord, ord)
-	rows, err := s.db.Query(q, append(args, limit+1)...)
+	rows, err := sp.db.Query(q, append(args, limit+1)...)
 	if err != nil {
 		return nil, "", 0, err
 	}
@@ -348,7 +866,7 @@ func (s *Store) list(t target, after string, limit int, desc bool) (items []Entr
 			next += "/" + last.User
 		}
 	}
-	return items, next, si.seq, nil
+	return items, next, m.seq, nil
 }
 
 var errVersionExpired = errors.New("version expired")
@@ -356,16 +874,27 @@ var errVersionExpired = errors.New("version expired")
 // changes returns entries changed after version, ordered by version, at most
 // max+1 so the caller can tell whether there are more. It also returns the
 // space's current counter.
-func (s *Store) changes(t target, after int64, max int) ([]Entry, int64, error) {
-	si, err := s.spaceInfo(s.db, t.space)
+func (s *Store) changes(t target, after int64, limit int) ([]Entry, int64, error) {
+	sp, _, err := s.acquire(t.space, false, "")
 	if err != nil {
 		return nil, 0, err
 	}
-	if after > 0 && (after < si.floor || after > si.seq) {
-		return nil, si.seq, errVersionExpired
+	if sp == nil {
+		g := s.graveSeq(t.space)
+		seq := max(nowMs(), g+1)
+		// A version from before the space was deleted, or from the future.
+		if after > 0 && ((g > 0 && after <= g) || after > seq) {
+			return nil, seq, errVersionExpired
+		}
+		return nil, seq, nil
 	}
-	if !si.exists {
-		return nil, si.seq, nil
+	defer s.release(sp)
+	m, err := readMeta(sp.db)
+	if err != nil {
+		return nil, 0, err
+	}
+	if after > 0 && (after < m.floor || after > m.seq) {
+		return nil, m.seq, errVersionExpired
 	}
 	where, args := t.where()
 	where += " AND version > ?"
@@ -373,12 +902,39 @@ func (s *Store) changes(t target, after int64, max int) ([]Entry, int64, error) 
 	if after == 0 {
 		where += " AND value IS NOT NULL"
 	}
-	rows, err := s.db.Query(`SELECT area, key, value, is_json, version FROM kv WHERE `+where+` ORDER BY version LIMIT ?`, append(args, max+1)...)
+	rows, err := sp.db.Query(`SELECT area, key, value, is_json, version FROM kv WHERE `+where+` ORDER BY version LIMIT ?`, append(args, limit+1)...)
 	if err != nil {
 		return nil, 0, err
 	}
 	out, err := scanEntries(rows, t.allUsers)
-	return out, si.seq, err
+	return out, m.seq, err
+}
+
+// export returns every live entry with its area and writer.
+func (s *Store) export(space string, fn func(Entry) error) error {
+	sp, _, err := s.acquire(space, false, "")
+	if err != nil {
+		return err
+	}
+	if sp == nil {
+		return errNoSpace
+	}
+	defer s.release(sp)
+	rows, err := sp.db.Query(`SELECT area, key, value, is_json, version, writer FROM kv WHERE value IS NOT NULL ORDER BY area, key`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var e Entry
+		if err := rows.Scan(&e.Area, &e.Key, &e.Value, &e.IsJSON, &e.Version, &e.Writer); err != nil {
+			return err
+		}
+		if err := fn(e); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 // ---------- writes ----------
@@ -390,7 +946,7 @@ type writeReq struct {
 	writer           string
 	ifVersion        *int64
 	spaceKey         string
-	onCreate         func() error // called inside the transaction before a new space is created
+	onCreate         func() error // called before a write creates the space
 }
 
 type writeResult struct {
@@ -400,26 +956,53 @@ type writeResult struct {
 }
 
 func (s *Store) write(ctx context.Context, r writeReq) (res writeResult, err error) {
-	s.wmu.Lock()
-	defer s.wmu.Unlock()
-	tx, err := s.db.BeginTx(ctx, nil)
+	del := r.value == nil
+	// Counted before taking the space, since counting may open other spaces.
+	var vTotal int64
+	if !del {
+		if vTotal, err = s.visitorTotal(r.writer); err != nil {
+			return res, err
+		}
+	}
+
+	sp, _, err := s.acquire(r.space, false, "")
+	if err != nil {
+		return res, err
+	}
+	if sp == nil {
+		if del {
+			return res, errNotFound
+		}
+		if s.spaceCount() >= s.cfg.Limits.MaxSpaces {
+			return res, errServerFull
+		}
+		if r.onCreate != nil {
+			if err := r.onCreate(); err != nil {
+				return res, err
+			}
+		}
+		if sp, _, err = s.acquire(r.space, true, ""); err != nil {
+			return res, err
+		}
+	}
+	defer s.release(sp)
+
+	_, maxBytes, maxKeys := s.cfg.limitsFor(r.space)
+	now := nowS()
+
+	sp.wmu.Lock()
+	defer sp.wmu.Unlock()
+	tx, err := sp.db.BeginTx(ctx, nil)
 	if err != nil {
 		return res, err
 	}
 	defer tx.Rollback()
 
-	_, maxBytes, maxKeys := s.cfg.limitsFor(r.space)
-	now := nowS()
-	del := r.value == nil
-
-	si, err := s.spaceInfo(tx, r.space)
+	m, err := readMeta(tx)
 	if err != nil {
 		return res, err
 	}
-	if !si.exists && del {
-		return res, errNotFound
-	}
-	if si.locked && r.area == "s" && (r.spaceKey == "" || hashSecret(r.spaceKey) != si.keyHash) {
+	if m.keyHash != "" && r.area == "s" && (r.spaceKey == "" || hashSecret(r.spaceKey) != m.keyHash) {
 		return res, errSpaceLocked
 	}
 
@@ -430,8 +1013,8 @@ func (s *Store) write(ctx context.Context, r writeReq) (res writeResult, err err
 		size    int64
 		row     bool
 	}
-	err = tx.QueryRow(`SELECT value, version, writer, size FROM kv WHERE space = ? AND area = ? AND key = ?`,
-		r.space, r.area, r.key).Scan(&old.value, &old.version, &old.writer, &old.size)
+	err = tx.QueryRow(`SELECT value, version, writer, size FROM kv WHERE area = ? AND key = ?`,
+		r.area, r.key).Scan(&old.value, &old.version, &old.writer, &old.size)
 	if err == nil {
 		old.row = true
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -469,52 +1052,30 @@ func (s *Store) write(ctx context.Context, r writeReq) (res writeResult, err err
 		keysDelta = -1
 	}
 
-	// Quota checks only when growing.
-	if !si.exists {
-		if r.onCreate != nil {
-			if err := r.onCreate(); err != nil {
-				return res, err
-			}
-		}
-		if s.spaceCount(tx) >= s.cfg.Limits.MaxSpaces {
-			return res, errServerFull
-		}
-		si.seq = s.startSeq(tx, r.space)
-		if _, err := tx.Exec(`INSERT INTO spaces (name, seq, created_at, last_active_at) VALUES (?, ?, ?, ?)`, r.space, si.seq, now, now); err != nil {
-			return res, err
-		}
-	}
+	// Quotas apply only to growth.
 	if !del {
-		var sb int64
-		var sk int
-		tx.QueryRow(`SELECT bytes, keys FROM spaces WHERE name = ?`, r.space).Scan(&sb, &sk)
-		if keysDelta > 0 && sk+keysDelta > maxKeys {
-			return res, quotaErr("space_quota_exceeded", "The space has as many keys as it may hold.", int64(maxKeys), int64(sk))
+		if keysDelta > 0 && m.keys+keysDelta > maxKeys {
+			return res, quotaErr("space_quota_exceeded", "The space has as many keys as it may hold.", int64(maxKeys), int64(m.keys))
 		}
-		if spaceDelta > 0 && sb+spaceDelta > maxBytes {
-			return res, quotaErr("space_quota_exceeded", "The space is full.", maxBytes, sb)
+		if spaceDelta > 0 && m.bytes+spaceDelta > maxBytes {
+			return res, quotaErr("space_quota_exceeded", "The space is full.", maxBytes, m.bytes)
 		}
 		visitorDelta := newSize
 		if live && old.writer == r.writer {
 			visitorDelta -= oldSize
 		}
-		if visitorDelta > 0 {
-			var vb int64
-			tx.QueryRow(`SELECT bytes FROM visitors WHERE id = ?`, r.writer).Scan(&vb)
-			if lim := int64(s.cfg.Limits.MaxVisitorBytes); vb+visitorDelta > lim {
-				return res, quotaErr("visitor_quota_exceeded", "You have stored as much as one visitor may.", lim, vb)
-			}
+		if lim := int64(s.cfg.Limits.MaxVisitorBytes); visitorDelta > 0 && vTotal+visitorDelta > lim {
+			return res, quotaErr("visitor_quota_exceeded", "You have stored as much as one visitor may.", lim, vTotal)
 		}
-		if spaceDelta > 0 {
-			var total int64
-			tx.QueryRow(`SELECT coalesce(sum(bytes), 0) FROM spaces`).Scan(&total)
-			if total+spaceDelta > int64(s.cfg.Limits.MaxTotalBytes) {
-				return res, errServerFull
-			}
+		s.mu.Lock()
+		total := s.total
+		s.mu.Unlock()
+		if spaceDelta > 0 && total+spaceDelta > int64(s.cfg.Limits.MaxTotalBytes) {
+			return res, errServerFull
 		}
 	}
 
-	version := si.seq + 1
+	version := m.seq + 1
 	writer := r.writer
 	if del {
 		writer = old.writer
@@ -523,117 +1084,141 @@ func (s *Store) write(ctx context.Context, r writeReq) (res writeResult, err err
 	if !del {
 		val = r.value
 	}
-	if _, err := tx.Exec(`INSERT INTO kv (space, area, key, value, is_json, version, writer, size, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (space, area, key) DO UPDATE SET value = excluded.value, is_json = excluded.is_json,
+	if _, err := tx.Exec(`INSERT INTO kv (area, key, value, is_json, version, writer, size, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (area, key) DO UPDATE SET value = excluded.value, is_json = excluded.is_json,
 		version = excluded.version, writer = excluded.writer, size = excluded.size, updated_at = excluded.updated_at`,
-		r.space, r.area, r.key, val, r.isJSON, version, writer, newSize, now); err != nil {
+		r.area, r.key, val, r.isJSON, version, writer, newSize, now); err != nil {
 		return res, err
 	}
-	if _, err := tx.Exec(`UPDATE spaces SET seq = ?, bytes = bytes + ?, keys = keys + ?, last_active_at = ? WHERE name = ?`,
-		version, spaceDelta, keysDelta, now, r.space); err != nil {
-		return res, err
+	for k, v := range map[string]any{"seq": version, "bytes": m.bytes + spaceDelta, "keys": m.keys + keysDelta, "last_active_at": now} {
+		if err := setMeta(tx, k, v); err != nil {
+			return res, err
+		}
 	}
-	// Visitor usage: the old writer gives up the old bytes, the new writer
-	// takes the new ones. Tombstones belong to the space only.
+	// The old writer gives up the old bytes, the new writer takes the new
+	// ones. Tombstones count against the space only.
 	if live {
-		tx.Exec(`UPDATE visitors SET bytes = max(0, bytes - ?) WHERE id = ?`, oldSize, old.writer)
+		if _, err := tx.Exec(`UPDATE usage SET bytes = max(0, bytes - ?) WHERE writer = ?`, oldSize, old.writer); err != nil {
+			return res, err
+		}
 	}
 	if !del {
-		tx.Exec(`UPDATE visitors SET bytes = bytes + ?, stored = 1 WHERE id = ?`, newSize, r.writer)
+		if _, err := tx.Exec(`INSERT INTO usage (writer, bytes) VALUES (?, ?) ON CONFLICT (writer) DO UPDATE SET bytes = bytes + excluded.bytes`, r.writer, newSize); err != nil {
+			return res, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return res, err
 	}
+	sp.metaActive = now
+
+	s.mu.Lock()
+	if st := s.stats[r.space]; st != nil {
+		st.bytes += spaceDelta
+		st.keys += keysDelta
+		st.lastActive = now
+	}
+	s.total += spaceDelta
+	s.mu.Unlock()
+	if live {
+		s.adjustVisitor(old.writer, -oldSize)
+	}
+	if !del {
+		s.adjustVisitor(r.writer, newSize)
+		s.noteVisitorSpace(r.writer, r.space)
+	}
 	return writeResult{version: version, created: !live, changed: true}, nil
 }
 
-// ---------- admin and cleanup ----------
+// ---------- cleanup ----------
 
-type spaceRow struct {
-	Name       string
-	Locked     bool
-	Bytes      int64
-	Keys       int
-	LastActive int64
-	Created    int64
+type cleanupReport struct {
+	Visitors   int `json:"visitors"`
+	Tombstones int `json:"tombstones"`
+	Spaces     int `json:"spaces"`
 }
 
-func (s *Store) spaces() ([]spaceRow, error) {
-	rows, err := s.db.Query(`SELECT name, key_hash IS NOT NULL, bytes, keys, last_active_at, created_at FROM spaces ORDER BY name`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []spaceRow
-	for rows.Next() {
-		var r spaceRow
-		if err := rows.Scan(&r.Name, &r.Locked, &r.Bytes, &r.Keys, &r.LastActive, &r.Created); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
-// deleteSpaceTx removes a space and gives its bytes back to the visitors who
-// wrote them. It remembers the counter so a recreated space continues above it.
-func deleteSpaceTx(tx *sql.Tx, name string) error {
-	var seq int64
-	if err := tx.QueryRow(`SELECT seq FROM spaces WHERE name = ?`, name).Scan(&seq); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("no space named %s", name)
-		}
+// dropVisitorRows removes a visitor's data from one space. Their users/ keys
+// become tombstones so watchers see them go; me/ rows just disappear.
+func (s *Store) dropVisitorRows(space, id string) error {
+	sp, _, err := s.acquire(space, false, "")
+	if err != nil || sp == nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE visitors SET bytes = max(0, bytes - (SELECT coalesce(sum(size), 0) FROM kv
-		WHERE kv.space = ? AND kv.writer = visitors.id AND kv.value IS NOT NULL))
-		WHERE id IN (SELECT DISTINCT writer FROM kv WHERE space = ?)`, name, name); err != nil {
-		return err
-	}
-	stmts := []struct {
-		q    string
-		args []any
-	}{
-		{`DELETE FROM kv WHERE space = ?`, []any{name}},
-		{`DELETE FROM spaces WHERE name = ?`, []any{name}},
-		{`INSERT INTO graveyard (name, seq) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET seq = max(seq, excluded.seq)`, []any{name, seq}},
-	}
-	for _, st := range stmts {
-		if _, err := tx.Exec(st.q, st.args...); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *Store) deleteSpace(name string) error {
-	s.wmu.Lock()
-	defer s.wmu.Unlock()
-	tx, err := s.db.Begin()
+	defer s.release(sp)
+	sp.wmu.Lock()
+	defer sp.wmu.Unlock()
+	tx, err := sp.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := deleteSpaceTx(tx, name); err != nil {
+	m, err := readMeta(tx)
+	if err != nil {
 		return err
 	}
-	return tx.Commit()
-}
-
-type cleanupReport struct {
-	Visitors, Tombstones, Spaces int
+	rows, err := tx.Query(`SELECT area, key, size, value IS NOT NULL FROM kv WHERE area IN (?, ?)`, "u:"+id, "m:"+id)
+	if err != nil {
+		return err
+	}
+	type row struct {
+		area, key string
+		size      int64
+		live      bool
+	}
+	var rs []row
+	for rows.Next() {
+		var r row
+		rows.Scan(&r.area, &r.key, &r.size, &r.live)
+		rs = append(rs, r)
+	}
+	rows.Close()
+	now := nowS()
+	seq, bytesD, keysD, changed := m.seq, int64(0), 0, false
+	for _, r := range rs {
+		if r.live {
+			keysD--
+		}
+		if strings.HasPrefix(r.area, "u:") && r.live {
+			seq++
+			bytesD += int64(len(r.key)) - r.size
+			tx.Exec(`UPDATE kv SET value = NULL, version = ?, size = ?, updated_at = ? WHERE area = ? AND key = ?`, seq, len(r.key), now, r.area, r.key)
+			changed = true
+		} else {
+			bytesD -= r.size
+			tx.Exec(`DELETE FROM kv WHERE area = ? AND key = ?`, r.area, r.key)
+		}
+	}
+	tx.Exec(`DELETE FROM usage WHERE writer = ?`, id)
+	for k, v := range map[string]any{"seq": seq, "bytes": m.bytes + bytesD, "keys": m.keys + keysD} {
+		setMeta(tx, k, v)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if st := s.stats[space]; st != nil {
+		st.bytes += bytesD
+		st.keys += keysD
+	}
+	s.total += bytesD
+	s.mu.Unlock()
+	if changed {
+		s.onChange(space)
+	}
+	return nil
 }
 
 func (s *Store) cleanup() (rep cleanupReport, err error) {
 	now := nowS()
 	r := s.cfg.Retention
-	s.wmu.Lock()
-	defer s.wmu.Unlock()
+	secs := func(d Duration) int64 { return int64(time.Duration(d).Seconds()) }
+	s.rescan()
 
 	// 1. Visitors past their idle time, with their users/ and me/ data.
-	rows, err := s.db.Query(`SELECT id FROM visitors WHERE last_seen_at < ? OR (stored = 0 AND last_seen_at < ?)`,
-		now-int64(time.Duration(r.VisitorIdleTTL).Seconds()), now-int64(time.Duration(r.EmptyVisitorIdleTTL).Seconds()))
+	rows, err := s.srv.Query(`SELECT id FROM visitors WHERE last_seen_at < ? OR (stored = 0 AND last_seen_at < ?)`,
+		now-secs(r.VisitorIdleTTL), now-secs(r.EmptyVisitorIdleTTL))
 	if err != nil {
 		return rep, err
 	}
@@ -645,82 +1230,105 @@ func (s *Store) cleanup() (rep cleanupReport, err error) {
 	}
 	rows.Close()
 	for _, id := range ids {
-		tx, err := s.db.Begin()
+		srows, err := s.srv.Query(`SELECT space FROM visitor_spaces WHERE visitor = ?`, id)
 		if err != nil {
 			return rep, err
 		}
-		areas := []any{"u:" + id, "m:" + id}
-		tx.Exec(`UPDATE spaces SET
-			bytes = bytes - (SELECT coalesce(sum(size), 0) FROM kv WHERE kv.space = spaces.name AND kv.area IN (?, ?)),
-			keys = keys - (SELECT count(*) FROM kv WHERE kv.space = spaces.name AND kv.area IN (?, ?) AND kv.value IS NOT NULL)
-			WHERE name IN (SELECT DISTINCT space FROM kv WHERE area IN (?, ?))`, append(append(areas, areas...), areas...)...)
-		tx.Exec(`DELETE FROM kv WHERE area IN (?, ?)`, areas...)
-		tx.Exec(`DELETE FROM visitors WHERE id = ?`, id)
-		if err := tx.Commit(); err != nil {
-			tx.Rollback()
-			return rep, err
+		var spaces []string
+		for srows.Next() {
+			var n string
+			srows.Scan(&n)
+			spaces = append(spaces, n)
 		}
+		srows.Close()
+		for _, sp := range spaces {
+			if err := s.dropVisitorRows(sp, id); err != nil {
+				return rep, err
+			}
+		}
+		s.srv.Exec(`DELETE FROM visitor_spaces WHERE visitor = ?`, id)
+		s.srv.Exec(`DELETE FROM visitors WHERE id = ?`, id)
+		s.cacheMu.Lock()
+		delete(s.vbytes, id)
+		delete(s.vtouched, id)
+		s.cacheMu.Unlock()
 		rep.Visitors++
 	}
 
-	// 2. Old tombstones. The space remembers the highest removed version.
-	cut := now - int64(time.Duration(r.TombstoneTTL).Seconds())
-	tx, err := s.db.Begin()
-	if err != nil {
-		return rep, err
-	}
-	tx.Exec(`UPDATE spaces SET
-		tombstone_floor = max(tombstone_floor, (SELECT coalesce(max(version), 0) FROM kv WHERE kv.space = spaces.name AND value IS NULL AND updated_at < ?)),
-		bytes = bytes - (SELECT coalesce(sum(size), 0) FROM kv WHERE kv.space = spaces.name AND value IS NULL AND updated_at < ?)
-		WHERE name IN (SELECT DISTINCT space FROM kv WHERE value IS NULL AND updated_at < ?)`, cut, cut, cut)
-	res, _ := tx.Exec(`DELETE FROM kv WHERE value IS NULL AND updated_at < ?`, cut)
-	if n, err := res.RowsAffected(); err == nil {
-		rep.Tombstones = int(n)
-	}
-	if err := tx.Commit(); err != nil {
-		tx.Rollback()
-		return rep, err
-	}
-
-	// 3. Idle spaces, unless pinned.
-	idle := now - int64(time.Duration(r.SpaceIdleTTL).Seconds())
-	rows, err = s.db.Query(`SELECT name FROM spaces WHERE last_active_at < ?`, idle)
-	if err != nil {
-		return rep, err
-	}
-	var names []string
-	for rows.Next() {
-		var n string
-		rows.Scan(&n)
-		if !s.cfg.pinned(n) {
+	// 2. Idle spaces, unless pinned.
+	idle := now - secs(r.SpaceIdleTTL)
+	var names, all []string
+	s.mu.Lock()
+	for n, st := range s.stats {
+		all = append(all, n)
+		if st.lastActive < idle && !s.cfg.pinned(n) {
 			names = append(names, n)
 		}
 	}
-	rows.Close()
+	s.mu.Unlock()
 	for _, n := range names {
-		tx, err := s.db.Begin()
+		if err := s.deleteSpace(n); err == nil {
+			rep.Spaces++
+		}
+	}
+
+	// 3. Old tombstones, then compact. The space remembers the highest
+	// removed version as its floor.
+	cut := now - secs(r.TombstoneTTL)
+	for _, n := range all {
+		k, err := s.compactSpace(n, cut)
 		if err != nil {
 			return rep, err
 		}
-		if err := deleteSpaceTx(tx, n); err != nil {
-			tx.Rollback()
-			return rep, err
-		}
-		if err := tx.Commit(); err != nil {
-			return rep, err
-		}
-		rep.Spaces++
+		rep.Tombstones += k
 	}
 
-	s.db.Exec(`PRAGMA incremental_vacuum`)
-	s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
-
-	s.touchMu.Lock()
-	for k, t := range s.touched {
+	s.cacheMu.Lock()
+	for k, t := range s.vtouched {
 		if now-t > 3600 {
-			delete(s.touched, k)
+			delete(s.vtouched, k)
 		}
 	}
-	s.touchMu.Unlock()
+	s.cacheMu.Unlock()
 	return rep, nil
+}
+
+func (s *Store) compactSpace(name string, cut int64) (int, error) {
+	sp, _, err := s.acquire(name, false, "")
+	if err != nil || sp == nil {
+		return 0, err
+	}
+	defer s.release(sp)
+	sp.wmu.Lock()
+	defer sp.wmu.Unlock()
+	tx, err := sp.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var n int
+	var maxV, size int64
+	tx.QueryRow(`SELECT count(*), coalesce(max(version), 0), coalesce(sum(size), 0) FROM kv WHERE value IS NULL AND updated_at < ?`, cut).Scan(&n, &maxV, &size)
+	if n == 0 {
+		return 0, nil
+	}
+	m, err := readMeta(tx)
+	if err != nil {
+		return 0, err
+	}
+	tx.Exec(`DELETE FROM kv WHERE value IS NULL AND updated_at < ?`, cut)
+	setMeta(tx, "tombstone_floor", max(m.floor, maxV))
+	setMeta(tx, "bytes", m.bytes-size)
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	if st := s.stats[name]; st != nil {
+		st.bytes -= size
+	}
+	s.total -= size
+	s.mu.Unlock()
+	sp.db.Exec(`PRAGMA incremental_vacuum`)
+	sp.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	return n, nil
 }

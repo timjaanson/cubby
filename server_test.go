@@ -2,17 +2,22 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
 type tc struct {
-	t   *testing.T
-	url string
+	t     *testing.T
+	url   string
+	store *Store
+	cfg   *Config
 }
 
 func newTest(t *testing.T) *tc {
@@ -26,7 +31,7 @@ func newTest(t *testing.T) *tc {
 	}
 	ts := httptest.NewServer(newServer(cfg, store, nil))
 	t.Cleanup(func() { ts.Close(); store.Close() })
-	return &tc{t: t, url: ts.URL}
+	return &tc{t: t, url: ts.URL, store: store, cfg: cfg}
 }
 
 func (c *tc) req(method, path, body string, hdr ...string) (int, http.Header, string) {
@@ -294,6 +299,13 @@ func TestListAndWatch(t *testing.T) {
 		t.Fatal("watch didn't wake")
 	}
 
+	// A snapshot of nothing returns at once.
+	start := time.Now()
+	_, _, body = c.req("GET", "/v1/none-k7m2x9q4/shared/*/watch?version=0", "")
+	if time.Since(start) > time.Second || !strings.Contains(body, `"changes":[]`) {
+		t.Fatalf("empty snapshot: %s after %s", body, time.Since(start))
+	}
+
 	// Timeout returns empty changes.
 	_, _, body = c.req("GET", sp+"/shared/msg.*/watch?timeout=1", "")
 	if !strings.Contains(body, `"changes":[]`) {
@@ -308,4 +320,122 @@ func TestListAndWatch(t *testing.T) {
 func itoa(n int64) string {
 	b, _ := json.Marshal(n)
 	return string(b)
+}
+
+func TestSpaceFiles(t *testing.T) {
+	c := newTest(t)
+	tok, _ := c.anon()
+	a := []string{"Authorization", "Bearer " + tok}
+	sp := "chat-k7m2x9q4"
+	file := filepath.Join(c.cfg.Server.DataDir, "spaces", sp+".db")
+
+	// Reads don't create a file, writes do.
+	c.req("GET", "/v1/"+sp+"/shared/x", "")
+	if _, err := os.Stat(file); err == nil {
+		t.Fatal("read created a space file")
+	}
+	c.req("PUT", "/v1/"+sp+"/shared/x", "1", a...)
+	if _, err := os.Stat(file); err != nil {
+		t.Fatal("write didn't create the space file")
+	}
+	_, _, body := c.req("GET", "/v1/"+sp+"/shared/*/watch?version=0", "")
+	var w struct{ Version int64 }
+	json.Unmarshal([]byte(body), &w)
+
+	// Deleting the space wakes watchers with 410, and removes the file.
+	done := make(chan int)
+	go func() {
+		s, _, _ := c.req("GET", fmt.Sprintf("/v1/%s/shared/*/watch?timeout=5&version=%d", sp, w.Version), "")
+		done <- s
+	}()
+	time.Sleep(200 * time.Millisecond)
+	if err := c.store.deleteSpace(sp); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case s := <-done:
+		if s != 410 {
+			t.Fatalf("watch after delete: %d", s)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("watch didn't wake on delete")
+	}
+	if _, err := os.Stat(file); err == nil {
+		t.Fatal("file still there")
+	}
+
+	// A recreated space continues above the old counter, and old watchers start over.
+	_, h, _ := c.req("PUT", "/v1/"+sp+"/shared/x", "2", a...)
+	if v := parseInt(h.Get("ETag")); v <= w.Version {
+		t.Fatalf("recreated version %d not above %d", v, w.Version)
+	}
+	if s, _, _ := c.req("GET", fmt.Sprintf("/v1/%s/shared/*/watch?version=%d", sp, w.Version), ""); s != 410 {
+		t.Fatalf("old version on recreated space: %d", s)
+	}
+}
+
+func TestCopiedSpaceFile(t *testing.T) {
+	src := newTest(t)
+	tok, _ := src.anon()
+	sp := "moved-k7m2x9q4"
+	src.req("PUT", "/v1/"+sp+"/shared/greeting", "hello", "Authorization", "Bearer "+tok)
+	src.store.Close()
+
+	dst := newTest(t)
+	b, err := os.ReadFile(filepath.Join(src.cfg.Server.DataDir, "spaces", sp+".db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dst.cfg.Server.DataDir, "spaces", sp+".db"), b, 0o600)
+	if _, _, body := dst.req("GET", "/v1/"+sp+"/shared/greeting", ""); body != "hello" {
+		t.Fatalf("copied space: %q", body)
+	}
+	found := false
+	for _, r := range dst.store.spaces() {
+		found = found || (r.Name == sp && r.Keys == 1)
+	}
+	if !found {
+		t.Fatal("copied space not listed")
+	}
+}
+
+func TestVisitorQuotaAcrossSpaces(t *testing.T) {
+	c := newTest(t)
+	c.cfg.Limits.MaxVisitorBytes = 100
+	tok, _ := c.anon()
+	a := []string{"Authorization", "Bearer " + tok}
+	v := strings.Repeat("x", 40)
+	c.req("PUT", "/v1/one-k7m2x9q4/shared/k", v, a...)
+	c.store.cacheMu.Lock()
+	c.store.vbytes = map[string]int64{} // force a recount from the space files
+	c.store.cacheMu.Unlock()
+	c.req("PUT", "/v1/two-k7m2x9q4/shared/k", v, a...)
+	if s, _, body := c.req("PUT", "/v1/three-k7m2x9q4/shared/k", v, a...); s != 507 || errCode(body) != "visitor_quota_exceeded" {
+		t.Fatalf("quota: %d %s", s, body)
+	}
+}
+
+func TestManySpacesEvict(t *testing.T) {
+	c := newTest(t)
+	c.cfg.Server.RateLimits = new(bool)
+	tok, _ := c.anon()
+	a := []string{"Authorization", "Bearer " + tok}
+	for i := range maxOpenSpaces + 20 {
+		c.req("PUT", fmt.Sprintf("/v1/s%03d-k7m2x9q4/shared/k", i), "v", a...)
+	}
+	c.store.mu.Lock()
+	open := len(c.store.open)
+	c.store.mu.Unlock()
+	if open > maxOpenSpaces {
+		t.Fatalf("%d files open", open)
+	}
+	if _, _, body := c.req("GET", "/v1/s000-k7m2x9q4/shared/k", ""); body != "v" {
+		t.Fatalf("evicted space: %q", body)
+	}
+}
+
+func parseInt(s string) int64 {
+	var n int64
+	fmt.Sscan(strings.Trim(s, `"`), &n)
+	return n
 }
