@@ -201,10 +201,14 @@ func cmdAdmin(args []string) int {
 		fmt.Print(adminUsage)
 		return 64
 	}
-	dataDir := firstNonEmpty(f.str("data"), defaultDataDir())
+	dataDir, err := findDataDir(f.str("data"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "tiny-kv: server_not_running:", err)
+		return 6
+	}
 	sock := adminSocketPath(dataDir)
 	if err := os.Chdir(dataDir); err != nil {
-		fmt.Fprintf(os.Stderr, "tiny-kv: server_not_running: no tiny-kv data in %s. Start the server with 'tiny-kv serve', or pass --data DIR.\n", dataDir)
+		fmt.Fprintf(os.Stderr, "tiny-kv: server_not_running: can't open %s: %v\n", dataDir, err)
 		return 6
 	}
 	hc := &http.Client{

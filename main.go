@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -90,11 +89,14 @@ func cmdServe(args []string) int {
 	if v := f.str("listen"); v != "" {
 		cfg.Server.Listen = v
 	}
-	if v := f.str("data"); v != "" {
-		cfg.Server.DataDir = v
+	dir, note, err := resolveDataDir(f.str("data"), cfg.Server.DataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "tiny-kv:", err)
+		return 6
 	}
-	if abs, err := filepath.Abs(cfg.Server.DataDir); err == nil {
-		cfg.Server.DataDir = abs
+	cfg.Server.DataDir = dir
+	if note != "" {
+		log.Printf("note: %s", note)
 	}
 	store, err := openStore(cfg)
 	if err != nil {

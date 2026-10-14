@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -94,55 +92,12 @@ type Config struct {
 	trusted []netip.Prefix
 }
 
-// defaultDataDir picks where a server keeps its data when nothing is set,
-// following each OS's convention:
-//
-//	TINY_KV_DATA                 if set
-//	$STATE_DIRECTORY             under systemd with StateDirectory=
-//	/var/lib/tiny-kv             Linux, running as root
-//	$XDG_DATA_HOME/tiny-kv       if set
-//	~/Library/Application Support/tiny-kv   macOS
-//	%LOCALAPPDATA%\tiny-kv       Windows
-//	~/.local/share/tiny-kv       Linux and other Unix
-//
-// The directory is created on first start.
-func defaultDataDir() string {
-	if d := os.Getenv("TINY_KV_DATA"); d != "" {
-		return d
-	}
-	if d := os.Getenv("STATE_DIRECTORY"); d != "" {
-		d, _, _ = strings.Cut(d, ":")
-		return d
-	}
-	if runtime.GOOS == "linux" && os.Geteuid() == 0 {
-		return "/var/lib/tiny-kv"
-	}
-	if x := os.Getenv("XDG_DATA_HOME"); x != "" && runtime.GOOS != "windows" {
-		return filepath.Join(x, "tiny-kv")
-	}
-	switch runtime.GOOS {
-	case "windows":
-		if d := os.Getenv("LOCALAPPDATA"); d != "" {
-			return filepath.Join(d, "tiny-kv")
-		}
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "tiny-kv-data"
-	}
-	if runtime.GOOS == "darwin" {
-		return filepath.Join(home, "Library", "Application Support", "tiny-kv")
-	}
-	return filepath.Join(home, ".local", "share", "tiny-kv")
-}
-
 func defaultConfig() *Config {
 	c := &Config{}
 	c.Server.Listen = ":8080"
 	if l := os.Getenv("TINY_KV_LISTEN"); l != "" {
 		c.Server.Listen = l
 	}
-	c.Server.DataDir = defaultDataDir()
 	c.Server.TrustedProxies = []string{"127.0.0.1/32", "::1/128"}
 	c.Retention.VisitorIdleTTL = Duration(365 * 24 * time.Hour)
 	c.Retention.EmptyVisitorIdleTTL = Duration(30 * 24 * time.Hour)

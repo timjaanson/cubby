@@ -379,7 +379,7 @@ var commandFlags = map[string]struct {
 func cmdHelp(cmd string) int {
 	switch cmd {
 	case "serve":
-		fmt.Printf("serve [--listen :8080] [--data DIR] [--config FILE] [--quiet]\n  Run the server. Env: TINY_KV_LISTEN, TINY_KV_DATA, TINY_KV_CONFIG.\n  Data goes in %s by default, created if missing.\n", defaultDataDir())
+		fmt.Printf("serve [--listen :8080] [--data DIR] [--config FILE] [--quiet]\n  Run the server. Env: TINY_KV_LISTEN, TINY_KV_DATA, TINY_KV_CONFIG.\n  Data goes in %s, created if missing.\n", previewDataDir())
 		return 0
 	case "admin":
 		fmt.Print(adminUsage)

@@ -177,15 +177,21 @@ max_value_size = "256KB"
 
 ## Where data lives
 
-Without `--data` or `TINY_KV_DATA`, the server picks the first that applies, and creates it if it's missing:
+If you name a directory, with `--data`, `TINY_KV_DATA`, `data_dir` in the config file, or systemd's `StateDirectory=`, the server uses it. If it can't write there, it stops and says why, with no silent fallback.
 
-| Situation | Directory |
-|---|---|
-| under systemd with `StateDirectory=` | `$STATE_DIRECTORY` |
-| Linux, running as root | `/var/lib/tiny-kv` |
-| `XDG_DATA_HOME` is set | `$XDG_DATA_HOME/tiny-kv` |
-| macOS | `~/Library/Application Support/tiny-kv` |
-| Linux and other Unix | `~/.local/share/tiny-kv` |
+Otherwise it works out a place on its own, so any user can just run the binary:
+
+| Order | Directory | When |
+|---|---|---|
+| 1 | `/var/lib/tiny-kv` (Linux), `/Library/Application Support/tiny-kv` (macOS) | running as root |
+| 2 | `~/Library/Application Support/tiny-kv` (macOS), `~/.local/share/tiny-kv` (Linux), or `$XDG_DATA_HOME/tiny-kv` | a normal user |
+| 3 | `./tiny-kv-data` in the current directory | no writable home, as for service accounts and containers with a random UID |
+
+- A directory that already has data wins, so a later run never starts empty next to existing data.
+- Otherwise the first directory that can actually be created and written is used. The directory is private to the user (mode 0700).
+- When it falls back, the server logs which places it skipped and why.
+- If nothing is writable, it says so and asks for `--data`. It never uses a temporary directory, where data would quietly disappear.
+- `tiny-kv admin` looks in the same places, so it finds the server's data without flags when run as the same user.
 
 `tiny-kv help serve` prints the one it would use. Inside it:
 
