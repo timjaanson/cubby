@@ -49,7 +49,7 @@ func (s *Server) AdminHandler() http.Handler {
 	}
 	space := func(w http.ResponseWriter, r *http.Request) (string, bool) {
 		name := r.PathValue("space")
-		if !names.ValidSpace(name) {
+		if !names.StoredSpace(name) {
 			fail(w, r, &apierr.Error{Status: 400, Code: "invalid_space", Message: name + " isn't a valid space name."})
 			return "", false
 		}

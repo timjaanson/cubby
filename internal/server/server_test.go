@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -503,5 +504,42 @@ func TestQuietRoutes(t *testing.T) {
 	json.Unmarshal([]byte(b), &h)
 	if s != 200 || !h.OK || h.Version == "" {
 		t.Fatalf("health: %d %s", s, b)
+	}
+}
+
+// Spaces created before v0.8.0 have names the API no longer accepts. They
+// must not break anything for the visitors who wrote to them.
+func TestLegacySpaceNames(t *testing.T) {
+	c := newTest(t)
+	tok, id := c.anon()
+	a := []string{"Authorization", "Bearer " + tok}
+	const old = "test-k7m2x9q4"
+	if _, err := c.store.Write(context.Background(), store.WriteReq{Space: old, Area: "s", Key: "a", Value: []byte("hi"), Writer: id}); err != nil {
+		t.Fatal(err)
+	}
+	// The visitor's usage is summed over every space it wrote to, the old one included.
+	if s, _, b := c.req("PUT", "/v1/crop-turkey-salie-toxic/shared/lul", "ayyy", a...); s != 201 {
+		t.Fatalf("write after an old-name space: %d %s", s, b)
+	}
+	// The API refuses the old name itself.
+	if s, _, b := c.req("GET", "/v1/"+old+"/shared/a", ""); s != 400 || errCode(b) != "invalid_space" {
+		t.Fatalf("old name over the API: %d %s", s, b)
+	}
+	// Admin still sees it and can delete it.
+	found := false
+	for _, r := range c.store.Spaces() {
+		found = found || r.Name == old
+	}
+	if !found {
+		t.Fatal("old-name space missing from the admin list")
+	}
+	srv := New(c.cfg, c.store, nil)
+	rec := httptest.NewRecorder()
+	srv.AdminHandler().ServeHTTP(rec, httptest.NewRequest("DELETE", "/spaces/"+old, nil))
+	if rec.Code != 200 {
+		t.Fatalf("admin delete: %d %s", rec.Code, rec.Body)
+	}
+	if s, _, b := c.req("PUT", "/v1/crop-turkey-salie-toxic/shared/lul", "again", a...); s != 200 {
+		t.Fatalf("write after deleting the old space: %d %s", s, b)
 	}
 }

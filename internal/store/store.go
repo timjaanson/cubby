@@ -129,7 +129,7 @@ func nowS() int64  { return time.Now().Unix() }
 // spacePath maps a space to its file. Names are checked here as well as in
 // the router, so no caller can ever produce a path outside spaces/.
 func (s *Store) spacePath(name string) string {
-	if !names.ValidSpace(name) {
+	if !names.StoredSpace(name) {
 		panic("cubby: unchecked space name " + strconv.Quote(name))
 	}
 	return filepath.Join(s.dir, "spaces", name+".db")

@@ -51,6 +51,15 @@ func ValidSpace(name string) bool {
 	return len(name) >= MinSpace && len(name) <= MaxSpace && spaceRe.MatchString(name)
 }
 
+// StoredSpace checks the looser rule for names already on disk: the same
+// characters, 1 to 63 long. Spaces created before v0.8.0 have shorter names
+// like poll-k7m2x9q4. The API refuses them, but the store, cleanup and admin
+// still open, count, list, export and delete them. The characters alone keep
+// a name safe as a file name.
+func StoredSpace(name string) bool {
+	return len(name) >= 1 && len(name) <= MaxSpace && spaceRe.MatchString(name)
+}
+
 // ValidLabel checks a label: the same characters as a space name, at most
 // MaxLabel long.
 func ValidLabel(l string) bool {

@@ -154,7 +154,7 @@ func Load(path string) (*Config, error) {
 	}
 	for name := range c.Spaces {
 		if !names.ValidSpace(name) {
-			return nil, fmt.Errorf("config: pinned space %q is not a valid name", name)
+			return nil, fmt.Errorf("config: pinned space %q is not a valid name (16 to 63 lowercase letters, digits and single hyphens)", name)
 		}
 	}
 	return c, nil

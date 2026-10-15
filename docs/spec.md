@@ -58,6 +58,7 @@ Contents:
 
 - Anyone using the same name uses the same space. The name is the only thing between a stranger and an open space's `shared/` and `users/` data, so how hard it is to guess matters.
 - The server only checks length and characters. A hand-picked name like `team-lunch-dashboard` is valid and as easy to guess as it looks. For privacy, let cubby generate the name.
+- Spaces created before v0.8.0 can have shorter names like `poll-k7m2x9q4`. The API refuses those names, but the server keeps the spaces: they still count toward their writers' quotas, show in `cubby admin spaces`, can be exported or deleted with `cubby admin`, and are cleaned up after 180 days idle like any space.
 - Words like `anon`, `spaces` or `whoami` can never be valid names, so system routes can't collide with spaces.
 - An invalid name returns 400 `invalid_space` with a `suggestion`: a valid name built from it, such as `poll-slate-hinge-cocoa-pilot` for `poll`.
 
