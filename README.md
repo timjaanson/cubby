@@ -1,4 +1,4 @@
-# tiny-kv
+# cubby
 
 A key-value store you run yourself, in one binary. Pages, scripts and anything else that can make an HTTP request use it to read and write small values. There's no setup per use and no login.
 
@@ -7,7 +7,7 @@ The same binary is the server and a command-line client.
 ## Run it
 
 ```sh
-./tiny-kv serve
+./cubby serve
 ```
 
 That's the whole setup. It listens on port 8080 and keeps its data in the usual place for your OS (see [Where data lives](#where-data-lives)), creating the directory on first start. No config file is needed.
@@ -15,33 +15,33 @@ That's the whole setup. It listens on port 8080 and keeps its data in the usual 
 Try it from another terminal:
 
 ```sh
-$ tiny-kv set notes-k7m2x9q4/shared/hello "Hello there"
+$ cubby set notes-k7m2x9q4/shared/hello "Hello there"
 1792005858928
 
-$ tiny-kv get notes-k7m2x9q4/shared/hello
+$ cubby get notes-k7m2x9q4/shared/hello
 Hello there
 
 $ curl http://localhost:8080/v1/notes-k7m2x9q4/shared/hello
 Hello there
 ```
 
-`notes-k7m2x9q4` is a space: a readable label plus 8 random characters. Make one up with `tiny-kv name notes`. Writing to a space creates it.
+`notes-k7m2x9q4` is a space: a readable label plus 8 random characters. Make one up with `cubby name notes`. Writing to a space creates it.
 
 ## Install
 
-Pick the binary for your machine from `dist/` (or build it, see below), put it on your `PATH` and name it `tiny-kv`:
+Pick the binary for your machine from `dist/` (or build it, see below), put it on your `PATH` and name it `cubby`:
 
 | File | For |
 |---|---|
-| `tiny-kv-macos` | any Mac, Apple Silicon or Intel |
-| `tiny-kv-linux-amd64` | most Linux servers and PCs |
-| `tiny-kv-linux-arm64` | Raspberry Pi 4 or 5 with a 64-bit OS, ARM servers |
+| `cubby-macos` | any Mac, Apple Silicon or Intel |
+| `cubby-linux-amd64` | most Linux servers and PCs |
+| `cubby-linux-arm64` | Raspberry Pi 4 or 5 with a 64-bit OS, ARM servers |
 
 ```sh
-install -m 755 tiny-kv-linux-amd64 /usr/local/bin/tiny-kv
+install -m 755 cubby-linux-amd64 /usr/local/bin/cubby
 ```
 
-On a Mac, a binary downloaded through a browser is quarantined. Clear that once with `xattr -d com.apple.quarantine tiny-kv`.
+On a Mac, a binary downloaded through a browser is quarantined. Clear that once with `xattr -d com.apple.quarantine cubby`.
 
 ## How data is organised
 
@@ -64,49 +64,49 @@ space                 notes-k7m2x9q4
 Paths mirror the URL after `/v1/`. Quote paths with `*`.
 
 ```sh
-tiny-kv get   notes-k7m2x9q4/shared/hello
-tiny-kv set   notes-k7m2x9q4/shared/hello "new text"       # or pipe the value on stdin
-tiny-kv del   notes-k7m2x9q4/shared/hello
-tiny-kv ls    'notes-k7m2x9q4/shared/msg.*'                # key<TAB>value per line
-tiny-kv ls    'poll-9d24vw6e/users/*/vote'                 # user<TAB>key<TAB>value
-tiny-kv set   poll-9d24vw6e/users/me/vote tacos            # users/me is your own ID
-tiny-kv watch notes-k7m2x9q4/shared/hello                  # current value, then each change
-tiny-kv update homelab-4m8q2xk7/shared/count --exec 'jq "(. // 0) + 1"'
-tiny-kv new --label status --locked                        # prints the name and a space key
-tiny-kv name poll                                          # a fresh valid name, offline
-tiny-kv whoami | token | url <path>
+cubby get   notes-k7m2x9q4/shared/hello
+cubby set   notes-k7m2x9q4/shared/hello "new text"       # or pipe the value on stdin
+cubby del   notes-k7m2x9q4/shared/hello
+cubby ls    'notes-k7m2x9q4/shared/msg.*'                # key<TAB>value per line
+cubby ls    'poll-9d24vw6e/users/*/vote'                 # user<TAB>key<TAB>value
+cubby set   poll-9d24vw6e/users/me/vote tacos            # users/me is your own ID
+cubby watch notes-k7m2x9q4/shared/hello                  # current value, then each change
+cubby update homelab-4m8q2xk7/shared/count --exec 'jq "(. // 0) + 1"'
+cubby new --label status --locked                        # prints the name and a space key
+cubby name poll                                          # a fresh valid name, offline
+cubby whoami | token | url <path>
 ```
 
 Series:
 
 ```sh
-tiny-kv add    home-k7m2x9q4/shared/temp 21.4                      # one point; prints its time
-tiny-kv add    'home-k7m2x9q4/shared/env.*' temp=21.4 rh=45 door=open   # env.temp, env.rh, env.door
-echo '{"temp": 21.4}' | tiny-kv add 'home-k7m2x9q4/shared/env.*'      # the same from stdin
-tiny-kv series home-k7m2x9q4/shared/env.temp --since 24h           # t<TAB>value, oldest first
+cubby add    home-k7m2x9q4/shared/temp 21.4                      # one point; prints its time
+cubby add    'home-k7m2x9q4/shared/env.*' temp=21.4 rh=45 door=open   # env.temp, env.rh, env.door
+echo '{"temp": 21.4}' | cubby add 'home-k7m2x9q4/shared/env.*'      # the same from stdin
+cubby series home-k7m2x9q4/shared/env.temp --since 24h           # t<TAB>value, oldest first
 ```
 
 Run a command for every change, and resume where it stopped after a restart:
 
 ```sh
-tiny-kv watch homelab-4m8q2xk7/shared/deploy --from now \
+cubby watch homelab-4m8q2xk7/shared/deploy --from now \
   --state /var/lib/deploy-watcher/version \
   --exec 'ref=$(cat); [ "$KV_DELETED" = 1 ] || /opt/app/deploy.sh "$ref"'
 ```
 
 The command gets the value on stdin and `KV_KEY`, `KV_VERSION`, `KV_DELETED` and `KV_USER` in its environment, plus `KV_TIME` for a series key.
 
-Exit codes: 0 ok, 1 not found, 2 version conflict, 3 not allowed, 4 rate limit or quota, 5 bad input, 6 server unreachable, 64 bad usage. `tiny-kv help <command>` lists each command's flags.
+Exit codes: 0 ok, 1 not found, 2 version conflict, 3 not allowed, 4 rate limit or quota, 5 bad input, 6 server unreachable, 64 bad usage. `cubby help <command>` lists each command's flags.
 
 ### Pointing the CLI at a server
 
 It talks to `http://localhost:8080` unless told otherwise:
 
 ```sh
-export TINY_KV_SERVER=https://kv.example.com
+export CUBBY_SERVER=https://kv.example.com
 ```
 
-The CLI saves its token, and keys of spaces it created, in `~/.config/tiny-kv/credentials.toml` (mode 0600). For a fixed identity in a script, set `TINY_KV_TOKEN`. To write a locked space from another machine, set `TINY_KV_SPACE_KEY`.
+The CLI saves its token, and keys of spaces it created, in `~/.config/cubby/credentials.toml` (mode 0600). For a fixed identity in a script, set `CUBBY_TOKEN`. To write a locked space from another machine, set `CUBBY_SPACE_KEY`.
 
 ## Plain HTTP
 
@@ -181,9 +181,9 @@ Nothing is required. These cover what most setups change:
 
 | Flag | Environment | Default |
 |---|---|---|
-| `--listen` | `TINY_KV_LISTEN` | `:8080` |
-| `--data` | `TINY_KV_DATA` | see [Where data lives](#where-data-lives) |
-| `--config` | `TINY_KV_CONFIG` | none |
+| `--listen` | `CUBBY_LISTEN` | `:8080` |
+| `--data` | `CUBBY_DATA` | see [Where data lives](#where-data-lives) |
+| `--config` | `CUBBY_CONFIG` | none |
 | `--quiet` | | logs each request to stderr |
 
 For limits and retention, pass a TOML file with `--config`. Every setting is optional, and the values below are the defaults:
@@ -191,7 +191,7 @@ For limits and retention, pass a TOML file with `--config`. Every setting is opt
 ```toml
 [server]
 listen = ":8080"
-data_dir = "/var/lib/tiny-kv"
+data_dir = "/var/lib/cubby"
 trusted_proxies = ["127.0.0.1/32", "::1/128"]   # whose X-Forwarded-For to believe
 rate_limits = true
 
@@ -219,33 +219,33 @@ max_series_points = 500000
 
 ## Where data lives
 
-If you name a directory, with `--data`, `TINY_KV_DATA`, `data_dir` in the config file, or systemd's `StateDirectory=`, the server uses it. If it can't write there, it stops and says why, with no silent fallback.
+If you name a directory, with `--data`, `CUBBY_DATA`, `data_dir` in the config file, or systemd's `StateDirectory=`, the server uses it. If it can't write there, it stops and says why, with no silent fallback.
 
 Otherwise it works out a place on its own, so any user can just run the binary:
 
 | Order | Directory | When |
 |---|---|---|
-| 1 | `/var/lib/tiny-kv` (Linux), `/Library/Application Support/tiny-kv` (macOS) | running as root |
-| 2 | `~/Library/Application Support/tiny-kv` (macOS), `~/.local/share/tiny-kv` (Linux), or `$XDG_DATA_HOME/tiny-kv` | a normal user |
-| 3 | `./tiny-kv-data` in the current directory | no writable home, as for service accounts and containers with a random UID |
+| 1 | `/var/lib/cubby` (Linux), `/Library/Application Support/cubby` (macOS) | running as root |
+| 2 | `~/Library/Application Support/cubby` (macOS), `~/.local/share/cubby` (Linux), or `$XDG_DATA_HOME/cubby` | a normal user |
+| 3 | `./cubby-data` in the current directory | no writable home, as for service accounts and containers with a random UID |
 
 - A directory that already has data wins, so a later run never starts empty next to existing data.
 - Otherwise the first directory that can actually be created and written is used. The directory is private to the user (mode 0700).
 - When it falls back, the server logs which places it skipped and why.
 - If nothing is writable, it says so and asks for `--data`. It never uses a temporary directory, where data would quietly disappear.
-- `tiny-kv admin` looks in the same places, so it finds the server's data without flags when run as the same user.
+- `cubby admin` looks in the same places, so it finds the server's data without flags when run as the same user.
 
-`tiny-kv help serve` prints the one it would use. Inside it:
+`cubby help serve` prints the one it would use. Inside it:
 
 ```
 server.db               visitors and their tokens
 spaces/{name}.db        one SQLite file per space, holding everything about it
-admin.sock              how `tiny-kv admin` reaches the running server
+admin.sock              how `cubby admin` reaches the running server
 ```
 
 A space file is self-contained: its keys, version counter and lock key. So spaces are easy to handle one by one:
 
-- **Delete one** with `tiny-kv admin delete <space>`, which also tells watchers it's gone. Removing the file by hand works too, but stop the server first.
+- **Delete one** with `cubby admin delete <space>`, which also tells watchers it's gone. Removing the file by hand works too, but stop the server first.
 - **Move or copy one** to another server by copying `spaces/{name}.db`, with the source server stopped or after `sqlite3 {name}.db "PRAGMA wal_checkpoint(TRUNCATE)"`. The other server picks it up on the next request for that space. Versions continue where they were, and a locked space keeps its key. Visitor IDs don't travel, since tokens live in `server.db`: the `users/` data stays readable, but its owners can't write it on the new server.
 - **Back up** by copying the whole directory with the server stopped, or with `sqlite3 file.db ".backup copy.db"` per file while it runs.
 
@@ -263,32 +263,32 @@ A systemd unit:
 
 ```ini
 [Unit]
-Description=tiny-kv
+Description=cubby
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/tiny-kv serve --listen 127.0.0.1:8080
+ExecStart=/usr/local/bin/cubby serve --listen 127.0.0.1:8080
 DynamicUser=yes
-StateDirectory=tiny-kv
+StateDirectory=cubby
 Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-`StateDirectory=tiny-kv` puts the data in `/var/lib/tiny-kv` with no flag needed. That's also where root looks by default, so `sudo tiny-kv admin spaces` works as is.
+`StateDirectory=cubby` puts the data in `/var/lib/cubby` with no flag needed. That's also where root looks by default, so `sudo cubby admin spaces` works as is.
 
 ## Admin
 
-`tiny-kv admin` is a client of the running server. It sends each command through `admin.sock` in the data directory, and the server carries it out like any other request, so watchers learn about deleted spaces at once. Only the server's OS user can open the socket, which is the only access check. Admin has no HTTP route, so it can't be reached over the network.
+`cubby admin` is a client of the running server. It sends each command through `admin.sock` in the data directory, and the server carries it out like any other request, so watchers learn about deleted spaces at once. Only the server's OS user can open the socket, which is the only access check. Admin has no HTTP route, so it can't be reached over the network.
 
 ```sh
-tiny-kv admin spaces            # name, kind, size, keys, last activity
-tiny-kv admin stats
-tiny-kv admin export <space>    # JSON lines: every key, then every series point
-tiny-kv admin delete <space>
-tiny-kv admin rekey <space>     # lock a space or replace its key
-tiny-kv admin cleanup           # run the hourly cleanup now
+cubby admin spaces            # name, kind, size, keys, last activity
+cubby admin stats
+cubby admin export <space>    # JSON lines: every key, then every series point
+cubby admin delete <space>
+cubby admin rekey <space>     # lock a space or replace its key
+cubby admin cleanup           # run the hourly cleanup now
 ```
 
 Run it on the server machine, as the server's user or root. Pass `--data DIR` if the server uses a non-default data directory. `--json` prints the raw response. If no server is running, admin says so and exits with 6.
@@ -299,7 +299,7 @@ Needs Go 1.26 or newer. No C compiler: SQLite is pure Go, so every binary is sta
 
 ```sh
 go test ./...
-./build.sh          # writes dist/tiny-kv-macos, dist/tiny-kv-linux-amd64, dist/tiny-kv-linux-arm64
+./build.sh          # writes dist/cubby-macos, dist/cubby-linux-amd64, dist/cubby-linux-arm64
 go build .          # just for this machine
 ```
 

@@ -163,7 +163,7 @@ func TestCLIFlags(t *testing.T) {
 		t.Fatal("-- didn't end flags")
 	}
 	for _, s := range []string{"ftp://x", "http://", "http://x?y=1", "http://x#y", "http://[::1"} {
-		t.Setenv("TINY_KV_SERVER", s)
+		t.Setenv("CUBBY_SERVER", s)
 		if _, err := newClient(&flags{vals: map[string]string{}, set: map[string]bool{}}); err == nil {
 			t.Errorf("server %q accepted", s)
 		}

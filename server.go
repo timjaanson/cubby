@@ -303,7 +303,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case "/":
 		h.Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintf(sw, "tiny-kv %s\n\nAPI under /v1, JS client at /kv.js, health at /health.\n", version)
+		fmt.Fprintf(sw, "cubby %s\n\nAPI under /v1, JS client at /kv.js, health at /health.\n", version)
 		return
 	}
 

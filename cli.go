@@ -38,10 +38,10 @@ type credentials struct {
 
 func configDir() string {
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "tiny-kv")
+		return filepath.Join(x, "cubby")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "tiny-kv")
+	return filepath.Join(home, ".config", "cubby")
 }
 
 func loadCreds() *credentials {
@@ -59,7 +59,7 @@ func (c *credentials) save() error {
 		return err
 	}
 	var buf bytes.Buffer
-	buf.WriteString("# Written by tiny-kv. Tokens and space keys are secrets.\n")
+	buf.WriteString("# Written by cubby. Tokens and space keys are secrets.\n")
 	if err := toml.NewEncoder(&buf).Encode(c); err != nil {
 		return err
 	}
@@ -76,15 +76,15 @@ type client struct {
 	server   string
 	creds    *credentials
 	sc       *serverCreds
-	envToken string // from --token or TINY_KV_TOKEN, never saved
-	spaceKey string // from --space-key or TINY_KV_SPACE_KEY
+	envToken string // from --token or CUBBY_TOKEN, never saved
+	spaceKey string // from --space-key or CUBBY_SPACE_KEY
 	http     *http.Client
 }
 
 func newClient(f *flags) (*client, error) {
 	var cfg cliConfig
 	toml.DecodeFile(filepath.Join(configDir(), "config.toml"), &cfg)
-	server := firstNonEmpty(f.str("server"), os.Getenv("TINY_KV_SERVER"), cfg.Server, defaultServer)
+	server := firstNonEmpty(f.str("server"), os.Getenv("CUBBY_SERVER"), cfg.Server, defaultServer)
 	if !strings.Contains(server, "://") {
 		server = "http://" + server
 	}
@@ -102,8 +102,8 @@ func newClient(f *flags) (*client, error) {
 		server:   server,
 		creds:    creds,
 		sc:       sc,
-		envToken: firstNonEmpty(f.str("token"), os.Getenv("TINY_KV_TOKEN")),
-		spaceKey: firstNonEmpty(f.str("space-key"), os.Getenv("TINY_KV_SPACE_KEY")),
+		envToken: firstNonEmpty(f.str("token"), os.Getenv("CUBBY_TOKEN")),
+		spaceKey: firstNonEmpty(f.str("space-key"), os.Getenv("CUBBY_SPACE_KEY")),
 		http:     &http.Client{Timeout: 70 * time.Second},
 	}, nil
 }
@@ -165,7 +165,7 @@ func (c *client) freshToken() (string, error) {
 	}
 	c.sc.Token, c.sc.ID = out.Token, out.ID
 	if err := c.creds.save(); err != nil {
-		fmt.Fprintln(os.Stderr, "tiny-kv: warning: could not save the token:", err)
+		fmt.Fprintln(os.Stderr, "cubby: warning: could not save the token:", err)
 	}
 	return out.Token, nil
 }
@@ -196,7 +196,7 @@ func (c *client) raw(method, path string, body []byte, hdr http.Header) (*http.R
 	for k, v := range hdr {
 		req.Header[k] = v
 	}
-	req.Header.Set("User-Agent", "tiny-kv/"+version)
+	req.Header.Set("User-Agent", "cubby/"+version)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, nil, &cliError{code: 6, err: "network_error", msg: err.Error()}
@@ -370,18 +370,18 @@ var commandFlags = map[string]struct {
 	"watch":  {[]string{"from", "state", "exec"}, []string{"json", "once", "raw"}, "watch <path or pattern> [--from N|now] [--state FILE] [--exec CMD] [--once] [--raw] [--json]\n  Print current state, then changes. --exec runs CMD per change with the value on stdin\n  and KV_KEY, KV_VERSION, KV_DELETED, KV_USER set. --state FILE resumes after restarts."},
 	"add":    {[]string{"time"}, nil, "add <path> [value|-] [--time MS]\n  Add a point to a series, from the argument or stdin. Prints the point's time.\nadd <prefix*> name=value ... [--time MS]\n  Add one point to each series prefix+name, all at one time. A value is JSON if it parses,\n  otherwise a string. Without name=value arguments, reads one JSON object from stdin."},
 	"series": {[]string{"since", "limit"}, []string{"json"}, "series <path> [--since MS|24h|90m|7d] [--limit N] [--json]\n  Print a series' points oldest first, as t<TAB>value. Without --since, the newest 1000."},
-	"update": {[]string{"exec"}, nil, "update <path> [--exec CMD]\n  Read, pipe through CMD (or open $EDITOR), write back with ifVersion, retry on conflict.\n  Example: tiny-kv update space/shared/count --exec 'jq \"(. // 0) + 1\"'"},
+	"update": {[]string{"exec"}, nil, "update <path> [--exec CMD]\n  Read, pipe through CMD (or open $EDITOR), write back with ifVersion, retry on conflict.\n  Example: cubby update space/shared/count --exec 'jq \"(. // 0) + 1\"'"},
 	"new":    {[]string{"label"}, []string{"locked", "no-save"}, "new [--label L] [--locked] [--no-save]\n  Create a space. Locked spaces print the key on a second line and save it."},
 	"name":   {nil, nil, "name [label]\n  Print a new valid space name. No server needed."},
 	"whoami": {nil, nil, "whoami\n  Print your visitor ID."},
-	"token":  {nil, nil, "token\n  Print your token, for curl: curl -H \"Authorization: Bearer $(tiny-kv token)\" ..."},
+	"token":  {nil, nil, "token\n  Print your token, for curl: curl -H \"Authorization: Bearer $(cubby token)\" ..."},
 	"url":    {nil, nil, "url <path>\n  Print the full URL for a path."},
 }
 
 func cmdHelp(cmd string) int {
 	switch cmd {
 	case "serve":
-		fmt.Printf("serve [--listen :8080] [--data DIR] [--config FILE] [--quiet]\n  Run the server. Env: TINY_KV_LISTEN, TINY_KV_DATA, TINY_KV_CONFIG.\n  Data goes in %s, created if missing.\n", previewDataDir())
+		fmt.Printf("serve [--listen :8080] [--data DIR] [--config FILE] [--quiet]\n  Run the server. Env: CUBBY_LISTEN, CUBBY_DATA, CUBBY_CONFIG.\n  Data goes in %s, created if missing.\n", previewDataDir())
 		return 0
 	case "admin":
 		fmt.Print(adminUsage)
@@ -392,7 +392,7 @@ func cmdHelp(cmd string) int {
 		return usageErr(fmt.Errorf("unknown command %q", cmd))
 	}
 	fmt.Println(d.help)
-	fmt.Println("\nCommon flags: --server URL (TINY_KV_SERVER), --token T (TINY_KV_TOKEN), --space-key K (TINY_KV_SPACE_KEY)")
+	fmt.Println("\nCommon flags: --server URL (CUBBY_SERVER), --token T (CUBBY_TOKEN), --space-key K (CUBBY_SPACE_KEY)")
 	return 0
 }
 
@@ -432,10 +432,10 @@ func runClient(cmd string, args []string) int {
 		if ce.code == 64 {
 			return usageErr(errors.New(ce.msg))
 		}
-		fmt.Fprintf(os.Stderr, "tiny-kv: %s: %s\n", ce.err, ce.msg)
+		fmt.Fprintf(os.Stderr, "cubby: %s: %s\n", ce.err, ce.msg)
 		return ce.code
 	}
-	fmt.Fprintln(os.Stderr, "tiny-kv:", err)
+	fmt.Fprintln(os.Stderr, "cubby:", err)
 	return 6
 }
 
@@ -759,7 +759,7 @@ func (c *client) newSpace(f *flags) error {
 			}
 			c.sc.SpaceKeys[out.Space] = out.Key
 			if err := c.creds.save(); err != nil {
-				fmt.Fprintln(os.Stderr, "tiny-kv: warning: could not save the space key:", err)
+				fmt.Fprintln(os.Stderr, "cubby: warning: could not save the space key:", err)
 			}
 		}
 	}
@@ -806,7 +806,7 @@ func (c *client) watch(f *flags) error {
 		}
 		resp, b, err := c.do("GET", u, nil, reqOpts{needToken: needToken})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "tiny-kv: %v, retrying in %s\n", err, backoff)
+			fmt.Fprintf(os.Stderr, "cubby: %v, retrying in %s\n", err, backoff)
 			time.Sleep(backoff)
 			backoff = min(backoff*2, 30*time.Second)
 			continue
@@ -816,10 +816,10 @@ func (c *client) watch(f *flags) error {
 			backoff = time.Second
 		case resp.StatusCode == 410:
 			if fromNow {
-				fmt.Fprintln(os.Stderr, "tiny-kv: version expired, continuing from now")
+				fmt.Fprintln(os.Stderr, "cubby: version expired, continuing from now")
 				haveFrom = false
 			} else {
-				fmt.Fprintln(os.Stderr, "tiny-kv: version expired, reloading current state")
+				fmt.Fprintln(os.Stderr, "cubby: version expired, reloading current state")
 				from, haveFrom, resync, resyncSeen = 0, true, true, map[string]bool{}
 			}
 			continue
@@ -829,7 +829,7 @@ func (c *client) watch(f *flags) error {
 			time.Sleep(time.Duration(max(e.RetryAfter, 1)) * time.Second)
 			continue
 		case resp.StatusCode >= 500:
-			fmt.Fprintf(os.Stderr, "tiny-kv: server error %d, retrying in %s\n", resp.StatusCode, backoff)
+			fmt.Fprintf(os.Stderr, "cubby: server error %d, retrying in %s\n", resp.StatusCode, backoff)
 			time.Sleep(backoff)
 			backoff = min(backoff*2, 30*time.Second)
 			continue
@@ -872,7 +872,7 @@ func (c *client) watch(f *flags) error {
 		from, haveFrom = out.Version, true
 		if state != "" {
 			if err := writeState(state, from); err != nil {
-				fmt.Fprintln(os.Stderr, "tiny-kv: warning: could not save state:", err)
+				fmt.Fprintln(os.Stderr, "cubby: warning: could not save state:", err)
 			}
 		}
 		if f.bool("once") && len(changes) > 0 && !out.More {
@@ -918,7 +918,7 @@ func (c *client) emit(ch item, f *flags) {
 			e.Env = append(e.Env, "KV_TIME="+strconv.FormatInt(ch.T, 10))
 		}
 		if err := e.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "tiny-kv: warning: command for %s failed: %v\n", ch.Key, err)
+			fmt.Fprintf(os.Stderr, "cubby: warning: command for %s failed: %v\n", ch.Key, err)
 		}
 		return
 	}
@@ -978,7 +978,7 @@ func (c *client) update(f *flags) error {
 		v, _, err := c.put(p, next, &ver)
 		if errors.As(err, &ce) && ce.err == "version_conflict" {
 			if cmd == "" {
-				fmt.Fprintln(os.Stderr, "tiny-kv: someone else changed it meanwhile, reopening with their version")
+				fmt.Fprintln(os.Stderr, "cubby: someone else changed it meanwhile, reopening with their version")
 			}
 			time.Sleep(time.Duration(50+attempt*20) * time.Millisecond)
 			continue
@@ -994,7 +994,7 @@ func (c *client) update(f *flags) error {
 
 func editValue(cur []byte) ([]byte, error) {
 	editor := firstNonEmpty(os.Getenv("VISUAL"), os.Getenv("EDITOR"), "vi")
-	tmp, err := os.CreateTemp("", "tiny-kv-*.txt")
+	tmp, err := os.CreateTemp("", "cubby-*.txt")
 	if err != nil {
 		return nil, err
 	}

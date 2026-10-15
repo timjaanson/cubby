@@ -23,7 +23,7 @@ import (
 // Only the server's OS user can open the socket, and that's the whole access
 // check. There is no admin route over TCP.
 
-const adminUsage = `tiny-kv admin <command> [--data DIR]
+const adminUsage = `cubby admin <command> [--data DIR]
 
   spaces            list spaces with size, keys and last activity
   export <space>    dump every key, then every series point, as JSON lines
@@ -52,7 +52,7 @@ func listenAdmin(dataDir string) (net.Listener, error) {
 	}
 	if c, err := net.DialTimeout("unix", adminSocketName, time.Second); err == nil {
 		c.Close()
-		return nil, fmt.Errorf("another tiny-kv server is already using %s", dataDir)
+		return nil, fmt.Errorf("another cubby server is already using %s", dataDir)
 	}
 	os.Remove(adminSocketName) // stale, from a server that didn't shut down cleanly
 	ln, err := net.Listen("unix", adminSocketName)
@@ -209,12 +209,12 @@ func cmdAdmin(args []string) int {
 	}
 	dataDir, err := findDataDir(f.str("data"))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tiny-kv: server_not_running:", err)
+		fmt.Fprintln(os.Stderr, "cubby: server_not_running:", err)
 		return 6
 	}
 	sock := adminSocketPath(dataDir)
 	if err := os.Chdir(dataDir); err != nil {
-		fmt.Fprintf(os.Stderr, "tiny-kv: server_not_running: can't open %s: %v\n", dataDir, err)
+		fmt.Fprintf(os.Stderr, "cubby: server_not_running: can't open %s: %v\n", dataDir, err)
 		return 6
 	}
 	hc := &http.Client{
@@ -229,7 +229,7 @@ func cmdAdmin(args []string) int {
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "no such file") || strings.Contains(err.Error(), "connection refused") {
 				return nil, &cliError{code: 6, err: "server_not_running",
-					msg: fmt.Sprintf("no server is running with data in %s. Start it with 'tiny-kv serve', or pass --data DIR.", dataDir)}
+					msg: fmt.Sprintf("no server is running with data in %s. Start it with 'cubby serve', or pass --data DIR.", dataDir)}
 			}
 			if strings.Contains(err.Error(), "permission denied") {
 				return nil, &cliError{code: 3, err: "permission_denied", msg: "run admin as the same user as the server: " + sock}
@@ -362,13 +362,13 @@ func cmdAdmin(args []string) int {
 		return 0
 	case errors.As(err, &ce):
 		if ce.code == 64 {
-			fmt.Fprintf(os.Stderr, "tiny-kv: %s\n\n%s", ce.msg, adminUsage)
+			fmt.Fprintf(os.Stderr, "cubby: %s\n\n%s", ce.msg, adminUsage)
 			return 64
 		}
-		fmt.Fprintf(os.Stderr, "tiny-kv: %s: %s\n", ce.err, ce.msg)
+		fmt.Fprintf(os.Stderr, "cubby: %s: %s\n", ce.err, ce.msg)
 		return ce.code
 	}
-	fmt.Fprintln(os.Stderr, "tiny-kv:", err)
+	fmt.Fprintln(os.Stderr, "cubby:", err)
 	return 6
 }
 

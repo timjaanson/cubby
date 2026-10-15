@@ -21,7 +21,7 @@ func isolate(t *testing.T) (home, work string) {
 	os.MkdirAll(work, 0o755)
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", "")
-	t.Setenv("TINY_KV_DATA", "")
+	t.Setenv("CUBBY_DATA", "")
 	t.Setenv("STATE_DIRECTORY", "")
 	t.Chdir(work)
 	return home, work
@@ -29,9 +29,9 @@ func isolate(t *testing.T) (home, work string) {
 
 func userDir(home string) string {
 	if runtime.GOOS == "darwin" {
-		return filepath.Join(home, "Library", "Application Support", "tiny-kv")
+		return filepath.Join(home, "Library", "Application Support", "cubby")
 	}
-	return filepath.Join(home, ".local", "share", "tiny-kv")
+	return filepath.Join(home, ".local", "share", "cubby")
 }
 
 func readOnly(t *testing.T, dir string) {
@@ -54,7 +54,7 @@ func TestDataDirNoUsableHome(t *testing.T) {
 	_, work := isolate(t)
 	t.Setenv("HOME", "/")
 	dir, _, err := resolveDataDir("", "")
-	if err != nil || dir != filepath.Join(work, "tiny-kv-data") {
+	if err != nil || dir != filepath.Join(work, "cubby-data") {
 		t.Fatalf("got %q %v", dir, err)
 	}
 }
@@ -63,7 +63,7 @@ func TestDataDirReadOnlyHome(t *testing.T) {
 	home, work := isolate(t)
 	readOnly(t, home)
 	dir, note, err := resolveDataDir("", "")
-	if err != nil || dir != filepath.Join(work, "tiny-kv-data") || !strings.Contains(note, "isn't writable") {
+	if err != nil || dir != filepath.Join(work, "cubby-data") || !strings.Contains(note, "isn't writable") {
 		t.Fatalf("got %q %q %v", dir, note, err)
 	}
 	// Admin finds the same place without being told.
@@ -75,7 +75,7 @@ func TestDataDirReadOnlyHome(t *testing.T) {
 
 func TestDataDirExistingDataWins(t *testing.T) {
 	home, work := isolate(t)
-	fallback := filepath.Join(work, "tiny-kv-data")
+	fallback := filepath.Join(work, "cubby-data")
 	os.MkdirAll(fallback, 0o700)
 	os.WriteFile(filepath.Join(fallback, "server.db"), nil, 0o600)
 	dir, _, err := resolveDataDir("", "")
@@ -94,11 +94,11 @@ func TestDataDirExplicitNoFallback(t *testing.T) {
 	readOnly(t, locked)
 	for _, set := range []func(){
 		func() {},
-		func() { t.Setenv("TINY_KV_DATA", filepath.Join(locked, "d")) },
+		func() { t.Setenv("CUBBY_DATA", filepath.Join(locked, "d")) },
 	} {
 		set()
 		flag := ""
-		if os.Getenv("TINY_KV_DATA") == "" {
+		if os.Getenv("CUBBY_DATA") == "" {
 			flag = filepath.Join(locked, "d")
 		}
 		_, _, err := resolveDataDir(flag, "")
@@ -107,7 +107,7 @@ func TestDataDirExplicitNoFallback(t *testing.T) {
 		}
 	}
 	// Relative explicit paths become absolute.
-	t.Setenv("TINY_KV_DATA", "")
+	t.Setenv("CUBBY_DATA", "")
 	if dir, _, err := resolveDataDir("rel", ""); err != nil || dir != filepath.Join(work, "rel") {
 		t.Fatalf("relative: %q %v", dir, err)
 	}
@@ -133,7 +133,7 @@ func TestDataDirXDG(t *testing.T) {
 	home, _ := isolate(t)
 	xdg := filepath.Join(home, "xdg")
 	t.Setenv("XDG_DATA_HOME", xdg)
-	if dir, _, _ := resolveDataDir("", ""); dir != filepath.Join(xdg, "tiny-kv") {
+	if dir, _, _ := resolveDataDir("", ""); dir != filepath.Join(xdg, "cubby") {
 		t.Fatalf("absolute XDG_DATA_HOME: %q", dir)
 	}
 	t.Setenv("XDG_DATA_HOME", "relative/xdg")

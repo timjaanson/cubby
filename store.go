@@ -23,7 +23,7 @@ import (
 //
 //	{data}/server.db           visitors, which spaces each visitor wrote to, deleted-space counters
 //	{data}/spaces/{name}.db    one SQLite file per space, self-contained
-//	{data}/admin.sock          Unix socket for `tiny-kv admin`
+//	{data}/admin.sock          Unix socket for `cubby admin`
 //
 // A space file holds everything about the space, including its counter and
 // lock key, so it can be copied to another server or deleted on its own.
@@ -212,7 +212,7 @@ func nowS() int64  { return time.Now().Unix() }
 // the router, so no caller can ever produce a path outside spaces/.
 func (s *Store) spacePath(name string) string {
 	if !validSpace(name) {
-		panic("tiny-kv: unchecked space name " + strconv.Quote(name))
+		panic("cubby: unchecked space name " + strconv.Quote(name))
 	}
 	return filepath.Join(s.dir, "spaces", name+".db")
 }

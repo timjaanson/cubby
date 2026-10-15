@@ -1,8 +1,8 @@
 #!/bin/sh
 # Builds static binaries into dist/:
-#   tiny-kv-macos          universal (Apple Silicon and Intel)
-#   tiny-kv-linux-amd64    most servers and PCs
-#   tiny-kv-linux-arm64    Raspberry Pi 4/5 on a 64-bit OS, ARM servers
+#   cubby-macos          universal (Apple Silicon and Intel)
+#   cubby-linux-amd64    most servers and PCs
+#   cubby-linux-arm64    Raspberry Pi 4/5 on a 64-bit OS, ARM servers
 set -eu
 cd "$(dirname "$0")"
 
@@ -17,15 +17,15 @@ build() {
   GOOS=$1 GOARCH=$2 go build -trimpath -ldflags "$LDFLAGS" -o "dist/$3" .
 }
 
-build linux amd64 tiny-kv-linux-amd64
-build linux arm64 tiny-kv-linux-arm64
-build darwin arm64 tiny-kv-darwin-arm64
-build darwin amd64 tiny-kv-darwin-amd64
+build linux amd64 cubby-linux-amd64
+build linux arm64 cubby-linux-arm64
+build darwin arm64 cubby-darwin-arm64
+build darwin amd64 cubby-darwin-amd64
 
 if command -v lipo > /dev/null; then
-  lipo -create -output dist/tiny-kv-macos dist/tiny-kv-darwin-arm64 dist/tiny-kv-darwin-amd64
-  rm dist/tiny-kv-darwin-arm64 dist/tiny-kv-darwin-amd64
+  lipo -create -output dist/cubby-macos dist/cubby-darwin-arm64 dist/cubby-darwin-amd64
+  rm dist/cubby-darwin-arm64 dist/cubby-darwin-amd64
 fi
 
-(cd dist && shasum -a 256 tiny-kv-* > SHA256SUMS)
+(cd dist && shasum -a 256 cubby-* > SHA256SUMS)
 ls -lh dist

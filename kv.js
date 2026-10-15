@@ -1,4 +1,4 @@
-// tiny-kv JS client. An ES module with no dependencies.
+// cubby JS client. An ES module with no dependencies.
 //
 //   import { kv } from "https://kv.example.com/kv.js"
 //   const db = kv("poll-k7m2x9q4")
@@ -79,7 +79,7 @@ function identity(server, tokenKey, fetchFn) {
       } catch {
         if (!warned) {
           warned = true
-          console.warn("tiny-kv: localStorage isn't available, so this visitor is new on every page load")
+          console.warn("cubby: localStorage isn't available, so this visitor is new on every page load")
         }
       }
     },
@@ -117,7 +117,7 @@ export function kv(space, opts = {}) {
   }
   const server = (opts.server || SERVER).replace(/\/$/, "")
   const fetchFn = opts.fetch || globalThis.fetch.bind(globalThis)
-  const ident = identity(server, opts.tokenKey || "tiny-kv:" + server, fetchFn)
+  const ident = identity(server, opts.tokenKey || "cubby:" + server, fetchFn)
   const spaceKey = opts.key || null
   let knownLocked = false
 
@@ -273,7 +273,7 @@ export function kv(space, opts = {}) {
     let controller = null
     let from = o.from === undefined ? 0 : o.from
     const known = new Set()
-    const onError = o.onError || (err => console.warn("tiny-kv watch:", err))
+    const onError = o.onError || (err => console.warn("cubby watch:", err))
     let hiddenSince = null
     let wake = null
 

@@ -11,17 +11,17 @@ import (
 
 // Where the server keeps its data when nobody says.
 //
-// An explicit directory (--data, TINY_KV_DATA, data_dir in the config file,
+// An explicit directory (--data, CUBBY_DATA, data_dir in the config file,
 // or systemd's STATE_DIRECTORY) is used as given, and a server that can't
 // write it stops with a clear error. Without one, the server tries these in
 // order:
 //
 //  1. the system directory, when running as root:
-//     /var/lib/tiny-kv on Linux, /Library/Application Support/tiny-kv on macOS
-//  2. the user's data directory: $XDG_DATA_HOME/tiny-kv if that's an absolute
-//     path, else ~/Library/Application Support/tiny-kv on macOS,
-//     %LOCALAPPDATA%\tiny-kv on Windows, ~/.local/share/tiny-kv elsewhere
-//  3. ./tiny-kv-data in the current directory, for users without a writable
+//     /var/lib/cubby on Linux, /Library/Application Support/cubby on macOS
+//  2. the user's data directory: $XDG_DATA_HOME/cubby if that's an absolute
+//     path, else ~/Library/Application Support/cubby on macOS,
+//     %LOCALAPPDATA%\cubby on Windows, ~/.local/share/cubby elsewhere
+//  3. ./cubby-data in the current directory, for users without a writable
 //     home, such as service accounts and containers with a random UID
 //
 // A candidate that already holds data wins over everything else, so data is
@@ -40,27 +40,27 @@ func dataDirCandidates() []dataDirCandidate {
 	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
 		switch runtime.GOOS {
 		case "linux":
-			out = append(out, dataDirCandidate{dir: "/var/lib/tiny-kv", label: "system directory"})
+			out = append(out, dataDirCandidate{dir: "/var/lib/cubby", label: "system directory"})
 		case "darwin":
-			out = append(out, dataDirCandidate{dir: "/Library/Application Support/tiny-kv", label: "system directory"})
+			out = append(out, dataDirCandidate{dir: "/Library/Application Support/cubby", label: "system directory"})
 		}
 	}
 	if d := userDataDir(); d != "" {
 		out = append(out, dataDirCandidate{dir: d, label: "user data directory"})
 	}
 	if wd, err := os.Getwd(); err == nil {
-		out = append(out, dataDirCandidate{dir: filepath.Join(wd, "tiny-kv-data"), label: "current directory", fallback: true})
+		out = append(out, dataDirCandidate{dir: filepath.Join(wd, "cubby-data"), label: "current directory", fallback: true})
 	}
 	return out
 }
 
 func userDataDir() string {
 	if x := os.Getenv("XDG_DATA_HOME"); filepath.IsAbs(x) && runtime.GOOS != "windows" {
-		return filepath.Join(x, "tiny-kv")
+		return filepath.Join(x, "cubby")
 	}
 	if runtime.GOOS == "windows" {
 		if d := os.Getenv("LOCALAPPDATA"); d != "" {
-			return filepath.Join(d, "tiny-kv")
+			return filepath.Join(d, "cubby")
 		}
 		return ""
 	}
@@ -69,9 +69,9 @@ func userDataDir() string {
 		return "" // no usable home, as for many service accounts and containers
 	}
 	if runtime.GOOS == "darwin" {
-		return filepath.Join(home, "Library", "Application Support", "tiny-kv")
+		return filepath.Join(home, "Library", "Application Support", "cubby")
 	}
-	return filepath.Join(home, ".local", "share", "tiny-kv")
+	return filepath.Join(home, ".local", "share", "cubby")
 }
 
 // explicitDataDir returns a directory the user chose, if any, and where it came from.
@@ -79,8 +79,8 @@ func explicitDataDir(flag, fromConfig string) (dir, source string) {
 	switch {
 	case flag != "":
 		return flag, "--data"
-	case os.Getenv("TINY_KV_DATA") != "":
-		return os.Getenv("TINY_KV_DATA"), "TINY_KV_DATA"
+	case os.Getenv("CUBBY_DATA") != "":
+		return os.Getenv("CUBBY_DATA"), "CUBBY_DATA"
 	case fromConfig != "":
 		return fromConfig, "data_dir in the config file"
 	case os.Getenv("STATE_DIRECTORY") != "":
@@ -139,7 +139,7 @@ func resolveDataDir(flag, fromConfig string) (dir, note string, err error) {
 		}
 		tried = append(tried, fmt.Sprintf("%s isn't writable (%v)", c.dir, unwrapPathErr(err)))
 	}
-	return "", "", fmt.Errorf("no writable place for data: %s. Pass --data DIR or set TINY_KV_DATA", strings.Join(tried, "; "))
+	return "", "", fmt.Errorf("no writable place for data: %s. Pass --data DIR or set CUBBY_DATA", strings.Join(tried, "; "))
 }
 
 // findDataDir locates existing data without creating anything, for admin.
@@ -154,7 +154,7 @@ func findDataDir(flag string) (string, error) {
 		}
 		looked = append(looked, c.dir)
 	}
-	return "", fmt.Errorf("no tiny-kv data found in %s. Start the server with 'tiny-kv serve', or pass --data DIR", strings.Join(looked, ", "))
+	return "", fmt.Errorf("no cubby data found in %s. Start the server with 'cubby serve', or pass --data DIR", strings.Join(looked, ", "))
 }
 
 // previewDataDir says where a server would put its data, without creating it.

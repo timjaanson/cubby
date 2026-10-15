@@ -1,4 +1,4 @@
-module tiny-kv
+module github.com/timjaanson/cubby
 
 go 1.26.0
 

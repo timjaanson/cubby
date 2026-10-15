@@ -1,5 +1,5 @@
-// tiny-kv is a self-hosted key-value store over plain HTTP. The same binary
-// runs the server (tiny-kv serve), administers its data (tiny-kv admin) and
+// cubby is a self-hosted key-value store over plain HTTP. The same binary
+// runs the server (cubby serve), administers its data (cubby admin) and
 // acts as a command-line client (everything else).
 package main
 
@@ -22,30 +22,30 @@ var version = "dev"
 
 var buildTime = time.Now()
 
-const usage = `tiny-kv: a key-value store over plain HTTP, server and client in one binary.
+const usage = `cubby: a key-value store over plain HTTP, server and client in one binary.
 
 Server:
-  tiny-kv serve                     run the server on :8080 (see 'tiny-kv help serve')
-  tiny-kv admin <command>           look after the server's data (spaces, export, delete, rekey, stats, cleanup)
+  cubby serve                     run the server on :8080 (see 'cubby help serve')
+  cubby admin <command>           look after the server's data (spaces, export, delete, rekey, stats, cleanup)
 
-Client (talks to $TINY_KV_SERVER, default http://localhost:8080):
-  tiny-kv get <path>                print a value
-  tiny-kv set <path> [value|-]      write a value from the argument or stdin
-  tiny-kv del <path>                delete a value
-  tiny-kv ls <path>                 list a key or pattern, one tab-separated line per item
-  tiny-kv watch <path>              print changes as they happen
-  tiny-kv update <path>             read, change with --exec or $EDITOR, write back safely
-  tiny-kv add <path> [value]        add a point to a series ('space/shared/env.*' a=1 b=2 for several)
-  tiny-kv series <path>             print a series' points, oldest first
-  tiny-kv new [--label L] [--locked]  create a space on the server
-  tiny-kv name [label]              make up a valid space name, no server needed
-  tiny-kv whoami | token | url <path>
+Client (talks to $CUBBY_SERVER, default http://localhost:8080):
+  cubby get <path>                print a value
+  cubby set <path> [value|-]      write a value from the argument or stdin
+  cubby del <path>                delete a value
+  cubby ls <path>                 list a key or pattern, one tab-separated line per item
+  cubby watch <path>              print changes as they happen
+  cubby update <path>             read, change with --exec or $EDITOR, write back safely
+  cubby add <path> [value]        add a point to a series ('space/shared/env.*' a=1 b=2 for several)
+  cubby series <path>             print a series' points, oldest first
+  cubby new [--label L] [--locked]  create a space on the server
+  cubby name [label]              make up a valid space name, no server needed
+  cubby whoami | token | url <path>
 
 Paths mirror the URL after /v1/:
   poll-k7m2x9q4/shared/question     poll-k7m2x9q4/users/me/vote
   'poll-k7m2x9q4/shared/msg.*'      'poll-k7m2x9q4/users/*/vote'     poll-k7m2x9q4/me/draft
 
-Run 'tiny-kv help <command>' for flags, or see the README.
+Run 'cubby help <command>' for flags, or see the README.
 `
 
 func main() {
@@ -62,7 +62,7 @@ func main() {
 	case "admin":
 		code = cmdAdmin(rest)
 	case "version", "--version", "-v":
-		fmt.Println("tiny-kv", version)
+		fmt.Println("cubby", version)
 	case "help", "--help", "-h":
 		if len(rest) > 0 {
 			code = cmdHelp(rest[0])
@@ -83,9 +83,9 @@ func cmdServe(args []string) int {
 	if err != nil {
 		return usageErr(err)
 	}
-	cfg, err := loadConfig(firstNonEmpty(f.str("config"), os.Getenv("TINY_KV_CONFIG")))
+	cfg, err := loadConfig(firstNonEmpty(f.str("config"), os.Getenv("CUBBY_CONFIG")))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tiny-kv:", err)
+		fmt.Fprintln(os.Stderr, "cubby:", err)
 		return 64
 	}
 	if v := f.str("listen"); v != "" {
@@ -93,7 +93,7 @@ func cmdServe(args []string) int {
 	}
 	dir, note, err := resolveDataDir(f.str("data"), cfg.Server.DataDir)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tiny-kv:", err)
+		fmt.Fprintln(os.Stderr, "cubby:", err)
 		return 6
 	}
 	cfg.Server.DataDir = dir
@@ -102,13 +102,13 @@ func cmdServe(args []string) int {
 	}
 	store, err := openStore(cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tiny-kv:", err)
+		fmt.Fprintln(os.Stderr, "cubby:", err)
 		return 6
 	}
 	defer store.Close()
 	adminLn, err := listenAdmin(cfg.Server.DataDir)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tiny-kv:", err)
+		fmt.Fprintln(os.Stderr, "cubby:", err)
 		return 6
 	}
 
@@ -130,10 +130,10 @@ func cmdServe(args []string) int {
 
 	ln, err := net.Listen("tcp", cfg.Server.Listen)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tiny-kv:", err)
+		fmt.Fprintln(os.Stderr, "cubby:", err)
 		return 6
 	}
-	log.Printf("tiny-kv %s listening on %s, data in %s (%d spaces)", version, displayAddr(ln.Addr()), cfg.Server.DataDir, store.spaceCount())
+	log.Printf("cubby %s listening on %s, data in %s (%d spaces)", version, displayAddr(ln.Addr()), cfg.Server.DataDir, store.spaceCount())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -168,7 +168,7 @@ func cmdServe(args []string) int {
 	select {
 	case err := <-errc:
 		if !errors.Is(err, http.ErrServerClosed) {
-			fmt.Fprintln(os.Stderr, "tiny-kv:", err)
+			fmt.Fprintln(os.Stderr, "cubby:", err)
 			return 6
 		}
 	case <-ctx.Done():
@@ -203,7 +203,7 @@ func firstNonEmpty(v ...string) string {
 // ---------- flags ----------
 
 // flags is a small parser that accepts flags anywhere on the line, so
-// "tiny-kv set path value --create" works as well as the other order.
+// "cubby set path value --create" works as well as the other order.
 type flags struct {
 	vals map[string]string
 	set  map[string]bool
@@ -264,6 +264,6 @@ func (f *flags) bool(n string) bool  { return f.set[n] }
 func (f *flags) has(n string) bool   { return f.set[n] }
 
 func usageErr(err error) int {
-	fmt.Fprintf(os.Stderr, "tiny-kv: %v\nRun 'tiny-kv help' for usage.\n", err)
+	fmt.Fprintf(os.Stderr, "cubby: %v\nRun 'cubby help' for usage.\n", err)
 	return 64
 }

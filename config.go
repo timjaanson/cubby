@@ -98,7 +98,7 @@ type Config struct {
 func defaultConfig() *Config {
 	c := &Config{}
 	c.Server.Listen = ":8080"
-	if l := os.Getenv("TINY_KV_LISTEN"); l != "" {
+	if l := os.Getenv("CUBBY_LISTEN"); l != "" {
 		c.Server.Listen = l
 	}
 	c.Server.TrustedProxies = []string{"127.0.0.1/32", "::1/128"}
