@@ -41,9 +41,18 @@ func (s *Server) createSpace(c *reqCtx) error {
 		return err
 	}
 	q := c.r.URL.Query()
-	label := q.Get("label")
+	label, name := q.Get("label"), q.Get("name")
+	if label != "" && name != "" {
+		return apierr.BadParam("name", "Give a name or a label, not both.")
+	}
 	if label != "" && (!names.LabelRe.MatchString(label) || len(label) > 54) {
 		return apierr.BadParam("label", "A label is lowercase letters, digits and single hyphens, at most 54 characters.")
+	}
+	if name != "" && !names.ValidSpace(name) {
+		return apierr.InvalidSpace(names.SuggestFor(name))
+	}
+	if name != "" && s.store.SpaceExists(name) {
+		return apierr.SpaceExists(name) // before the rate limit, so a taken name costs nothing
 	}
 	locked := false
 	if q.Has("locked") {
@@ -58,7 +67,12 @@ func (s *Server) createSpace(c *reqCtx) error {
 	if err := s.spaceRate(c, id); err != nil {
 		return err
 	}
-	name, key, err := s.store.CreateSpace(label, locked)
+	var key string
+	if name != "" {
+		key, err = s.store.CreateNamedSpace(name, locked)
+	} else {
+		name, key, err = s.store.CreateSpace(label, locked)
+	}
 	if err != nil {
 		return err
 	}

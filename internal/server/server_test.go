@@ -439,3 +439,36 @@ func parseInt(s string) int64 {
 	fmt.Sscan(strings.Trim(s, `"`), &n)
 	return n
 }
+
+func TestCreateNamedSpace(t *testing.T) {
+	c := newTest(t)
+	tok, _ := c.anon()
+	a := []string{"Authorization", "Bearer " + tok}
+
+	if st, _, body := c.req("POST", "/v1/spaces?name=throws-d43j3gpf", "", a...); st != 201 || !strings.Contains(body, `"space":"throws-d43j3gpf"`) {
+		t.Fatalf("create by name: %d %s", st, body)
+	}
+	if st, _, body := c.req("POST", "/v1/spaces?name=throws-d43j3gpf", "", a...); st != 409 || errCode(body) != "space_exists" {
+		t.Fatalf("taken name: %d %s", st, body)
+	}
+	// A space that exists only because someone wrote to it is taken too.
+	c.req("PUT", "/v1/notes-k7m2x9q4/shared/k", "v", a...)
+	if st, _, body := c.req("POST", "/v1/spaces?name=notes-k7m2x9q4", "", a...); st != 409 || errCode(body) != "space_exists" {
+		t.Fatalf("written space: %d %s", st, body)
+	}
+	if st, _, body := c.req("POST", "/v1/spaces?name=throws", "", a...); st != 400 || errCode(body) != "invalid_space" {
+		t.Fatalf("bad name: %d %s", st, body)
+	}
+	if st, _, body := c.req("POST", "/v1/spaces?name=throws-d43j3gpf&label=x", "", a...); st != 400 || errCode(body) != "invalid_parameter" {
+		t.Fatalf("name and label: %d %s", st, body)
+	}
+
+	// Locked by name: the key comes back and writing without it fails.
+	st, _, body := c.req("POST", "/v1/spaces?name=status-4m8q2xk7&locked", "", a...)
+	if st != 201 || !strings.Contains(body, `"key":"sk_`) {
+		t.Fatalf("locked by name: %d %s", st, body)
+	}
+	if st, _, body := c.req("PUT", "/v1/status-4m8q2xk7/shared/k", "v", a...); st != 403 || errCode(body) != "space_locked" {
+		t.Fatalf("locked write without key: %d %s", st, body)
+	}
+}

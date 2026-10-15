@@ -38,6 +38,31 @@ func (s *Store) CreateSpace(label string, locked bool) (name, key string, err er
 	return "", "", errors.New("could not generate a free name")
 }
 
+// CreateNamedSpace creates a space under the exact name given, which the
+// caller has validated. It fails with space_exists if the name is taken.
+func (s *Store) CreateNamedSpace(name string, locked bool) (key string, err error) {
+	if s.SpaceCount() >= s.cfg.Limits.MaxSpaces {
+		return "", apierr.ServerFull
+	}
+	if s.SpaceExists(name) {
+		return "", apierr.SpaceExists(name)
+	}
+	kh := ""
+	if locked {
+		key = names.RandomToken("sk_")
+		kh = names.HashSecret(key)
+	}
+	sp, created, err := s.Acquire(name, true, kh)
+	if err != nil {
+		return "", err
+	}
+	s.Release(sp)
+	if !created {
+		return "", apierr.SpaceExists(name) // lost a race with another request
+	}
+	return key, nil
+}
+
 // rekey locks a space or replaces its key.
 func (s *Store) Rekey(name string) (string, error) {
 	sp, _, err := s.Acquire(name, false, "")

@@ -350,7 +350,7 @@ cubby update status-4m8q2xk7/shared/count --exec 'jq "(. // 0) + 1"'
 cubby add  home-k7m2x9q4/shared/temp 21.4                 # a point in a series
 cubby add  'home-k7m2x9q4/shared/env.*' temp=21.4 rh=45   # several series at once
 cubby series home-k7m2x9q4/shared/temp --since 24h        # t<TAB>value per point
-cubby new --label status --locked                       # prints name and key, saves the key
+cubby new status --locked                               # prints name and key, saves the key
 curl "$(cubby url poll-k7m2x9q4/shared/question)"       # same thing over raw HTTP
 ```
 

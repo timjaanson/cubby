@@ -164,7 +164,7 @@ func (s *Server) route(c *reqCtx) error {
 			if m != http.MethodPost {
 				return methodErr("POST")
 			}
-			if err := checkParams(c.r, "label", "locked"); err != nil {
+			if err := checkParams(c.r, "name", "label", "locked"); err != nil {
 				return err
 			}
 			return s.createSpace(c)
@@ -176,9 +176,7 @@ func (s *Server) route(c *reqCtx) error {
 
 	space := seg[0]
 	if !names.ValidSpace(space) {
-		return &apierr.Error{Status: 400, Code: "invalid_space",
-			Message: "A space name is an optional label plus 8 random characters with at least 2 digits and 2 letters, like poll-k7m2x9q4.",
-			Extra:   map[string]any{"suggestion": names.SuggestFor(space)}}
+		return apierr.InvalidSpace(names.SuggestFor(space))
 	}
 
 	t := store.Target{Space: space}

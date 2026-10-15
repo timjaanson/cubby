@@ -30,7 +30,7 @@ var commandFlags = map[string]struct {
 	"add":    {[]string{"time"}, nil, "add <path> [value|-] [--time MS]\n  Add a point to a series, from the argument or stdin. Prints the point's time.\nadd <prefix*> name=value ... [--time MS]\n  Add one point to each series prefix+name, all at one time. A value is JSON if it parses,\n  otherwise a string. Without name=value arguments, reads one JSON object from stdin."},
 	"series": {[]string{"since", "limit"}, []string{"json"}, "series <path> [--since MS|24h|90m|7d] [--limit N] [--json]\n  Print a series' points oldest first, as t<TAB>value. Without --since, the newest 1000."},
 	"update": {[]string{"exec"}, nil, "update <path> [--exec CMD]\n  Read, pipe through CMD (or open $EDITOR), write back with ifVersion, retry on conflict.\n  Example: cubby update space/shared/count --exec 'jq \"(. // 0) + 1\"'"},
-	"new":    {[]string{"label"}, []string{"locked", "no-save"}, "new [--label L] [--locked] [--no-save]\n  Create a space. Locked spaces print the key on a second line and save it."},
+	"new":    {[]string{"label"}, []string{"locked", "no-save"}, "new [label | name] [--locked] [--no-save]\n  Create a space and print its name. A label gets random characters added (new poll\n  -> poll-k7m2x9q4). A full space name, like one from 'cubby name', is created as is,\n  and fails if it's taken. --label L forces label meaning. Locked spaces print the key\n  on a second line and save it."},
 	"name":   {nil, nil, "name [label]\n  Print a new valid space name. No server needed."},
 	"whoami": {nil, nil, "whoami\n  Print your visitor ID."},
 	"token":  {nil, nil, "token\n  Print your token, for curl: curl -H \"Authorization: Bearer $(cubby token)\" ..."},
@@ -389,15 +389,23 @@ func (c *client) ls(f *flags) error {
 }
 
 func (c *client) newSpace(f *flags) error {
-	if len(f.args) != 0 {
-		return usageCli("new takes no arguments, use --label")
+	if len(f.args) > 1 {
+		return usageCli("new takes one label or space name")
+	}
+	if len(f.args) == 1 && f.str("label") != "" {
+		return usageCli("give the label as an argument or with --label, not both")
 	}
 	q := url.Values{}
-	if l := f.str("label"); l != "" {
-		if !names.LabelRe.MatchString(l) || len(l) > 54 {
-			return &cliError{code: 5, err: "invalid_parameter", msg: "a label is lowercase letters, digits and single hyphens, at most 54 characters"}
-		}
-		q.Set("label", l)
+	switch {
+	case f.str("label") != "":
+		q.Set("label", f.str("label"))
+	case len(f.args) == 1 && names.ValidSpace(f.args[0]):
+		q.Set("name", f.args[0]) // already a full name: create exactly that
+	case len(f.args) == 1:
+		q.Set("label", f.args[0])
+	}
+	if l := q.Get("label"); l != "" && (!names.LabelRe.MatchString(l) || len(l) > 54) {
+		return &cliError{code: 5, err: "invalid_parameter", msg: fmt.Sprintf("%q isn't a label or a space name. A label is lowercase letters, digits and single hyphens, at most 54 characters", l)}
 	}
 	u := "/v1/spaces"
 	if len(q) > 0 {

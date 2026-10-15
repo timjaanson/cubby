@@ -25,6 +25,19 @@ var (
 	InvalidToken = &Error{Status: 401, Code: "invalid_token", Message: "The token is unknown or expired. Get a new one with POST /v1/anon."}
 )
 
+// InvalidSpace is a space name that breaks the naming rule.
+func InvalidSpace(suggestion string) *Error {
+	return &Error{Status: 400, Code: "invalid_space",
+		Message: "A space name is an optional label plus 8 random characters with at least 2 digits and 2 letters, like poll-k7m2x9q4.",
+		Extra:   map[string]any{"suggestion": suggestion}}
+}
+
+// SpaceExists answers a request to create a space under a name that's taken.
+func SpaceExists(name string) *Error {
+	return &Error{Status: 409, Code: "space_exists", Extra: map[string]any{"space": name},
+		Message: name + " already exists. Pick another name, or leave the name out to get a fresh one."}
+}
+
 func Quota(code, msg string, limit, used int64) *Error {
 	return &Error{Status: 507, Code: code, Message: msg, Extra: map[string]any{"limit": limit, "used": used}}
 }

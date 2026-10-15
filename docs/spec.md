@@ -338,7 +338,7 @@ Rules:
 - A key covers only itself. A pattern `p*` covers every key that starts with `p`, and every pattern `q*` where `q` starts with `p`. `env.*` covers `env.temp`, `env.*` and `env.t*`, but not `*` or `e*`.
 - A request with a pattern needs one scope that covers the whole pattern. Scopes don't add up: `env.temp:r` and `env.rh:r` together don't allow `GET env.*`. A batch `POST env.*/series` needs `w` on a scope covering `env.*`.
 - A space pattern works the same way on space names. End the prefix with `-` to mean a label: `home-*` covers `home-k7m2x9q4` and `home-office-4m8q2xk7`.
-- `POST /v1/spaces` needs `w` on a scope whose `SPACE` covers every name the request could produce. `home-*` covers `?label=home`, and only `*` covers a request without a label. Creating a space by its first write needs only `w` on that name.
+- `POST /v1/spaces` needs `w` on a scope whose `SPACE` covers every name the request could produce. `home-*` covers `?label=home`, `?name=home-k7m2x9q4` needs a scope covering that name, and only `*` covers a request with neither. Creating a space by its first write needs only `w` on that name.
 - `whoami` needs only a valid token.
 - A request outside every scope returns 403 `out_of_scope`. The scope check comes before the key is looked up, so a narrow token gets 403 rather than 404 for a key outside its scopes, and can't probe what exists.
 
@@ -452,6 +452,7 @@ In list and watch responses, JSON values appear as themselves and text values as
 POST /v1/spaces
 POST /v1/spaces?label=poll
 POST /v1/spaces?label=poll&locked
+POST /v1/spaces?name=poll-k7m2x9q4&locked
 ```
 
 ```
@@ -461,6 +462,7 @@ POST /v1/spaces?label=poll&locked
 ```
 
 - Generates a name, creates the space empty, and returns the name. The name is now taken.
+- With `name`, creates exactly that name instead, which must follow the naming rule. A name that's taken, by `POST /v1/spaces` or by a write, returns 409 `space_exists`. `name` and `label` can't be combined.
 - Needs a token, and counts against the limits on new spaces.
 - Optional for open spaces, since writing to any valid name creates it. Required for locked ones.
 - An empty space is cleaned up like any space, after 180 days without activity.
@@ -886,6 +888,7 @@ Through `cubby admin`, see [Admin](#admin) in the CLI section. There is no admin
 | 403 | `not_owner` | write under another visitor's ID | |
 | 404 | `not_found` | key or route doesn't exist | |
 | 405 | `method_not_allowed` | wrong method for the route, such as `PUT` under `users/*/` or `POST` on a key without `/series` | `allow` |
+| 409 | `space_exists` | `POST /v1/spaces?name=` with a taken name | `space` |
 | 409 | `is_series` | `PUT` on a series key | |
 | 409 | `not_series` | `/series` on a plain key | `key` in a batch |
 | 410 | `version_expired` | watch version too old or from elsewhere | |
@@ -1095,7 +1098,7 @@ The server URL defaults to `http://localhost:28229`. A bare port (`9000` or `:90
 | `add <path> [value]` | add a point to a series, from the argument or stdin | the point's time |
 | `add <pattern> name=value ...` | add one point to each of several series, see [Series from the CLI](#series-from-the-cli) | the points' time |
 | `series <path>` | read a series' points | one line per point, see Output |
-| `new` | create a space with `POST /v1/spaces` | the name, and the key on a second line if locked |
+| `new [label or name]` | create a space with `POST /v1/spaces`. A full space name is created as is, anything else is a label | the name, and the key on a second line if locked |
 | `name [label]` | generate a valid space name locally, no request | the name |
 | `whoami` | your visitor ID | the ID |
 | `token` | your token, for use with `curl` | the token |

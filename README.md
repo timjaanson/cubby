@@ -77,7 +77,8 @@ cubby ls    'poll-9d24vw6e/users/*/vote'                 # user<TAB>key<TAB>valu
 cubby set   poll-9d24vw6e/users/me/vote tacos            # users/me is your own ID
 cubby watch notes-k7m2x9q4/shared/hello                  # current value, then each change
 cubby update homelab-4m8q2xk7/shared/count --exec 'jq "(. // 0) + 1"'
-cubby new --label status --locked                        # prints the name and a space key
+cubby new status --locked                                # status-<random>, prints the name and a space key
+cubby new status-k7m2x9q4                                # exactly this name; fails if it's taken
 cubby name poll                                          # a fresh valid name, offline
 cubby whoami | token | url <path>
 ```
@@ -131,7 +132,7 @@ Everything the CLI does is a single request.
 | add a point to a series | `POST /v1/{space}/shared/temp/series`, body is the value |
 | add to several series | `POST /v1/{space}/shared/env.*/series`, body `{"temp": 21.4, "rh": 45}` |
 | read a series | `GET /v1/{space}/shared/temp/series` (newest 1000) or `?since=MS` (after that time) |
-| create a locked space | `POST /v1/spaces?label=poll&locked` → `{"space": ..., "key": "sk_..."}` |
+| create a locked space | `POST /v1/spaces?label=poll&locked` → `{"space": ..., "key": "sk_..."}`, or `?name=poll-k7m2x9q4&locked` for an exact name |
 
 Writes to `shared/` of a locked space also need `Space-Key: sk_...`. Unknown or repeated query parameters are rejected with 400, so a typo like `ifversion=0` fails instead of overwriting. Errors are JSON with a stable `error` code and a `message`. CORS is open, so pages on any origin can call it.
 

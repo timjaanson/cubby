@@ -569,7 +569,7 @@ Everything here uses the `cubby` binary as a client. A `curl` version of each sc
 
 ```
 $ export CUBBY_SERVER=https://kv.example.com
-$ cubby new --label homelab --locked
+$ cubby new homelab --locked
 homelab-4m8q2xk7
 sk_Zr7cQ2vLm8RtY6pW3nB0kZ7aD5fH1sE9uG2iX4oC6q
 ```
@@ -739,7 +739,7 @@ An ESP32 board reads temperature, humidity and CO2 every minute and sends all th
 
 ```
 $ export CUBBY_SERVER=https://kv.example.com
-$ cubby new --label room --locked
+$ cubby new room --locked
 room-3k8d2m7q
 sk_Qm4vT8zK1pW6nR3cY0bH5jL9dF2sA7xE4uG1iO8kZ5
 $ curl -s -X POST https://kv.example.com/v1/anon
