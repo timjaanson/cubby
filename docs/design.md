@@ -2,7 +2,7 @@
 
 A self-hosted key-value store in a single binary, for shared and per-visitor state in web pages, scripts and anything else that can make an HTTP request. No setup per use and no visible login.
 
-Status: v0.7.0 is built, series included. Differences between the build and these docs are listed at the end of the [README](../README.md#differences-from-the-design-docs).
+Status: v0.7.1 is built, series included. Differences between the build and these docs are listed at the end of the [README](../README.md#differences-from-the-design-docs).
 
 - This file explains the model and how a client uses it.
 - [spec.md](spec.md) is the detailed contract, including the CLI, plus ideas kept for later.
