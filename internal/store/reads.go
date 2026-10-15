@@ -16,7 +16,7 @@ type Entry struct {
 	IsJSON  bool
 	Version int64
 	User    string
-	Writer  string
+	Writer  string // visitor who last wrote or deleted the key
 	Area    string
 	Series  bool
 	T       int64 // newest point's time, series only
@@ -30,8 +30,8 @@ func (s *Store) Get(space, area, key string) (*Entry, error) {
 	defer s.Release(sp)
 	e := &Entry{Key: key}
 	var t sql.NullInt64
-	err = sp.db.QueryRow(`SELECT value, is_json, version, series, t FROM kv WHERE area = ? AND key = ? AND value IS NOT NULL`,
-		area, key).Scan(&e.Value, &e.IsJSON, &e.Version, &e.Series, &t)
+	err = sp.db.QueryRow(`SELECT value, is_json, version, writer, series, t FROM kv WHERE area = ? AND key = ? AND value IS NOT NULL`,
+		area, key).Scan(&e.Value, &e.IsJSON, &e.Version, &e.Writer, &e.Series, &t)
 	e.T = t.Int64
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -80,7 +80,7 @@ func scanEntries(rows *sql.Rows, allUsers bool) ([]Entry, error) {
 	for rows.Next() {
 		var e Entry
 		var t sql.NullInt64
-		if err := rows.Scan(&e.Area, &e.Key, &e.Value, &e.IsJSON, &e.Version, &e.Series, &t); err != nil {
+		if err := rows.Scan(&e.Area, &e.Key, &e.Value, &e.IsJSON, &e.Version, &e.Writer, &e.Series, &t); err != nil {
 			return nil, err
 		}
 		e.T = t.Int64
@@ -136,7 +136,7 @@ func (s *Store) List(t Target, after string, limit int, desc bool) (items []Entr
 			args = append(args, after)
 		}
 	}
-	q := fmt.Sprintf(`SELECT area, key, value, is_json, version, series, t FROM kv WHERE %s ORDER BY key %s, area %s LIMIT ?`, where, ord, ord)
+	q := fmt.Sprintf(`SELECT area, key, value, is_json, version, writer, series, t FROM kv WHERE %s ORDER BY key %s, area %s LIMIT ?`, where, ord, ord)
 	rows, err := sp.db.Query(q, append(args, limit+1)...)
 	if err != nil {
 		return nil, "", 0, err
@@ -189,7 +189,7 @@ func (s *Store) Changes(t Target, after int64, limit int) ([]Entry, int64, error
 	if after == 0 {
 		where += " AND value IS NOT NULL"
 	}
-	rows, err := sp.db.Query(`SELECT area, key, value, is_json, version, series, t FROM kv WHERE `+where+` ORDER BY version LIMIT ?`, append(args, limit+1)...)
+	rows, err := sp.db.Query(`SELECT area, key, value, is_json, version, writer, series, t FROM kv WHERE `+where+` ORDER BY version LIMIT ?`, append(args, limit+1)...)
 	if err != nil {
 		return nil, 0, err
 	}

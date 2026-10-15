@@ -163,10 +163,9 @@ func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err err
 	}
 
 	version := m.seq + 1
+	// A tombstone records who deleted the key. Usage is moved by old.writer
+	// below, and tombstones count against the space only.
 	writer := r.Writer
-	if del {
-		writer = old.writer
-	}
 	var val any
 	if !del {
 		val = r.Value

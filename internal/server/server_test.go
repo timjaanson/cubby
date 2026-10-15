@@ -544,3 +544,57 @@ func TestSpaceNameTheAPIRefuses(t *testing.T) {
 		t.Fatalf("write after deleting the short-name space: %d %s", s, b)
 	}
 }
+
+// Every entry says which visitor last wrote it, and a delete says who deleted.
+func TestBy(t *testing.T) {
+	c := newTest(t)
+	tokA, idA := c.anon()
+	tokB, idB := c.anon()
+	a := []string{"Authorization", "Bearer " + tokA}
+	b := []string{"Authorization", "Bearer " + tokB}
+	sp := "/v1/game-cedar-pilot-mango"
+
+	c.req("PUT", sp+"/shared/game.1", `{"hole":1}`, a...)
+	if _, h, _ := c.req("GET", sp+"/shared/game.1", ""); h.Get("KV-By") != idA {
+		t.Fatalf("KV-By: %q, want %q", h.Get("KV-By"), idA)
+	}
+	if _, h, _ := c.req("GET", sp+"/shared/game.1", ""); !strings.Contains(h.Get("Access-Control-Expose-Headers"), "KV-By") {
+		t.Fatal("KV-By isn't exposed to browsers")
+	}
+
+	_, _, body := c.req("GET", sp+"/shared/*/watch?version=0", "")
+	var w struct {
+		Changes []struct {
+			Key, By string
+			Deleted bool
+		}
+		Version int64
+	}
+	json.Unmarshal([]byte(body), &w)
+	if len(w.Changes) != 1 || w.Changes[0].By != idA {
+		t.Fatalf("snapshot by: %s", body)
+	}
+
+	// B moves the hole: the change and the list name B.
+	c.req("PUT", sp+"/shared/game.1", `{"hole":2}`, b...)
+	_, _, body = c.req("GET", sp+"/shared/*", "")
+	if !strings.Contains(body, `"by":"`+idB+`"`) {
+		t.Fatalf("list by: %s", body)
+	}
+
+	// B deletes A's key: the tombstone names B.
+	v := w.Version
+	c.req("DELETE", sp+"/shared/game.1", "", b...)
+	_, _, body = c.req("GET", sp+"/shared/*/watch?version="+itoa(v), "")
+	json.Unmarshal([]byte(body), &w)
+	if len(w.Changes) != 1 || !w.Changes[0].Deleted || w.Changes[0].By != idB {
+		t.Fatalf("delete by: %s", body)
+	}
+
+	// users/*/ entries carry by as well as user.
+	c.req("PUT", sp+"/users/"+idA+"/name", `"Ann"`, a...)
+	_, _, body = c.req("GET", sp+"/users/*/name", "")
+	if !strings.Contains(body, `"user":"`+idA+`","by":"`+idA+`"`) {
+		t.Fatalf("users by: %s", body)
+	}
+}

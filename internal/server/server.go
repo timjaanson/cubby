@@ -92,7 +92,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.Set("Access-Control-Allow-Origin", "*")
-	h.Set("Access-Control-Expose-Headers", "ETag, Retry-After, KV-Time")
+	h.Set("Access-Control-Expose-Headers", "ETag, Retry-After, KV-Time, KV-By")
 	h.Set("Cache-Control", "no-store")
 
 	// Token: header wins over the query parameter.

@@ -152,7 +152,8 @@ const db = kv("poll-orbit-lilac-tango-slate")
 await db.shared.set("question", "Pizza or tacos?")
 await db.user().set("vote", "tacos")
 
-db.users.watch("vote", change => console.log(change.user, change.deleted ? "removed" : change.value))
+db.users.watch("vote", change => console.log(change.user, change.deleted ? "removed" : change.value),
+  { onSync: () => render() })                             // after each batch of changes
 await db.shared.update("count", n => (n ?? 0) + 1)       // safe with many writers
 
 await db.shared.add("env.*", { temp: 21.4, rh: 45 })     // a point each in env.temp and env.rh
@@ -160,7 +161,7 @@ const { points } = await db.shared.series("env.temp", { since: Date.now() - 864e
 </script>
 ```
 
-It keeps the visitor token in `localStorage` and finds the API from the URL it was loaded from.
+It keeps the visitor token in `localStorage`, sends it only on writes and `me/` so plain reads skip CORS preflights, and finds the API from the URL it was loaded from. The module exports `kv`, `newName`, `validSpace` and `KvError`. Every entry has `by`, the visitor who wrote it, and `mine`.
 
 ## Series
 

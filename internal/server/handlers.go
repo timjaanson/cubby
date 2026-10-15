@@ -111,6 +111,7 @@ func (s *Server) read(c *reqCtx, t store.Target) error {
 	}
 	h := c.header()
 	h.Set("ETag", etag(e.Version))
+	h.Set("KV-By", e.Writer)
 	if e.Series {
 		h.Set("KV-Time", strconv.FormatInt(e.T, 10))
 	}
@@ -242,11 +243,12 @@ type itemJSON struct {
 	Deleted bool            `json:"deleted,omitempty"`
 	Version int64           `json:"version"`
 	User    string          `json:"user,omitempty"`
+	By      string          `json:"by"`
 	T       *int64          `json:"t,omitempty"`
 }
 
 func toItem(e store.Entry) itemJSON {
-	it := itemJSON{Key: e.Key, Version: e.Version, User: e.User}
+	it := itemJSON{Key: e.Key, Version: e.Version, User: e.User, By: e.Writer}
 	if e.Series && e.Value != nil {
 		t := e.T
 		it.T = &t

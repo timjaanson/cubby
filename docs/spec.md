@@ -64,7 +64,7 @@ Contents:
 
 Getting a name:
 
-- **Generate it.** Four words drawn from a fixed list of 4096 short English words (3 to 6 letters), joined by hyphens. That's 48 random bits, about 2.8 × 10^14 names. A label goes in front: `poll-cedar-pilot-mango-frost`. A label is at most 35 characters, so a labeled name always fits in 63. The JS client has `kv.newName("poll")`, the CLI has `cubby name poll`, the server uses the same list. The first write creates the space.
+- **Generate it.** Four words drawn from a fixed list of 4096 short English words (3 to 6 letters), joined by hyphens. That's 48 random bits, about 2.8 × 10^14 names. A label goes in front: `poll-cedar-pilot-mango-frost`. A label is at most 35 characters, so a labeled name always fits in 63. The JS client exports `newName("poll")`, the CLI has `cubby name poll`, the server uses the same list. The first write creates the space.
 - **Ask the server** with `POST /v1/spaces`, see [Create a space](#create-a-space). Required for locked spaces.
 
 ### Visitor ID
@@ -434,6 +434,7 @@ In list and watch responses, JSON values appear as themselves and text values as
 
 - Each space has one counter. Every successful write or delete in the space, in any area, raises it.
 - Each key stores the counter value of its last write: its version.
+- Each key also records `by`, the ID of the visitor whose write or delete gave it that version. Reads, lists and watches return it, so a page can tell who changed `shared/` data and recognise its own writes coming back through a watch. Visitor IDs are already public under `users/*/`, so this reveals nothing new. A key written with an issued token shows that token's visitor ID.
 - Versions only grow and aren't contiguous per key. `0` means "doesn't exist".
 - A new space's counter starts at the current Unix time in milliseconds. Clients must treat versions as opaque increasing numbers. They stay below 2^53, so they're exact in JavaScript.
 - A space that doesn't exist behaves as if its counter were the current time in milliseconds. Lists and watches on it return that as `version`, so a client watching an empty space picks up the first write with no special case.
@@ -475,10 +476,12 @@ GET /v1/poll/{area}/question
 200
 Content-Type: text/plain; charset=utf-8
 ETag: "1791449600041"
+KV-By: u_k7m2x9q4p1r8t3w6
 
 Pizza or tacos?
 ```
 
+- `KV-By` is the visitor who last wrote the key.
 - 404 `not_found` if the key or the space doesn't exist.
 - For a series key, the value is its newest point, and the response also has `KV-Time: 1791449600042`, that point's time in milliseconds. Plain keys don't have this header. Versions are opaque, so they can't tell a page when a reading was taken.
 - `HEAD` works the same without a body.
@@ -539,15 +542,15 @@ GET /v1/poll/users/*/vote
 200
 {
   "items": [
-    {"key": "vote", "value": "tacos", "version": 1791449600041, "user": "u_k7m2x9q4p1r8t3w6"},
-    {"key": "vote", "value": "pizza", "version": 1791449600044, "user": "u_p1r8t3w6k7m2x9q4"}
+    {"key": "vote", "value": "tacos", "version": 1791449600041, "user": "u_k7m2x9q4p1r8t3w6", "by": "u_k7m2x9q4p1r8t3w6"},
+    {"key": "vote", "value": "pizza", "version": 1791449600044, "user": "u_p1r8t3w6k7m2x9q4", "by": "u_p1r8t3w6k7m2x9q4"}
   ],
   "version": 1791449600057,
   "next": null
 }
 ```
 
-- Items have `key`, `value` and `version`. Under `users/*/` they also have `user`. Series keys also have `t`, the time of the newest point, and `value` is that point.
+- Items have `key`, `value`, `version` and `by`. Under `users/*/` they also have `user`, which is always the same as `by` there. Series keys also have `t`, the time of the newest point, and `value` is that point.
 - Sorted by key, ascending unless `order=desc`. Under `users/*/` ties are sorted by `user`.
 - `limit` is 1 to 1000, default 1000.
 - `next` is a cursor when more pages exist, otherwise `null`. Pass it back as `after`.
@@ -604,15 +607,15 @@ A watch asks: "what changed in this key or pattern after version N?" The server 
 ```json
 {
   "changes": [
-    {"key": "msg.1791449600999.b2k7", "value": {"text": "hey"}, "version": 1791449600058, "user": "u_k7m2x9q4p1r8t3w6"},
-    {"key": "vote", "deleted": true, "version": 1791449600059, "user": "u_p1r8t3w6k7m2x9q4"}
+    {"key": "msg.1791449600999.b2k7", "value": {"text": "hey"}, "version": 1791449600058, "user": "u_k7m2x9q4p1r8t3w6", "by": "u_k7m2x9q4p1r8t3w6"},
+    {"key": "vote", "deleted": true, "version": 1791449600059, "user": "u_p1r8t3w6k7m2x9q4", "by": "u_p1r8t3w6k7m2x9q4"}
   ],
   "version": 1791449600059,
   "more": false
 }
 ```
 
-- `changes` is ordered by version. Each key appears at most once, with its current state. Under `users/*/` entries carry `user`. Series keys carry `t`, and their value is the newest point.
+- `changes` is ordered by version. Each key appears at most once, with its current state. Every entry carries `by`; for a deleted key it's whoever deleted it. Under `users/*/` entries also carry `user`. Series keys carry `t`, and their value is the newest point.
 - `version` is what the client sends next. It's a position in the space's changes, not any key's version, and it can be far ahead of a watched key's own version. For `ifVersion`, always use the `version` inside a change entry.
 - On timeout: 200 with `"changes": []` and the space's current counter as `version`.
 - `more: true` means more changes were ready than the 1000 that fit. `version` is then the last included entry's, and the next request returns at once with the rest.
@@ -936,7 +939,7 @@ On every `/v1` response:
 
 ```
 Access-Control-Allow-Origin: *
-Access-Control-Expose-Headers: ETag, Retry-After, KV-Time
+Access-Control-Expose-Headers: ETag, Retry-After, KV-Time, KV-By
 ```
 
 On preflight:
@@ -948,8 +951,8 @@ Access-Control-Max-Age: 86400
 ```
 
 - `*` is safe because there are no cookies.
-- Without `Expose-Headers`, browser code can't read `ETag`, `Retry-After` and `KV-Time` cross-origin.
-- Plain reads send no custom headers, so they need no preflight at all.
+- Without `Expose-Headers`, browser code can't read `ETag`, `Retry-After`, `KV-Time` and `KV-By` cross-origin.
+- Plain reads send no custom headers, so they need no preflight at all. Clients should keep it that way: browsers cache a preflight per URL, and every watch request has a new `version`, so a token on a public read costs an extra round trip each time.
 
 ### Security headers on stored values
 
@@ -975,13 +978,16 @@ Optional. Served at `/kv.js` as an ES module with no dependencies. Every method 
 ### Setup
 
 ```js
-import { kv } from "https://kv.example.com/kv.js"
+import { kv, newName, validSpace, KvError } from "https://kv.example.com/kv.js"
 
 const db = kv("poll-cedar-pilot-mango-frost")
 const admin = kv("poll-cedar-pilot-mango-frost", { key: "sk_8Hq3vT..." })   // can write shared/ when locked
 
-kv.newName("poll")     // "poll-slate-hinge-cocoa-pilot", local, no request
+newName("poll")        // "poll-slate-hinge-cocoa-pilot", local, no request
+validSpace(fromLink)   // true if a string from a link or a form is a usable space name
 ```
+
+These four are the module's only exports. There is no default export.
 
 | Option | Default | Purpose |
 |---|---|---|
@@ -994,13 +1000,14 @@ kv.newName("poll")     // "poll-slate-hinge-cocoa-pilot", local, no request
 - `kv()` makes no request, and throws at once for an invalid name, with the server's `suggestion`.
 - Several `kv()` instances for different spaces share one token and visitor.
 - A page that only reads `shared/` and `users/` never gets a token.
+- Reads of `shared/` and `users/` never send the token, even when the visitor has one, so they stay free of CORS preflights. Writes and everything in `me/` send it. A visitor's token stays alive through those, so one that only reads for a year expires with its data.
 
 ### Areas
 
 ```ts
 db.shared: Area
 db.me: Area
-db.user(id?: string): Area      // no id: your own; another id: read-only
+db.user(id?: string): Area      // no id: your own; another visitor's id: writes throw read_only
 db.users: { list(target, opts?), watch(target, onChange, opts?) }    // across all visitors
 db.id(): Promise<string>        // your visitor ID, gets a token if needed
 ```
@@ -1009,18 +1016,24 @@ db.id(): Promise<string>        // your visitor ID, gets a token if needed
 
 ```ts
 get(key): Promise<any | null>
-getEntry(key): Promise<{ value, version, t? } | null>          // t only for series keys
+getEntry(key): Promise<Entry | null>                                // without key and user
 set(key, value, opts?: { ifVersion?: number }): Promise<number>
 add(target, value, opts?: { t?: number }): Promise<{ version, t, keys? }>
 series(key, opts?: { since?: number, limit?: number }): Promise<{ key, points: Point[], version, next } | null>
 delete(key, opts?: { ifVersion?: number }): Promise<boolean>
 update(key, fn: (current: any | null) => any, opts?: { retries?: number }): Promise<any>
-list(target, opts?: { limit?: number, order?: "asc" | "desc" }): Promise<{ items: Entry[], version: number }>
-watch(target, onChange: (change: Change) => void, opts?: { from?: number | "now", onError? }): () => void
+list(target, opts?: { limit?: number, order?: "asc" | "desc" }): Promise<List>
+watch(target, onChange: (change: Change) => void, opts?: WatchOptions): () => void
 
-type Entry  = { key, value, version, user?, t? }
+type Entry  = { key, value, version, by, mine: boolean, user?, t? }
 type Change = Entry & { deleted: boolean }
+type List   = { items: Entry[], version: number }
 type Point  = { t, value }
+type WatchOptions = {
+  from?: 0 | "now" | number | List                                  // default 0
+  onSync?: (sync: { version: number, initial: boolean, resync: boolean }) => void
+  onError?: (err: KvError) => void                                   // default console.warn
+}
 ```
 
 `target` is what goes in the URL: an exact key like `"title"` or a pattern like `"msg.*"`.
@@ -1036,12 +1049,17 @@ type Point  = { t, value }
 - **`getEntry`** on a series key also returns `t`, from `KV-Time`.
 - **`update`** reads, calls `fn`, and writes with `ifVersion`. On 412 it retries after 50 to 200 ms, up to `retries` (default 10), then throws `version_conflict`. If `fn` returns `undefined`, or a value whose `JSON.stringify` equals the current one, nothing is written. `fn` may run more than once, so it must not have side effects.
 - **`list`** follows `next` until `limit` or the end. The returned `version` is from the first page.
+- **`by` and `mine`.** Every entry and change has `by`, the visitor who last wrote or deleted it, and `mine`, true when that's this visitor. A watch delivers your own writes too; `mine` tells them apart.
 - **`watch`**:
-  - `from` left out means `0`: first every existing key, then live changes. `"now"` means changes only. A number continues from that version.
-  - On 410 it re-syncs from `0` and reports keys missing from the new snapshot as deleted.
-  - Network errors and 5xx: retries after 1, 2, 4 ... up to 30 seconds. 429: waits `retryAfter`.
+  - `from` says where to start. `0`, the default, delivers every existing key first, then changes. `"now"` delivers changes only. A `list()` result continues right after that list, so a page can show the list first and then follow it. A number continues after that version.
+  - `onChange` gets one call per changed key. `onSync` follows once all changes from one answer have been delivered. At that point the page's state matches the server as of `version`, so it's the place to render. It also fires after each empty answer, so a working watch syncs at least every 25 seconds. `initial` is true on the first one: with `from: 0`, every existing key has arrived. After `onError`, the next `onSync` means the watch works again.
+  - On 410 (version too old or from elsewhere, for example after a week asleep) a watch with state starts again from `0` and reports keys it knew about that are missing from the new snapshot as deleted. It knows the keys it has delivered, plus the items of a `list()` it started from. Starting from a bare number it knows none at first, so the app should reload its state when `resync` is true. A `"now"` watch skips ahead to the present instead of replaying everything. In both cases the next `onSync` has `resync: true`.
+  - Errors with `retryable` true (network, 5xx, 429) go to `onError`, then the watch tries again after 1, 2, 4 ... up to 30 seconds, or after `retryAfter` for a 429. Any other error goes to `onError` once and ends the watch.
+  - A request that gets no answer in 35 seconds counts as a network error. The server answers within 25.
+  - When the page becomes visible, comes back online or is restored from the back/forward cache, the watch drops its current request or wait and asks again at once. A phone that slept may have a dead connection that never fails on its own.
   - After the tab has been hidden for 5 minutes it pauses, and resumes from its last version when visible.
-- **Auth.** The first call that needs a token gets one. Concurrent calls share that request. On 401 `invalid_token` it gets a new token and ID and retries once.
+  - The returned function stops the watch and removes its event listeners.
+- **Auth.** The first call that needs a token, a write or anything in `me/`, gets one. Concurrent calls share that request. On 401 `invalid_token` it gets a new token and ID and retries once.
 - **Given token.** With the `token` option the client never calls `/v1/anon`. A 401 throws `missing_token` or `invalid_token` without a retry. Without the option, a closed server makes reads throw 401 `missing_token` and the first write throw 403 `server_closed`.
 - **Storage fallback.** If localStorage throws, the token lives in memory and the visitor is new on every page load. The client warns once.
 
@@ -1050,10 +1068,13 @@ type Point  = { t, value }
 ```ts
 class KvError extends Error {
   status: number      // HTTP status, 0 for network or local checks
-  code: string        // the `error` code, "network_error", or "read_only"
+  code: string        // the `error` code, "network_error", or a local one like "read_only"
   details: object     // the rest of the error body
+  retryable: boolean  // network error, 5xx or 429: worth trying again later
 }
 ```
+
+`retryable` is what an offline write queue checks: keep the write and try again if true, drop it and tell the user if false.
 
 ## 17. CLI
 

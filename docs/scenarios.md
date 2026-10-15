@@ -258,17 +258,23 @@ const votes = new Map()   // visitor ID -> option
 const showError = err => { $error.textContent = err.message }
 
 // The poll itself. Delivered once at start, then whenever the author changes it.
+// onSync comes after each batch of changes, so the page renders once per batch.
+// The first one (initial) means the snapshot is complete: no poll by then means none is set up.
 db.shared.watch("poll", change => {
   poll = change.deleted ? null : change.value
-  render()
-}, { onError: showError })
+}, {
+  onSync: ({ initial }) => {
+    if (initial && poll === undefined) poll = null
+    render()
+  },
+  onError: showError,
+})
 
 // Everyone's vote, read from every visitor's area.
 db.users.watch("vote", change => {
   if (change.deleted) votes.delete(change.user)
   else votes.set(change.user, change.value)
-  render()
-}, { onError: showError })
+}, { onSync: render, onError: showError })
 
 $percent.checked = (await db.me.get("showPercent")) ?? false
 $percent.addEventListener("change", async () => {
@@ -376,7 +382,7 @@ Each room is its own open space. Opening the page without a room creates one and
 <div id="messages"></div>
 
 <script type="module">
-import { kv } from "https://kv.example.com/kv.js"
+import { kv, newName } from "https://kv.example.com/kv.js"
 
 const SHOW = 100
 const HERE_FOR = 30_000      // someone counts as here if seen in the last 30 s
@@ -387,7 +393,7 @@ const showError = err => { $("#error").textContent = err.message }
 // The room is the space name in the URL fragment. No room yet: make one.
 let room = new URLSearchParams(location.hash.slice(1)).get("room")
 if (!room) {
-  room = kv.newName("room")
+  room = newName("room")
   history.replaceState(null, "", `#room=${room}`)
 }
 $("#link").value = location.href
@@ -414,16 +420,16 @@ $("#name").value = (await db.user().get("name")) ?? ""
 render()
 
 // One watch for every visitor's keys (messages, names, presence), one for the settings.
+// Both continue from the first list's version, so nothing written since is missed.
+// Heartbeats arrive in bursts, so render once per batch, in onSync.
 db.users.watch("*", change => {
   if (change.deleted) deleteUserKey(change)
   else setUserKey(change)
-  render()
-}, { from: version, onError: showError })
+}, { from: version, onSync: render, onError: showError })
 
 db.shared.watch("settings", change => {
   if (!change.deleted) settings = change.value
-  render()
-}, { from: version, onError: showError })
+}, { from: version, onSync: render, onError: showError })
 
 function setUserKey({ user, key, value }) {
   if (key === "name") names.set(user, String(value))

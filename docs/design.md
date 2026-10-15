@@ -2,7 +2,7 @@
 
 A self-hosted key-value store in a single binary, for shared and per-visitor state in web pages, scripts and anything else that can make an HTTP request. No setup per use and no visible login.
 
-Status: v0.8.3 is built, series included. Differences between the build and these docs are listed at the end of the [README](../README.md#differences-from-the-design-docs).
+Status: v0.9.0 is built, series included. Differences between the build and these docs are listed at the end of the [README](../README.md#differences-from-the-design-docs).
 
 - This file explains the model and how a client uses it.
 - [spec.md](spec.md) is the detailed contract, including the CLI, plus ideas kept for later.
@@ -130,7 +130,7 @@ space              "poll-cedar-pilot-mango-frost"
 - **me/** is the visitor's private data in this space.
 - **Key** is a short name like `question` or `msg.1791449600123`. No slashes. Group with dots, because listing and watching work by prefix.
 - **Value** is text up to 64 KB. If it parses as JSON it comes back as JSON, otherwise as plain text. You get back exactly the bytes you wrote.
-- **Version** is a number that goes up with every write in the space. Each key remembers the version of its last write.
+- **Version** is a number that goes up with every write in the space. Each key remembers the version of its last write, and `by`, the visitor who made it.
 - **Series** is a key that keeps every value written to it, each with a time. Its value is the newest point, and `{key}/series` has the rest. See [Series](#series).
 
 ## Two kinds of spaces
@@ -189,7 +189,7 @@ An issued token looks and works like any other, so clients don't change. Details
 ## Lifecycle
 
 1. **Deploy once.** Run the binary. A config file for limits is optional.
-2. **Pick the kind of space.** For an open space, generate a name locally (`kv.newName("list")`) and put it in the page. It's created by the first write. For a locked space, call `POST /v1/spaces?label=poll&locked` once, put the name in the page and keep the key yourself.
+2. **Pick the kind of space.** For an open space, generate a name locally (`newName("list")` from the JS client) and put it in the page. It's created by the first write. For a locked space, call `POST /v1/spaces?label=poll&locked` once, put the name in the page and keep the key yourself.
 3. **Page loads and reads.** Plain `GET`s, no token needed.
 4. **First write.** The page calls `POST /v1/anon`, stores the token and ID, and sends `Authorization: Bearer <token>` on writes and on anything in `me/`.
 5. **Watch.** Ask for changes since a version. The server holds the request until something changes or 25 seconds pass, then the page asks again.
@@ -361,7 +361,7 @@ Quote paths containing `*`, or the shell tries to expand them. Tokens are fetche
 Optional. Everything it does is plain HTTP underneath.
 
 ```js
-import { kv } from "https://kv.example.com/kv.js"
+import { kv, newName, validSpace, KvError } from "https://kv.example.com/kv.js"
 
 const db = kv("poll-cedar-pilot-mango-frost")
 
@@ -375,14 +375,36 @@ await db.me.set("showPercent", true)                    // private
 
 await db.shared.update("settings", s => ({ ...s, open: false }))   // safe shared edit
 
-const stop = db.shared.watch("msg.*", change => console.log(change.key, change.value))
+const stop = db.shared.watch("msg.*", change => {
+  console.log(change.key, change.value, change.by, change.mine)   // mine: this visitor wrote it
+}, {
+  onSync: ({ initial }) => render(),     // after each batch; initial: every existing key has arrived
+  onError: err => showOffline(err),      // err.retryable: the watch keeps trying
+})
 
 await db.shared.add("temp", 21.4)                       // a point in a series
 await db.shared.add("env.*", { temp: 21.4, rh: 45 })    // one point each in env.temp and env.rh
 const { points } = await db.shared.series("temp", { since: Date.now() - 864e5 })
 
 const admin = kv("poll-cedar-pilot-mango-frost", { key: "sk_..." })   // can write shared/ in a locked space
+
+newName("poll")                                         // "poll-slate-hinge-cocoa-pilot", no request
+validSpace(new URLSearchParams(location.hash.slice(1)).get("s"))   // check a name from a link
 ```
+
+### Keeping a page in sync
+
+A page that mirrors a pattern, like every game in a scorecard app, needs one watch and no `list()`:
+
+- Watch from `0`, the default. Keep a map of key to value in `onChange`, deleting on `change.deleted`.
+- Render in `onSync`. The first one has `initial: true`, which means loading is done.
+- Show offline on `onError` and online on the next `onSync`. A working watch syncs at least every 25 seconds, even when nothing changes.
+- Queue writes made offline and send them with `update()`. On an error, keep the write if `err.retryable`, otherwise drop it and tell the user.
+- Your own writes come back through the watch with `mine: true`.
+
+The watch handles the rest. A phone that slept or lost signal asks again as soon as the page is visible or online. A tab that slept for over a week gets a fresh snapshot, with deleted keys reported as deleted.
+
+To show a list first and follow it after, pass the list itself: `watch("game.*", fn, { from: await db.shared.list("game.*") })`.
 
 ## Decisions and rejected alternatives
 
@@ -396,6 +418,9 @@ const admin = kv("poll-cedar-pilot-mango-frost", { key: "sk_..." })   // can wri
 | `shared/`, `users/{id}/`, `me/` | Only shared + private, or ownership flags on keys | "Everyone reads, only I write" covers votes, names, scores and messages without conflicts or tampering. Private data is still needed for settings and drafts. |
 | Locking a whole space at creation | Locks per key, hashed read and write keys per space | One optional key per space gives read-only shared data with a plain header. Locking later would let anyone lock someone else's space. |
 | Reads need no token, except `me/` | Token on every request | Anyone can get a token, so requiring one protects nothing. `me/` needs it only to know who "me" is. |
+| Every key records `by`, the visitor who last wrote or deleted it | Writer hidden, or only on `users/` | Pages want "P2 moved to hole 4" and to skip their own writes coming back. IDs are already public under `users/*/`. |
+| The JS client sends the token only on writes and `me/` | Token on every request once there is one | Any custom header makes the browser preflight, preflights are cached per URL, and each watch request has a new URL. Public reads need no token. |
+| Watch reports `onSync` after each answer, beside `onChange` per key | A status enum, batched change arrays, or `list()` before every watch | One callback says "loaded", "working again" and "render now". `onChange` stays one key at a time. |
 | One visitor ID across all spaces, returned by `/anon` | A different ID per space | Simpler for raw clients, no extra request. Linking a visitor across spaces reveals little when nothing stored is secret. |
 | Generated names are four random words; any name of 16+ characters is accepted | A random alphanumeric suffix, any name, or names derived from the page URL | Words are easy to read out and type, and 4 of 4096 give 48 bits. Short names collide by accident. URL-derived names tie the store to how pages are hosted. A per-address limit on distinct missing spaces makes guessing slow. |
 | Token in localStorage, sent as a header | Cookie | A cookie from another domain counts as third-party. Safari and Brave block it, Firefox partitions it. |
