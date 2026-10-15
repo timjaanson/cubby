@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -45,8 +46,8 @@ func (s *Server) createSpace(c *reqCtx) error {
 	if label != "" && name != "" {
 		return apierr.BadParam("name", "Give a name or a label, not both.")
 	}
-	if label != "" && (!names.LabelRe.MatchString(label) || len(label) > 54) {
-		return apierr.BadParam("label", "A label is lowercase letters, digits and single hyphens, at most 54 characters.")
+	if label != "" && !names.ValidLabel(label) {
+		return apierr.BadParam("label", fmt.Sprintf("A label is lowercase letters, digits and single hyphens, at most %d characters.", names.MaxLabel))
 	}
 	if name != "" && !names.ValidSpace(name) {
 		return apierr.InvalidSpace(names.SuggestFor(name))
@@ -76,6 +77,7 @@ func (s *Server) createSpace(c *reqCtx) error {
 	if err != nil {
 		return err
 	}
+	s.lim.misses.remember(c.ip, name, s.lim.misses.now()) // its creator can use it even while out of miss budget
 	out := map[string]any{"space": name}
 	if locked {
 		out["key"] = key

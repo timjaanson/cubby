@@ -40,33 +40,30 @@ Contents:
 
 ### Space name
 
-An optional readable label followed by an 8-character suffix that looks random:
+16 to 63 lowercase letters, digits and single hyphens, not starting or ending with a hyphen:
 
 ```
-^([a-z0-9]+(-[a-z0-9]+)*-)?[a-z0-9]{8}$      at most 63 characters
+^[a-z0-9]+(-[a-z0-9]+)*$      16 to 63 characters
 ```
-
-The suffix must contain at least 2 digits and at least 2 letters.
 
 | Name | Valid | Why |
 |---|---|---|
-| `poll-k7m2x9q4` | yes | label plus suffix |
-| `k7m2x9q4` | yes | the label is optional |
-| `team-lunch-poll-9d24vw6e` | yes | labels may contain hyphens |
-| `poll` | no | no suffix |
-| `poll-7f3a` | no | suffix too short |
-| `poll-12345678` | no | suffix has no letters |
-| `poll-chatroom` | no | suffix has no digits |
-| `Poll-k7m2x9q4` | no | uppercase |
+| `cedar-pilot-mango-frost` | yes | four generated words |
+| `poll-cedar-pilot-mango-frost` | yes | a label plus four generated words |
+| `team-lunch-dashboard` | yes | any name of 16+ characters |
+| `poll` | no | shorter than 16 |
+| `poll-k7m2x9q4` | no | shorter than 16 |
+| `Poll-cedar-pilot-mango-frost` | no | uppercase |
+| `poll--cedar-pilot` | no | double hyphen |
 
-- Anyone using the same name uses the same space. The suffix rule stops accidental collisions on short words. It doesn't stop someone copying a name on purpose, and nothing could, since names are in page source.
-- The server only checks the shape. `poll-aaaa1111` is valid.
+- Anyone using the same name uses the same space. The name is the only thing between a stranger and an open space's `shared/` and `users/` data, so how hard it is to guess matters.
+- The server only checks length and characters. A hand-picked name like `team-lunch-dashboard` is valid and as easy to guess as it looks. For privacy, let cubby generate the name.
 - Words like `anon`, `spaces` or `whoami` can never be valid names, so system routes can't collide with spaces.
-- An invalid name returns 400 `invalid_space` with a `suggestion`: a valid name built from the label, such as `poll-x3k9m2qa` for `poll`.
+- An invalid name returns 400 `invalid_space` with a `suggestion`: a valid name built from it, such as `poll-slate-hinge-cocoa-pilot` for `poll`.
 
 Getting a name:
 
-- **Generate it.** 8 random characters from `a-z0-9`, retrying the rare result without 2 digits and 2 letters. The JS client has `kv.newName("poll")`, the CLI has `cubby name poll`. The first write creates the space.
+- **Generate it.** Four words drawn from a fixed list of 4096 short English words (3 to 6 letters), joined by hyphens. That's 48 random bits, about 2.8 × 10^14 names. A label goes in front: `poll-cedar-pilot-mango-frost`. A label is at most 35 characters, so a labeled name always fits in 63. The JS client has `kv.newName("poll")`, the CLI has `cubby name poll`, the server uses the same list. The first write creates the space.
 - **Ask the server** with `POST /v1/spaces`, see [Create a space](#create-a-space). Required for locked spaces.
 
 ### Visitor ID
@@ -258,7 +255,7 @@ Authorization: Bearer kv_...
 
 ```
 201
-{"space": "poll-k7m2x9q4", "key": "sk_8Hq3vT..."}
+{"space": "poll-cedar-pilot-mango-frost", "key": "sk_8Hq3vT..."}
 ```
 
 - The key is `sk_` plus 32 random bytes in base64url. The server stores only its SHA-256 hash and returns the key this once.
@@ -299,7 +296,7 @@ Closing a server decides who may use it. It doesn't protect anything in transit.
 The operator creates them on the server machine, see [Managing tokens](#managing-tokens):
 
 ```
-$ cubby admin token new sensor-livingroom --allow 'home-k7m2x9q4/shared/env.*:w' --until 90d
+$ cubby admin token new sensor-livingroom --allow 'home-cedar-pilot-mango-frost/shared/env.*:w' --until 90d
 kv_4Jx9...
 u_k7m2x9q4p1r8t3w6
 ```
@@ -337,8 +334,8 @@ Rules:
 - `users` covers both `users/{id}/` and `users/*/`.
 - A key covers only itself. A pattern `p*` covers every key that starts with `p`, and every pattern `q*` where `q` starts with `p`. `env.*` covers `env.temp`, `env.*` and `env.t*`, but not `*` or `e*`.
 - A request with a pattern needs one scope that covers the whole pattern. Scopes don't add up: `env.temp:r` and `env.rh:r` together don't allow `GET env.*`. A batch `POST env.*/series` needs `w` on a scope covering `env.*`.
-- A space pattern works the same way on space names. End the prefix with `-` to mean a label: `home-*` covers `home-k7m2x9q4` and `home-office-4m8q2xk7`.
-- `POST /v1/spaces` needs `w` on a scope whose `SPACE` covers every name the request could produce. `home-*` covers `?label=home`, `?name=home-k7m2x9q4` needs a scope covering that name, and only `*` covers a request with neither. Creating a space by its first write needs only `w` on that name.
+- A space pattern works the same way on space names. End the prefix with `-` to mean a label: `home-*` covers `home-cedar-pilot-mango-frost` and `home-office-maple-quilt-tundra-cobalt`.
+- `POST /v1/spaces` needs `w` on a scope whose `SPACE` covers every name the request could produce. `home-*` covers `?label=home`, `?name=home-cedar-pilot-mango-frost` needs a scope covering that name, and only `*` covers a request with neither. Creating a space by its first write needs only `w` on that name.
 - `whoami` needs only a valid token.
 - A request outside every scope returns 403 `out_of_scope`. The scope check comes before the key is looked up, so a narrow token gets 403 rather than 404 for a key outside its scopes, and can't probe what exists.
 
@@ -347,10 +344,10 @@ Examples:
 | For | Scopes |
 |---|---|
 | yourself, everything | `all` |
-| a sensor that writes its readings | `home-k7m2x9q4/shared/env.*:w` |
-| a wall dashboard | `home-k7m2x9q4:r` |
-| a deploy script that bumps a counter | `homelab-4m8q2xk7/shared/deploy-count:rw` |
-| one poll voter, one token each | `poll-k7m2x9q4/shared:r`, `poll-k7m2x9q4/users/vote:rw` |
+| a sensor that writes its readings | `home-cedar-pilot-mango-frost/shared/env.*:w` |
+| a wall dashboard | `home-cedar-pilot-mango-frost:r` |
+| a deploy script that bumps a counter | `homelab-maple-quilt-tundra-cobalt/shared/deploy-count:rw` |
+| one poll voter, one token each | `poll-cedar-pilot-mango-frost/shared:r`, `poll-cedar-pilot-mango-frost/users/vote:rw` |
 | a team that makes its own spaces | `team-*:rw` |
 
 ### Valid until
@@ -452,16 +449,16 @@ In list and watch responses, JSON values appear as themselves and text values as
 POST /v1/spaces
 POST /v1/spaces?label=poll
 POST /v1/spaces?label=poll&locked
-POST /v1/spaces?name=poll-k7m2x9q4&locked
+POST /v1/spaces?name=poll-cedar-pilot-mango-frost&locked
 ```
 
 ```
 201
-{"space": "poll-k7m2x9q4"}
-{"space": "poll-k7m2x9q4", "key": "sk_8Hq3vT..."}      with locked
+{"space": "poll-cedar-pilot-mango-frost"}
+{"space": "poll-cedar-pilot-mango-frost", "key": "sk_8Hq3vT..."}      with locked
 ```
 
-- Generates a name, creates the space empty, and returns the name. The name is now taken.
+- Generates a name (four random words, after the label if given; a label is at most 35 characters), creates the space empty, and returns the name. The name is now taken.
 - With `name`, creates exactly that name instead, which must follow the naming rule. A name that's taken, by `POST /v1/spaces` or by a write, returns 409 `space_exists`. `name` and `label` can't be combined.
 - Needs a token, and counts against the limits on new spaces.
 - Optional for open spaces, since writing to any valid name creates it. Required for locked ones.
@@ -782,11 +779,25 @@ Token buckets. A 429 includes `Retry-After` in seconds and `retryAfter` in the b
 | Reads per IP | 600 per minute | 429 `rate_limited` |
 | New spaces per visitor | 5 per day | 429 `space_limit` |
 | New spaces per IP | 20 per day | 429 `space_limit` |
+| Distinct missing spaces per IP | 30 per hour, burst 30 | 429 `miss_limit` |
 | Spaces on the server | 1000 | 507 `server_full` |
 
 A `POST` that adds points counts as one write, however many series it adds to.
 
 The IP-based write limits exist because one person can create many visitors. They're set high enough for a household or office behind one IP.
+
+### Guessing space names
+
+The miss limit makes guessing names slow. It counts how many different spaces that don't exist an address touches.
+
+- A request to a space that doesn't exist costs one miss, the first time. Touching the same missing name again within the hour is free, so a page polling a deleted space costs one miss, not one per poll.
+- A missing key inside a space that exists costs nothing. Neither does using a space that exists.
+- A write that creates a space counts as a miss. `POST /v1/spaces` doesn't, and its creator can use the new space right away.
+- Once an address is out of misses, every space it hasn't used in the last hour answers 429 `miss_limit`, whether the space exists or not. A 429 only for missing spaces would tell a guesser which names exist. Spaces it used in the last hour keep working, so pages already open aren't cut off.
+- Refused requests don't cost anything. One miss comes back every 2 minutes.
+- IPv6 addresses count per /64, like the other IP limits. `rate_limits = false` turns it off with the rest.
+
+With generated names (48 bits) and 1000 spaces, one address needs about 3 × 10^11 guesses to find any space. At 30 an hour that is about a million years.
 
 ### When a limit is hit
 
@@ -855,7 +866,7 @@ max_space_bytes = "5MB"
 max_space_keys = 10000
 max_total_bytes = "1GB"
 
-[spaces.poll-k7m2x9q4]                  # pinned
+[spaces.poll-cedar-pilot-mango-frost]                  # pinned
 max_bytes = "100MB"
 max_value_size = "256KB"
 max_series_points = 500000
@@ -962,10 +973,10 @@ Optional. Served at `/kv.js` as an ES module with no dependencies. Every method 
 ```js
 import { kv } from "https://kv.example.com/kv.js"
 
-const db = kv("poll-k7m2x9q4")
-const admin = kv("poll-k7m2x9q4", { key: "sk_8Hq3vT..." })   // can write shared/ when locked
+const db = kv("poll-cedar-pilot-mango-frost")
+const admin = kv("poll-cedar-pilot-mango-frost", { key: "sk_8Hq3vT..." })   // can write shared/ when locked
 
-kv.newName("poll")     // "poll-x3k9m2qa", local, no request
+kv.newName("poll")     // "poll-slate-hinge-cocoa-pilot", local, no request
 ```
 
 | Option | Default | Purpose |
@@ -1056,17 +1067,17 @@ cubby <command> ...             everything else is a client talking HTTP to a se
 Commands take paths that mirror the URL after `/v1/`:
 
 ```
-poll-k7m2x9q4/shared/question
-poll-k7m2x9q4/users/u_k7m2x9q4p1r8t3w6/vote
-poll-k7m2x9q4/users/*/vote
-poll-k7m2x9q4/users/me/vote          CLI shorthand for your own visitor ID
-poll-k7m2x9q4/me/draft
-poll-k7m2x9q4/shared/msg.*
+poll-cedar-pilot-mango-frost/shared/question
+poll-cedar-pilot-mango-frost/users/u_k7m2x9q4p1r8t3w6/vote
+poll-cedar-pilot-mango-frost/users/*/vote
+poll-cedar-pilot-mango-frost/users/me/vote          CLI shorthand for your own visitor ID
+poll-cedar-pilot-mango-frost/me/draft
+poll-cedar-pilot-mango-frost/shared/msg.*
 ```
 
 `users/me/` exists only in the CLI. It's replaced with your visitor ID before the request, and getting the ID may fetch a token.
 
-Paths containing `*` must be quoted, as in `cubby ls 'poll-k7m2x9q4/users/*/vote'`. Otherwise the shell tries to expand them as file names, and zsh stops with "no matches found".
+Paths containing `*` must be quoted, as in `cubby ls 'poll-cedar-pilot-mango-frost/users/*/vote'`. Otherwise the shell tries to expand them as file names, and zsh stops with "no matches found".
 
 ### Configuration
 
@@ -1128,10 +1139,10 @@ Flags:
 ### Series from the CLI
 
 ```
-cubby add home-k7m2x9q4/shared/temp 21.4
-cubby add 'home-k7m2x9q4/shared/env.*' temp=21.4 rh=45 door=open
-echo '{"temp": 21.4, "rh": 45}' | cubby add 'home-k7m2x9q4/shared/env.*'
-cubby series home-k7m2x9q4/shared/env.temp --since 24h
+cubby add home-cedar-pilot-mango-frost/shared/temp 21.4
+cubby add 'home-cedar-pilot-mango-frost/shared/env.*' temp=21.4 rh=45 door=open
+echo '{"temp": 21.4, "rh": 45}' | cubby add 'home-cedar-pilot-mango-frost/shared/env.*'
+cubby series home-cedar-pilot-mango-frost/shared/env.temp --since 24h
 ```
 
 - With a key, the value is used as given, like `set`. `21.4` is stored as a JSON number and `open` as text.
@@ -1164,7 +1175,7 @@ If the command fails, the CLI prints a warning and carries on. With `--state`, t
 `update --exec CMD` pipes the current value into `CMD` (the text `null` if the key is missing) and writes whatever it prints. On a version conflict it reads again and runs `CMD` again. That makes `jq` a natural partner:
 
 ```
-cubby update homelab-4m8q2xk7/shared/deploy-count --exec 'jq "(. // 0) + 1"'
+cubby update homelab-maple-quilt-tundra-cobalt/shared/deploy-count --exec 'jq "(. // 0) + 1"'
 ```
 
 Without `--exec`, `update` opens the value in `$EDITOR`, and on a conflict reopens it with the newer value.

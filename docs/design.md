@@ -2,7 +2,7 @@
 
 A self-hosted key-value store in a single binary, for shared and per-visitor state in web pages, scripts and anything else that can make an HTTP request. No setup per use and no visible login.
 
-Status: v0.7.1 is built, series included. Differences between the build and these docs are listed at the end of the [README](../README.md#differences-from-the-design-docs).
+Status: v0.8.0 is built, series included. Differences between the build and these docs are listed at the end of the [README](../README.md#differences-from-the-design-docs).
 
 - This file explains the model and how a client uses it.
 - [spec.md](spec.md) is the detailed contract, including the CLI, plus ideas kept for later.
@@ -38,7 +38,7 @@ Every feature with plain `curl` against a local server, using only the path and 
 ```sh
 cubby serve &                                       # port 28229, no config
 
-S=http://localhost:28229/v1/demo-k7m2x9q4              # a space: any label plus 8 random characters
+S=http://localhost:28229/v1/demo-cedar-pilot-mango-frost  # a space: a label plus four random words
 T=$(curl -s -X POST localhost:28229/v1/anon | jq -r .token)
 A="Authorization: Bearer $T"                          # needed for writes and for me/, never for other reads
 ID=$(curl -s -H "$A" localhost:28229/v1/whoami | jq -r .id)
@@ -117,13 +117,13 @@ Parameters only narrow or guard that default:
 ## The model
 
 ```
-space              "poll-k7m2x9q4"
+space              "poll-cedar-pilot-mango-frost"
 ├── shared/        everyone reads; who writes depends on the kind of space
 ├── users/{id}/    everyone reads, only that visitor writes
 └── me/            only the visitor reads and writes
 ```
 
-- **Space** is a name like `poll-k7m2x9q4`: an optional label plus 8 random-looking characters. The server rejects names without such a suffix, so nobody lands in someone else's `chat` by accident. A space is created by its first write. It's the unit of storage, quotas and cleanup.
+- **Space** is a name like `poll-cedar-pilot-mango-frost`: an optional label plus four random words from a 4096-word list. The server only requires 16 to 63 characters, so nobody lands in someone else's `chat` by accident. Generated names are hard to guess, and the server slows down anyone trying names that don't exist. A space is created by its first write. It's the unit of storage, quotas and cleanup.
 - **Visitor** is an anonymous identity, one per browser. `POST /v1/anon` returns a token and the visitor's ID. The token goes in localStorage and is sent on writes.
 - **shared/** is the space's common data. In an open space any visitor writes it, in a locked space only whoever holds the space key. See [Two kinds of spaces](#two-kinds-of-spaces).
 - **users/{id}/** is each visitor's public data: a vote, a name, a score, a message. Anyone can read it, nobody else can change it. `users/*/vote` lists every visitor's `vote` at once.
@@ -179,8 +179,8 @@ Reads need no token because a token would protect nothing. Anyone can get one. W
 For data that shouldn't be public, the operator sets `access = "closed"`. Then `/v1/anon` is off and every request needs a token, reads included. The operator issues tokens on the server machine, one per device or person, each limited to some spaces, areas and keys, read or write, and optionally to a date:
 
 ```
-cubby admin token new dashboard --allow 'home-k7m2x9q4:r'
-cubby admin token new sensor --allow 'home-k7m2x9q4/shared/env.*:w' --until 90d
+cubby admin token new dashboard --allow 'home-cedar-pilot-mango-frost:r'
+cubby admin token new sensor --allow 'home-cedar-pilot-mango-frost/shared/env.*:w' --until 90d
 cubby admin token revoke sensor
 ```
 
@@ -201,7 +201,7 @@ An issued token looks and works like any other, so clients don't change. Details
 ```
 POST   /v1/anon                         → {"token": "kv_...", "id": "u_k7m2x9q4p1r8t3w6"}
 GET    /v1/whoami                       → {"id": ...}                                 token
-POST   /v1/spaces?label=poll[&locked]   → {"space": "poll-k7m2x9q4", "key": "sk_..."}  token, optional
+POST   /v1/spaces?label=poll[&locked]   → {"space": "poll-cedar-pilot-mango-frost", "key": "sk_..."}  token, optional
 
 GET    /v1/{space}/shared/{key}         read
 PUT    /v1/{space}/shared/{key}         write                   token (+ Space-Key if locked)
@@ -224,7 +224,7 @@ GET    .../{key}/series?since=T         read points, oldest first
 
 Every data URL is `/v1/{space}/{area}/{key or pattern}`, optionally followed by one action, `watch` or `series`. There's always a key or pattern, and nothing comes after the action.
 
-Examples shorten space names to `poll` for readability. Real names need the suffix.
+Examples shorten space names to `poll` for readability. Real names are at least 16 characters.
 
 ## Reading and writing
 
@@ -341,17 +341,17 @@ The server binary is also the client. Paths mirror the URLs.
 ```sh
 export CUBBY_SERVER=https://kv.example.com
 
-cubby set  poll-k7m2x9q4/shared/question "Pizza or tacos?"
-cubby get  poll-k7m2x9q4/shared/question               # prints the raw value
-cubby set  poll-k7m2x9q4/users/me/vote tacos           # users/me = your own ID
-cubby ls   'poll-k7m2x9q4/users/*/vote'                 # user, key, value per line
-cubby watch status-4m8q2xk7/shared/deploy --exec ./deploy.sh
-cubby update status-4m8q2xk7/shared/count --exec 'jq "(. // 0) + 1"'
-cubby add  home-k7m2x9q4/shared/temp 21.4                 # a point in a series
-cubby add  'home-k7m2x9q4/shared/env.*' temp=21.4 rh=45   # several series at once
-cubby series home-k7m2x9q4/shared/temp --since 24h        # t<TAB>value per point
+cubby set  poll-cedar-pilot-mango-frost/shared/question "Pizza or tacos?"
+cubby get  poll-cedar-pilot-mango-frost/shared/question               # prints the raw value
+cubby set  poll-cedar-pilot-mango-frost/users/me/vote tacos           # users/me = your own ID
+cubby ls   'poll-cedar-pilot-mango-frost/users/*/vote'                 # user, key, value per line
+cubby watch status-maple-quilt-tundra-cobalt/shared/deploy --exec ./deploy.sh
+cubby update status-maple-quilt-tundra-cobalt/shared/count --exec 'jq "(. // 0) + 1"'
+cubby add  home-cedar-pilot-mango-frost/shared/temp 21.4                 # a point in a series
+cubby add  'home-cedar-pilot-mango-frost/shared/env.*' temp=21.4 rh=45   # several series at once
+cubby series home-cedar-pilot-mango-frost/shared/temp --since 24h        # t<TAB>value per point
 cubby new status --locked                               # prints name and key, saves the key
-curl "$(cubby url poll-k7m2x9q4/shared/question)"       # same thing over raw HTTP
+curl "$(cubby url poll-cedar-pilot-mango-frost/shared/question)"       # same thing over raw HTTP
 ```
 
 Quote paths containing `*`, or the shell tries to expand them. Tokens are fetched and saved automatically. Exit codes tell scripts what happened without parsing output: 1 not found, 2 version conflict, 3 not allowed, 4 limit hit. Server administration lives under `cubby admin`.
@@ -363,7 +363,7 @@ Optional. Everything it does is plain HTTP underneath.
 ```js
 import { kv } from "https://kv.example.com/kv.js"
 
-const db = kv("poll-k7m2x9q4")
+const db = kv("poll-cedar-pilot-mango-frost")
 
 await db.shared.set("question", "Pizza or tacos?")
 const q = await db.shared.get("question")               // null if missing
@@ -381,7 +381,7 @@ await db.shared.add("temp", 21.4)                       // a point in a series
 await db.shared.add("env.*", { temp: 21.4, rh: 45 })    // one point each in env.temp and env.rh
 const { points } = await db.shared.series("temp", { since: Date.now() - 864e5 })
 
-const admin = kv("poll-k7m2x9q4", { key: "sk_..." })   // can write shared/ in a locked space
+const admin = kv("poll-cedar-pilot-mango-frost", { key: "sk_..." })   // can write shared/ in a locked space
 ```
 
 ## Decisions and rejected alternatives
@@ -397,7 +397,7 @@ const admin = kv("poll-k7m2x9q4", { key: "sk_..." })   // can write shared/ in a
 | Locking a whole space at creation | Locks per key, hashed read and write keys per space | One optional key per space gives read-only shared data with a plain header. Locking later would let anyone lock someone else's space. |
 | Reads need no token, except `me/` | Token on every request | Anyone can get a token, so requiring one protects nothing. `me/` needs it only to know who "me" is. |
 | One visitor ID across all spaces, returned by `/anon` | A different ID per space | Simpler for raw clients, no extra request. Linking a visitor across spaces reveals little when nothing stored is secret. |
-| Space names need a random-looking suffix | Any name, or names derived from the page URL | Short names collide by accident. URL-derived names tie the store to how pages are hosted. |
+| Generated names are four random words; any name of 16+ characters is accepted | A random alphanumeric suffix, any name, or names derived from the page URL | Words are easy to read out and type, and 4 of 4096 give 48 bits. Short names collide by accident. URL-derived names tie the store to how pages are hosted. A per-address limit on distinct missing spaces makes guessing slow. |
 | Token in localStorage, sent as a header | Cookie | A cookie from another domain counts as third-party. Safari and Brave block it, Firefox partitions it. |
 | Closed mode with operator-issued tokens, one per device | One static server password | A leaked token is revoked alone, without changing every device. Each has its own scopes and end, and writes show who made them. |
 | Scopes per token as `space/area/target:rights` | Roles, or permissions stored on spaces | Uses the same prefix patterns as the API, and the operator sees all of a token's access in one line. |

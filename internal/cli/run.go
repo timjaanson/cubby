@@ -29,8 +29,9 @@ Client (talks to --server or $CUBBY_SERVER, default http://localhost:28229; a ba
   cubby whoami | token | url <path>
 
 Paths mirror the URL after /v1/:
-  poll-k7m2x9q4/shared/question     poll-k7m2x9q4/users/me/vote
-  'poll-k7m2x9q4/shared/msg.*'      'poll-k7m2x9q4/users/*/vote'     poll-k7m2x9q4/me/draft
+  poll-cedar-pilot-mango/shared/question     poll-cedar-pilot-mango/users/me/vote
+  'poll-cedar-pilot-mango/shared/msg.*'      'poll-cedar-pilot-mango/users/*/vote'
+  poll-cedar-pilot-mango/me/draft
 
 Run 'cubby help <command>' for flags, or see the README.
 `

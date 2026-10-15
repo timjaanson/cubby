@@ -30,8 +30,8 @@ var commandFlags = map[string]struct {
 	"add":    {[]string{"time"}, nil, "add <path> [value|-] [--time MS]\n  Add a point to a series, from the argument or stdin. Prints the point's time.\nadd <prefix*> name=value ... [--time MS]\n  Add one point to each series prefix+name, all at one time. A value is JSON if it parses,\n  otherwise a string. Without name=value arguments, reads one JSON object from stdin."},
 	"series": {[]string{"since", "limit"}, []string{"json"}, "series <path> [--since MS|24h|90m|7d] [--limit N] [--json]\n  Print a series' points oldest first, as t<TAB>value. Without --since, the newest 1000."},
 	"update": {[]string{"exec"}, nil, "update <path> [--exec CMD]\n  Read, pipe through CMD (or open $EDITOR), write back with ifVersion, retry on conflict.\n  Example: cubby update space/shared/count --exec 'jq \"(. // 0) + 1\"'"},
-	"new":    {[]string{"label"}, []string{"locked", "no-save"}, "new [label | name] [--locked] [--no-save]\n  Create a space and print its name. A label gets random characters added (new poll\n  -> poll-k7m2x9q4). A full space name, like one from 'cubby name', is created as is,\n  and fails if it's taken. --label L forces label meaning. Locked spaces print the key\n  on a second line and save it."},
-	"name":   {nil, nil, "name [label]\n  Print a new valid space name. No server needed."},
+	"new":    {[]string{"label"}, []string{"locked", "no-save"}, "new [label | name] [--locked] [--no-save]\n  Create a space and print its name. With nothing, the name is four random words\n  (cedar-pilot-mango-frost). A label gets the words added (new poll ->\n  poll-cedar-pilot-mango-frost). A full space name of 16+ characters is created as is,\n  and fails if it's taken. --label L forces label meaning. Locked spaces print the key\n  on a second line and save it."},
+	"name":   {nil, nil, "name [label]\n  Print a new space name: four random words, after the label if given. No server needed."},
 	"whoami": {nil, nil, "whoami\n  Print your visitor ID."},
 	"token":  {nil, nil, "token\n  Print your token, for curl: curl -H \"Authorization: Bearer $(cubby token)\" ..."},
 	"url":    {nil, nil, "url <path>\n  Print the full URL for a path."},
@@ -404,8 +404,8 @@ func (c *client) newSpace(f *flags) error {
 	case len(f.args) == 1:
 		q.Set("label", f.args[0])
 	}
-	if l := q.Get("label"); l != "" && (!names.LabelRe.MatchString(l) || len(l) > 54) {
-		return &cliError{code: 5, err: "invalid_parameter", msg: fmt.Sprintf("%q isn't a label or a space name. A label is lowercase letters, digits and single hyphens, at most 54 characters", l)}
+	if l := q.Get("label"); l != "" && !names.ValidLabel(l) {
+		return &cliError{code: 5, err: "invalid_parameter", msg: fmt.Sprintf("%q isn't a label or a space name. A label is lowercase letters, digits and single hyphens, at most %d characters", l, names.MaxLabel)}
 	}
 	u := "/v1/spaces"
 	if len(q) > 0 {

@@ -46,6 +46,7 @@ func (s *Server) Cleanup() (store.CleanupReport, error) {
 	for _, l := range s.lim.all() {
 		l.prune()
 	}
+	s.lim.misses.prune()
 	return rep, err
 }
 
@@ -177,6 +178,11 @@ func (s *Server) route(c *reqCtx) error {
 	space := seg[0]
 	if !names.ValidSpace(space) {
 		return apierr.InvalidSpace(names.SuggestFor(space))
+	}
+	if s.cfg.RateLimitsOn() {
+		if ok, retry := s.lim.misses.check(c.ip, space, func() bool { return s.store.SpaceExists(space) }); !ok {
+			return apierr.RateLimited("miss_limit", retry)
+		}
 	}
 
 	t := store.Target{Space: space}

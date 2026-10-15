@@ -20,17 +20,17 @@ cubby serve --listen 127.0.0.1:9000          # this machine only
 Try it from another terminal:
 
 ```sh
-$ cubby set notes-k7m2x9q4/shared/hello "Hello there"
+$ cubby set notes-cedar-pilot-mango-frost/shared/hello "Hello there"
 1792005858928
 
-$ cubby get notes-k7m2x9q4/shared/hello
+$ cubby get notes-cedar-pilot-mango-frost/shared/hello
 Hello there
 
-$ curl http://localhost:28229/v1/notes-k7m2x9q4/shared/hello
+$ curl http://localhost:28229/v1/notes-cedar-pilot-mango-frost/shared/hello
 Hello there
 ```
 
-`notes-k7m2x9q4` is a space: a readable label plus 8 random characters. Make one up with `cubby name notes`. Writing to a space creates it.
+`notes-cedar-pilot-mango-frost` is a space: an optional readable label plus four random words. Make one up with `cubby name notes`. Writing to a space creates it. Any name of 16 to 63 lowercase letters, digits and hyphens works, but a hand-picked one is as easy to guess as it looks.
 
 ## Install
 
@@ -51,7 +51,7 @@ On a Mac, a binary downloaded through a browser is quarantined. Clear that once 
 ## How data is organised
 
 ```
-space                 notes-k7m2x9q4
+space                 notes-cedar-pilot-mango-frost
 ├── shared/{key}      everyone reads; any visitor writes (or only the key holder, in a locked space)
 ├── users/{id}/{key}  everyone reads; only that visitor writes
 └── me/{key}          only that visitor reads and writes
@@ -69,33 +69,33 @@ space                 notes-k7m2x9q4
 Paths mirror the URL after `/v1/`. Quote paths with `*`.
 
 ```sh
-cubby get   notes-k7m2x9q4/shared/hello
-cubby set   notes-k7m2x9q4/shared/hello "new text"       # or pipe the value on stdin
-cubby del   notes-k7m2x9q4/shared/hello
-cubby ls    'notes-k7m2x9q4/shared/msg.*'                # key<TAB>value per line
-cubby ls    'poll-9d24vw6e/users/*/vote'                 # user<TAB>key<TAB>value
-cubby set   poll-9d24vw6e/users/me/vote tacos            # users/me is your own ID
-cubby watch notes-k7m2x9q4/shared/hello                  # current value, then each change
-cubby update homelab-4m8q2xk7/shared/count --exec 'jq "(. // 0) + 1"'
-cubby new status --locked                                # status-<random>, prints the name and a space key
-cubby new status-k7m2x9q4                                # exactly this name; fails if it's taken
-cubby name poll                                          # a fresh valid name, offline
+cubby get   notes-cedar-pilot-mango-frost/shared/hello
+cubby set   notes-cedar-pilot-mango-frost/shared/hello "new text"       # or pipe the value on stdin
+cubby del   notes-cedar-pilot-mango-frost/shared/hello
+cubby ls    'notes-cedar-pilot-mango-frost/shared/msg.*'                # key<TAB>value per line
+cubby ls    'poll-orbit-lilac-tango-slate/users/*/vote'                 # user<TAB>key<TAB>value
+cubby set   poll-orbit-lilac-tango-slate/users/me/vote tacos            # users/me is your own ID
+cubby watch notes-cedar-pilot-mango-frost/shared/hello                  # current value, then each change
+cubby update homelab-maple-quilt-tundra-cobalt/shared/count --exec 'jq "(. // 0) + 1"'
+cubby new status --locked                               # status-<four words>, prints the name and a space key
+cubby new status-cedar-pilot-mango-frost                # exactly this name; fails if it's taken
+cubby name poll                                         # a fresh valid name, offline
 cubby whoami | token | url <path>
 ```
 
 Series:
 
 ```sh
-cubby add    home-k7m2x9q4/shared/temp 21.4                      # one point; prints its time
-cubby add    'home-k7m2x9q4/shared/env.*' temp=21.4 rh=45 door=open   # env.temp, env.rh, env.door
-echo '{"temp": 21.4}' | cubby add 'home-k7m2x9q4/shared/env.*'      # the same from stdin
-cubby series home-k7m2x9q4/shared/env.temp --since 24h           # t<TAB>value, oldest first
+cubby add    home-cedar-pilot-mango-frost/shared/temp 21.4                      # one point; prints its time
+cubby add    'home-cedar-pilot-mango-frost/shared/env.*' temp=21.4 rh=45 door=open   # env.temp, env.rh, env.door
+echo '{"temp": 21.4}' | cubby add 'home-cedar-pilot-mango-frost/shared/env.*'      # the same from stdin
+cubby series home-cedar-pilot-mango-frost/shared/env.temp --since 24h           # t<TAB>value, oldest first
 ```
 
 Run a command for every change, and resume where it stopped after a restart:
 
 ```sh
-cubby watch homelab-4m8q2xk7/shared/deploy --from now \
+cubby watch homelab-maple-quilt-tundra-cobalt/shared/deploy --from now \
   --state /var/lib/deploy-watcher/version \
   --exec 'ref=$(cat); [ "$KV_DELETED" = 1 ] || /opt/app/deploy.sh "$ref"'
 ```
@@ -110,8 +110,8 @@ It talks to `http://localhost:28229` unless told otherwise. `--server` and `CUBB
 
 ```sh
 export CUBBY_SERVER=https://kv.example.com
-cubby get notes-k7m2x9q4/shared/hello --server 9000      # http://localhost:9000
-CUBBY_SERVER=9000 cubby ls 'notes-k7m2x9q4/shared/*'
+cubby get notes-cedar-pilot-mango-frost/shared/hello --server 9000      # http://localhost:9000
+CUBBY_SERVER=9000 cubby ls 'notes-cedar-pilot-mango-frost/shared/*'
 ```
 
 The CLI saves its token, and keys of spaces it created, in `~/.config/cubby/credentials.toml` (mode 0600). For a fixed identity in a script, set `CUBBY_TOKEN`. To write a locked space from another machine, set `CUBBY_SPACE_KEY`.
@@ -132,7 +132,7 @@ Everything the CLI does is a single request.
 | add a point to a series | `POST /v1/{space}/shared/temp/series`, body is the value |
 | add to several series | `POST /v1/{space}/shared/env.*/series`, body `{"temp": 21.4, "rh": 45}` |
 | read a series | `GET /v1/{space}/shared/temp/series` (newest 1000) or `?since=MS` (after that time) |
-| create a locked space | `POST /v1/spaces?label=poll&locked` → `{"space": ..., "key": "sk_..."}`, or `?name=poll-k7m2x9q4&locked` for an exact name |
+| create a locked space | `POST /v1/spaces?label=poll&locked` → `{"space": ..., "key": "sk_..."}`, or `?name=poll-cedar-pilot-mango-frost&locked` for an exact name |
 
 Writes to `shared/` of a locked space also need `Space-Key: sk_...`. Unknown or repeated query parameters are rejected with 400, so a typo like `ifversion=0` fails instead of overwriting. Errors are JSON with a stable `error` code and a `message`. CORS is open, so pages on any origin can call it.
 
@@ -148,7 +148,7 @@ The server hosts a small client at `/kv.js`:
 <script type="module">
 import { kv } from "http://localhost:28229/kv.js"
 
-const db = kv("poll-9d24vw6e")
+const db = kv("poll-orbit-lilac-tango-slate")
 await db.shared.set("question", "Pizza or tacos?")
 await db.user().set("vote", "tacos")
 
@@ -167,13 +167,13 @@ It keeps the visitor token in `localStorage` and finds the API from the URL it w
 A key becomes a series with its first `POST {key}/series`. From then on:
 
 ```
-POST /v1/home-k7m2x9q4/shared/temp/series            21.4           → 201 {"version": …, "t": 1792056454796}
-POST /v1/home-k7m2x9q4/shared/temp/series?t=MS       21.2           a reading sent late, with its own time
-POST /v1/home-k7m2x9q4/shared/env.*/series           {"temp": 21.5, "rh": 45}
+POST /v1/home-cedar-pilot-mango-frost/shared/temp/series            21.4           → 201 {"version": …, "t": 1792056454796}
+POST /v1/home-cedar-pilot-mango-frost/shared/temp/series?t=MS       21.2           a reading sent late, with its own time
+POST /v1/home-cedar-pilot-mango-frost/shared/env.*/series           {"temp": 21.5, "rh": 45}
                                                      → 200 {"version": …, "t": …, "keys": ["env.temp", "env.rh"]}
-GET  /v1/home-k7m2x9q4/shared/temp                   → 21.4, the newest point, with header KV-Time: 1792056454796
-GET  /v1/home-k7m2x9q4/shared/temp/series            → {"key": "temp", "points": [{"t": …, "value": 21.4}, …], "version": …, "next": null}
-GET  /v1/home-k7m2x9q4/shared/temp/series?since=MS   → the points after MS, oldest first; pass "next" back as since for more
+GET  /v1/home-cedar-pilot-mango-frost/shared/temp                   → 21.4, the newest point, with header KV-Time: 1792056454796
+GET  /v1/home-cedar-pilot-mango-frost/shared/temp/series            → {"key": "temp", "points": [{"t": …, "value": 21.4}, …], "version": …, "next": null}
+GET  /v1/home-cedar-pilot-mango-frost/shared/temp/series?since=MS   → the points after MS, oldest first; pass "next" back as since for more
 ```
 
 - With a key in the URL, the body is one point, whatever its shape: a number, text, an object. With `prefix*`, the body is an object, and each member becomes a point in series `prefix` + name, all at the same time. Up to 100 members, all or nothing.
@@ -227,7 +227,7 @@ max_space_keys = 10000
 max_total_bytes = "1GB"
 max_spaces = 1000
 
-[spaces.status-k7m2x9q4]          # pinned: never cleaned up, own limits
+[spaces.status-cedar-pilot-mango-frost]          # pinned: never cleaned up, own limits
 max_bytes = "100MB"
 max_value_size = "256KB"
 max_series_points = 500000
@@ -327,10 +327,11 @@ internal/cli/       the cubby command: serve, admin, and the client commands
 internal/server/    HTTP API, rate limits, watches, admin socket handler
 internal/store/     SQLite storage: spaces, keys, series, visitors, cleanup
 internal/config/    config file, defaults, data directory lookup
-internal/names/     name and key validation, random names and tokens
+internal/names/     name and key validation, random names and tokens, words.txt
 internal/apierr/    the API error type and shared errors
 internal/version/   build version, set by build.sh
-web/kv.js           the JS client, embedded and served at /kv.js
+web/kv.js           the JS client, served at /kv.js with the word list filled in
+tools/wordlist/     builds internal/names/words.txt from public word lists (not in the binary)
 docs/               design.md (the model), spec.md (the contract), scenarios.md (worked examples)
 ```
 

@@ -63,7 +63,7 @@ func (c *Config) TOML(def *Config, dataDirNote string) string {
 	w.comment("Pinned spaces are never cleaned up and can have their own limits.")
 	w.comment("Leave a setting out to use the one from [limits].")
 	if len(c.Spaces) == 0 {
-		w.line("# [spaces.status-k7m2x9q4]")
+		w.line("# [spaces.status-cedar-pilot-mango]")
 		w.line(`# max_bytes = "100MB"`)
 		w.line(`# max_value_size = "256KB"     # capped at 1MB`)
 		w.line("# max_keys = 50000")

@@ -28,7 +28,7 @@ var (
 // InvalidSpace is a space name that breaks the naming rule.
 func InvalidSpace(suggestion string) *Error {
 	return &Error{Status: 400, Code: "invalid_space",
-		Message: "A space name is an optional label plus 8 random characters with at least 2 digits and 2 letters, like poll-k7m2x9q4.",
+		Message: "A space name is 16 to 63 lowercase letters, digits and single hyphens, like poll-cedar-pilot-mango-frost.",
 		Extra:   map[string]any{"suggestion": suggestion}}
 }
 
@@ -52,8 +52,11 @@ func RateLimited(code string, retry time.Duration) *Error {
 		secs = 1
 	}
 	msg := "Too many requests. Try again in a moment."
-	if code == "space_limit" {
+	switch code {
+	case "space_limit":
 		msg = "Too many new spaces. Try again later."
+	case "miss_limit":
+		msg = "Too many different spaces that don't exist from this address. Spaces you used in the last hour keep working. Try others later."
 	}
 	return &Error{Status: 429, Code: code, Message: msg, Extra: map[string]any{"retryAfter": secs}}
 }

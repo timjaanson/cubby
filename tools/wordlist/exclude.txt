@@ -1,0 +1,17 @@
+# Words dropped by hand from the candidate list. One per line.
+# Brands, products, people and places
+adobe amazon apache chevy ebay google iphone itunes lego prozac valium skype xbox xerox yahoo velcro humvee muppet sears santa waldo mickey hogan bobby sonny phoebe maria mardi john barney bruins tufts grinch dyer ferris geiger jersey surrey panama guinea chile oxford
+afghan china japan french dutch welsh latin celtic eskimo gypsy turban roman soviet
+april august june july monday friday
+# Web and abbreviations
+email ebook ecard login multi pseudo quasi sub sup max euro bok duh huh foo blah
+# Not plain base words
+lopes saith doth shalt ensued ensues opined razed husked maimed sculls sepals axons clumps friars rubles shoals cramps oldies lessee lessor septa septum phage urea mumbo petri
+# Medical and bodily
+urine mucus mucous saliva ulcer tumor hernia polio lupus sepsis cyst cystic biopsy chemo angina anemia anemic asthma autism uterus ovary womb rectal pelvic pelvis gonad fetal fetus pap strep mumps scurvy pox groin colon dung maggot zit septic opioid opium heroin addict junkie drug drunk booze boozy pill trauma
+# Death, violence, crime
+death dying coffin corpse casket morbid burial entomb gun gunmen bomb weapon pistol rifle musket kidnap murder terror victim arson felony stab abuse hate hatred racism martyr cartel junta impale penal
+# Religion and politics
+bible god pope papal papacy imam mosque mecca sharia caliph pagan devil demon occult
+# Sexual, insults, slurs
+babe bikini condom gigolo naked thong seduce lust lusty sexist sexism carnal bootie douche gay nappy chubby butch badass idiot idiocy stupid dork dumb vulgar

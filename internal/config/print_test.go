@@ -56,8 +56,8 @@ func TestPrintChangedRoundTrip(t *testing.T) {
 	c.Limits.MaxValueSize = 1500
 	c.Limits.MaxSpaces = 7
 	c.Spaces = map[string]PinnedSpace{
-		"status-k7m2x9q4": {MaxBytes: 100 << 20, MaxSeriesPoints: 500000},
-		"home-k7m2x9q4":   {MaxKeys: 3},
+		"status-cedar-pilot-mango": {MaxBytes: 100 << 20, MaxSeriesPoints: 500000},
+		"home-cedar-pilot-mango":   {MaxKeys: 3},
 	}
 	got, out := roundTrip(t, c)
 	if !reflect.DeepEqual(comparable(got), comparable(c)) {
@@ -68,7 +68,7 @@ func TestPrintChangedRoundTrip(t *testing.T) {
 		`space_idle_ttl = "12h"   # default: "180d"`,
 		`tombstone_ttl = "90s"`,
 		`max_value_size = "1500B"`,
-		"[spaces.home-k7m2x9q4]\nmax_keys = 3\n",
+		"[spaces.home-cedar-pilot-mango]\nmax_keys = 3\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)

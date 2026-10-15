@@ -10,6 +10,7 @@ import (
 type limiter struct {
 	rate  float64 // tokens per second
 	burst float64
+	now   func() time.Time
 
 	mu      sync.Mutex
 	buckets map[string]*bucket
@@ -23,13 +24,22 @@ type bucket struct {
 const maxBuckets = 100_000
 
 func newLimiter(perPeriod float64, period time.Duration, burst float64) *limiter {
-	return &limiter{rate: perPeriod / period.Seconds(), burst: burst, buckets: map[string]*bucket{}}
+	return &limiter{rate: perPeriod / period.Seconds(), burst: burst, now: time.Now, buckets: map[string]*bucket{}}
 }
 
 // take removes n tokens. If there aren't enough it returns how long until
 // there will be, and takes nothing.
 func (l *limiter) take(key string, n float64) (ok bool, retry time.Duration) {
-	now := time.Now()
+	return l.use(key, n, true)
+}
+
+// peek reports whether n tokens are there without taking them.
+func (l *limiter) peek(key string, n float64) (ok bool, retry time.Duration) {
+	return l.use(key, n, false)
+}
+
+func (l *limiter) use(key string, n float64, take bool) (ok bool, retry time.Duration) {
+	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	b := l.buckets[key]
@@ -43,7 +53,9 @@ func (l *limiter) take(key string, n float64) (ok bool, retry time.Duration) {
 	b.tokens = math.Min(l.burst, b.tokens+now.Sub(b.last).Seconds()*l.rate)
 	b.last = now
 	if b.tokens >= n {
-		b.tokens -= n
+		if take {
+			b.tokens -= n
+		}
 		return true, 0
 	}
 	need := n - b.tokens
@@ -66,7 +78,7 @@ func (l *limiter) evictOldest() {
 
 // prune drops buckets that are full again, since a full bucket behaves like a new one.
 func (l *limiter) prune() {
-	now := time.Now()
+	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for k, b := range l.buckets {
@@ -84,6 +96,7 @@ type limits struct {
 	readsPerIP       *limiter
 	spacesPerVisitor *limiter
 	spacesPerIP      *limiter
+	misses           *missGuard
 }
 
 func newLimits() *limits {
@@ -96,6 +109,7 @@ func newLimits() *limits {
 		readsPerIP:       newLimiter(600, time.Minute, 600),
 		spacesPerVisitor: newLimiter(5, day, 5),
 		spacesPerIP:      newLimiter(20, day, 20),
+		misses:           newMissGuard(),
 	}
 }
 

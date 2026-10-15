@@ -5,13 +5,13 @@ import "testing"
 func TestCLIPaths(t *testing.T) {
 	c := &client{sc: &serverCreds{Token: "kv_x", ID: "u_aaaaaaaaaaaaaaaa"}}
 	good := map[string]string{
-		"poll-k7m2x9q4/shared/q":                   "/v1/poll-k7m2x9q4/shared/q",
-		"/v1/poll-k7m2x9q4/shared/q":               "/v1/poll-k7m2x9q4/shared/q",
-		"poll-k7m2x9q4/shared/msg.*":               "/v1/poll-k7m2x9q4/shared/msg.*",
-		"poll-k7m2x9q4/users/*/vote":               "/v1/poll-k7m2x9q4/users/*/vote",
-		"poll-k7m2x9q4/users/me/vote":              "/v1/poll-k7m2x9q4/users/u_aaaaaaaaaaaaaaaa/vote",
-		"poll-k7m2x9q4/me/a:b":                     "/v1/poll-k7m2x9q4/me/a:b",
-		"poll-k7m2x9q4/users/u_bbbbbbbbbbbbbbbb/x": "/v1/poll-k7m2x9q4/users/u_bbbbbbbbbbbbbbbb/x",
+		"poll-cedar-pilot-mango/shared/q":                   "/v1/poll-cedar-pilot-mango/shared/q",
+		"/v1/poll-cedar-pilot-mango/shared/q":               "/v1/poll-cedar-pilot-mango/shared/q",
+		"poll-cedar-pilot-mango/shared/msg.*":               "/v1/poll-cedar-pilot-mango/shared/msg.*",
+		"poll-cedar-pilot-mango/users/*/vote":               "/v1/poll-cedar-pilot-mango/users/*/vote",
+		"poll-cedar-pilot-mango/users/me/vote":              "/v1/poll-cedar-pilot-mango/users/u_aaaaaaaaaaaaaaaa/vote",
+		"poll-cedar-pilot-mango/me/a:b":                     "/v1/poll-cedar-pilot-mango/me/a:b",
+		"poll-cedar-pilot-mango/users/u_bbbbbbbbbbbbbbbb/x": "/v1/poll-cedar-pilot-mango/users/u_bbbbbbbbbbbbbbbb/x",
 	}
 	for in, want := range good {
 		p, err := c.parsePath(in)
@@ -20,11 +20,11 @@ func TestCLIPaths(t *testing.T) {
 		}
 	}
 	for _, in := range []string{
-		"poll-k7m2x9q4/shared/a#b", "poll-k7m2x9q4/shared/a?x=1", "poll-k7m2x9q4/shared/a%2Fb",
-		"poll-k7m2x9q4/shared/..", "poll-k7m2x9q4/shared/.", "poll-k7m2x9q4/shared/watch",
-		"poll-k7m2x9q4/shared/a b", "poll-k7m2x9q4/shared/", "poll-k7m2x9q4/users/../x",
-		"poll-k7m2x9q4/users/bob/x", "poll/shared/x", "../poll-k7m2x9q4/shared/x",
-		"poll-k7m2x9q4/shared/a/b", "poll-k7m2x9q4/other/x", "poll-k7m2x9q4/me/café",
+		"poll-cedar-pilot-mango/shared/a#b", "poll-cedar-pilot-mango/shared/a?x=1", "poll-cedar-pilot-mango/shared/a%2Fb",
+		"poll-cedar-pilot-mango/shared/..", "poll-cedar-pilot-mango/shared/.", "poll-cedar-pilot-mango/shared/watch",
+		"poll-cedar-pilot-mango/shared/a b", "poll-cedar-pilot-mango/shared/", "poll-cedar-pilot-mango/users/../x",
+		"poll-cedar-pilot-mango/users/bob/x", "poll/shared/x", "../poll-cedar-pilot-mango/shared/x",
+		"poll-cedar-pilot-mango/shared/a/b", "poll-cedar-pilot-mango/other/x", "poll-cedar-pilot-mango/me/café",
 	} {
 		if _, err := c.parsePath(in); err == nil {
 			t.Errorf("parsePath(%q) accepted", in)
@@ -33,7 +33,7 @@ func TestCLIPaths(t *testing.T) {
 }
 
 func TestCLIFlags(t *testing.T) {
-	f, err := parseFlags([]string{"poll-k7m2x9q4/shared/t", "-5", "--if-version", "3"}, []string{"if-version"}, nil)
+	f, err := parseFlags([]string{"poll-cedar-pilot-mango/shared/t", "-5", "--if-version", "3"}, []string{"if-version"}, nil)
 	if err != nil || len(f.args) != 2 || f.args[1] != "-5" || f.str("if-version") != "3" {
 		t.Fatalf("negative value: %v %v", f, err)
 	}

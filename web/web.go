@@ -1,9 +1,17 @@
 // Package web holds browser-side assets that the server embeds and serves.
 package web
 
-import _ "embed"
+import (
+	"bytes"
+	_ "embed"
+	"strings"
 
-// KVJS is the JavaScript client, served at /kv.js.
-//
+	"github.com/timjaanson/cubby/internal/names"
+)
+
 //go:embed kv.js
-var KVJS []byte
+var kvSource []byte
+
+// KVJS is the JavaScript client, served at /kv.js, with the name word list
+// filled in.
+var KVJS = bytes.Replace(kvSource, []byte("__CUBBY_WORDS__"), []byte(strings.Join(names.Words, " ")), 1)

@@ -16,7 +16,7 @@ import (
 func TestHTTPValidation(t *testing.T) {
 	c := newTest(t)
 	tok, id := c.anon()
-	sp := "/v1/poll-k7m2x9q4"
+	sp := "/v1/poll-cedar-pilot-mango"
 	cases := []struct {
 		method, path string
 		status       int
@@ -45,13 +45,13 @@ func TestHTTPValidation(t *testing.T) {
 		{"PUT", sp + "/shared/a.b:c-d_e", 201, ""},
 		{"PUT", sp + "/shared/...", 201, ""},
 		// spaces
-		{"PUT", "/v1/..%2F..%2Fetc-k7m2x9q4/shared/x", 400, "invalid_space"},
+		{"PUT", "/v1/..%2F..%2Fetc-cedar-pilot-mango/shared/x", 400, "invalid_space"},
 		{"PUT", "/v1/%2E%2E/shared/x", 400, "invalid_space"},
-		{"PUT", "/v1/poll-k7m2x9q4%00/shared/x", 400, "invalid_space"},
-		{"PUT", "/v1/POLL-K7M2X9Q4/shared/x", 400, "invalid_space"},
-		{"PUT", "/v1/poll--k7m2x9q4/shared/x", 400, "invalid_space"},
-		{"PUT", "/v1/-k7m2x9q4/shared/x", 400, "invalid_space"},
-		{"PUT", "/v1/" + strings.Repeat("a", 55) + "-k7m2x9q4/shared/x", 400, "invalid_space"},
+		{"PUT", "/v1/poll-cedar-pilot-mango%00/shared/x", 400, "invalid_space"},
+		{"PUT", "/v1/POLL-CEDAR-PILOT-MANGO/shared/x", 400, "invalid_space"},
+		{"PUT", "/v1/poll--cedar-pilot-mango/shared/x", 400, "invalid_space"},
+		{"PUT", "/v1/-cedar-pilot-mango/shared/x", 400, "invalid_space"},
+		{"PUT", "/v1/" + strings.Repeat("a", 46) + "-cedar-pilot-mango/shared/x", 400, "invalid_space"},
 		{"PUT", "/v1//shared/x", 400, "invalid_space"},
 		{"GET", "/v1/anon/shared/x", 400, "invalid_space"},
 		// visitor IDs
@@ -64,7 +64,7 @@ func TestHTTPValidation(t *testing.T) {
 		// areas and routes
 		{"GET", sp + "/private/x", 404, "not_found"},
 		{"GET", sp + "/shared", 404, "not_found"},
-		{"GET", "/v%31/poll-k7m2x9q4/shared/x", 404, "not_found"},
+		{"GET", "/v%31/poll-cedar-pilot-mango/shared/x", 404, "not_found"},
 		// parameters
 		{"PUT", sp + "/shared/p?ifversion=0", 400, "invalid_parameter"},
 		{"PUT", sp + "/shared/p?ifVersion=1&ifVersion=0", 400, "invalid_parameter"},
@@ -119,7 +119,7 @@ func TestHTTPTokens(t *testing.T) {
 		}
 	}
 	// A bad token on a read that doesn't need one is ignored.
-	if s, _, _ := c.req("GET", "/v1/poll-k7m2x9q4/shared/x", "", "Authorization", "Bearer junk"); s != 404 {
+	if s, _, _ := c.req("GET", "/v1/poll-cedar-pilot-mango/shared/x", "", "Authorization", "Bearer junk"); s != 404 {
 		t.Errorf("read with junk token: %d", s)
 	}
 }
@@ -127,7 +127,7 @@ func TestHTTPTokens(t *testing.T) {
 // FuzzRoute throws arbitrary paths and queries at the router. Nothing may
 // answer 500 or panic, and no file may appear outside spaces/.
 func FuzzRoute(f *testing.F) {
-	for _, s := range []string{"/v1/poll-k7m2x9q4/shared/x", "/v1/poll-k7m2x9q4/users/*/v", "/v1/a/../b", "/v1/%2e%2e/x/y", "/v1/k7m2x9q4/me/x/watch?version=0&timeout=1"} {
+	for _, s := range []string{"/v1/poll-cedar-pilot-mango/shared/x", "/v1/poll-cedar-pilot-mango/users/*/v", "/v1/a/../b", "/v1/%2e%2e/x/y", "/v1/cedar-pilot-mango-frost/me/x/watch?version=0&timeout=1"} {
 		f.Add("PUT", s)
 		f.Add("GET", s)
 	}

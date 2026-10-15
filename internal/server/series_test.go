@@ -33,7 +33,7 @@ func TestSeriesBasics(t *testing.T) {
 	c := newTest(t)
 	tok, _ := c.anon()
 	auth := []string{"Authorization", "Bearer " + tok}
-	S := "/v1/home-k7m2x9q4/shared"
+	S := "/v1/home-cedar-pilot-mango/shared"
 
 	// First POST creates the series.
 	st, h, b := c.req("POST", S+"/temp/series", "21.4", auth...)
@@ -125,7 +125,7 @@ func TestSeriesKinds(t *testing.T) {
 	c := newTest(t)
 	tok, _ := c.anon()
 	auth := []string{"Authorization", "Bearer " + tok}
-	S := "/v1/home-k7m2x9q4/shared"
+	S := "/v1/home-cedar-pilot-mango/shared"
 	c.req("POST", S+"/temp/series", "21", auth...)
 	c.req("PUT", S+"/note", "hi", auth...)
 
@@ -145,7 +145,7 @@ func TestSeriesKinds(t *testing.T) {
 		{"PUT", S + "/series", "5", 400, "invalid_key"},
 		{"PUT", S + "/watch", "5", 400, "invalid_key"},
 		{"GET", S + "/env.*/series", "", 400, "invalid_key"},
-		{"GET", "/v1/home-k7m2x9q4/users/*/temp/series", "", 400, "invalid_key"},
+		{"GET", "/v1/home-cedar-pilot-mango/users/*/temp/series", "", 400, "invalid_key"},
 		{"GET", S + "/temp/series/watch", "", 400, "invalid_key"},
 		{"GET", S + "/temp/history", "", 400, "invalid_key"},
 		{"POST", S + "/env.*", "{}", 405, "method_not_allowed"},
@@ -187,7 +187,7 @@ func TestSeriesBatch(t *testing.T) {
 	c := newTest(t)
 	tok, _ := c.anon()
 	auth := []string{"Authorization", "Bearer " + tok}
-	S := "/v1/home-k7m2x9q4/shared"
+	S := "/v1/home-cedar-pilot-mango/shared"
 
 	st, _, b := c.req("POST", S+"/env.*/series", `{"temp": 21.4, "rh":45, "door":"open", "gps":{"lat":59.43}}`, auth...)
 	if st != 200 {
@@ -260,7 +260,7 @@ func TestSeriesTimes(t *testing.T) {
 	c := newTest(t)
 	tok, _ := c.anon()
 	auth := []string{"Authorization", "Bearer " + tok}
-	S := "/v1/home-k7m2x9q4/shared"
+	S := "/v1/home-cedar-pilot-mango/shared"
 	base := time.Now().UnixMilli() - 3_600_000
 
 	_, _, b := c.req("POST", S+"/temp/series?t="+itoa(base+2000), "22", auth...)
@@ -304,7 +304,7 @@ func TestSeriesRetentionAndBytes(t *testing.T) {
 	c.cfg.Limits.MaxSeriesPoints = 5
 	tok, id := c.anon()
 	auth := []string{"Authorization", "Bearer " + tok}
-	S := "/v1/home-k7m2x9q4/shared"
+	S := "/v1/home-cedar-pilot-mango/shared"
 	for i := range 12 {
 		if st, _, b := c.req("POST", S+"/temp/series", itoa(int64(i)), auth...); st >= 300 {
 			t.Fatalf("point %d: %d %s", i, st, b)
@@ -320,7 +320,7 @@ func TestSeriesRetentionAndBytes(t *testing.T) {
 	keyRow := int64(len("temp") + len("11"))
 	points := int64(5 * (len("temp") + 1))
 	points += int64(len("10") + len("11") - 2) // two of them have two digits
-	got := c.store.SpaceBytes("home-k7m2x9q4")
+	got := c.store.SpaceBytes("home-cedar-pilot-mango")
 	if got != keyRow+points {
 		t.Fatalf("space bytes %d, want %d", got, keyRow+points)
 	}
@@ -331,11 +331,11 @@ func TestSeriesRetentionAndBytes(t *testing.T) {
 
 	// Deleting the series frees everything but the tombstone.
 	c.req("DELETE", S+"/temp", "", auth...)
-	got = c.store.SpaceBytes("home-k7m2x9q4")
+	got = c.store.SpaceBytes("home-cedar-pilot-mango")
 	if got != int64(len("temp")) {
 		t.Fatalf("after delete: %d bytes", got)
 	}
-	n, _ := c.store.PointCount("home-k7m2x9q4")
+	n, _ := c.store.PointCount("home-cedar-pilot-mango")
 	if n != 0 {
 		t.Fatalf("%d points left after delete", n)
 	}
@@ -349,7 +349,7 @@ func TestSeriesQuota(t *testing.T) {
 	c.cfg.Limits.MaxSeriesPoints = 10
 	tok, _ := c.anon()
 	auth := []string{"Authorization", "Bearer " + tok}
-	S := "/v1/home-k7m2x9q4/shared"
+	S := "/v1/home-cedar-pilot-mango/shared"
 	// A full series at a steady rate never hits the quota by itself:
 	// 10 points of 5 bytes plus the key row is far below 200.
 	for i := range 50 {
@@ -369,7 +369,7 @@ func TestSeriesUsersAndMe(t *testing.T) {
 	tok, id := c.anon()
 	tok2, _ := c.anon()
 	auth := []string{"Authorization", "Bearer " + tok}
-	sp := "/v1/home-k7m2x9q4"
+	sp := "/v1/home-cedar-pilot-mango"
 	if st, _, b := c.req("POST", sp+"/users/"+id+"/weight/series", "71.2", auth...); st != 201 {
 		t.Fatalf("own users/: %d %s", st, b)
 	}
@@ -410,10 +410,10 @@ func TestSeriesMigratesOldFiles(t *testing.T) {
 	c := newTest(t)
 	tok, _ := c.anon()
 	auth := []string{"Authorization", "Bearer " + tok}
-	S := "/v1/home-k7m2x9q4/shared"
+	S := "/v1/home-cedar-pilot-mango/shared"
 	c.req("PUT", S+"/note", "hi", auth...)
-	path := filepath.Join(c.cfg.Server.DataDir, "spaces", "home-k7m2x9q4.db")
-	c.store.Forget("home-k7m2x9q4")
+	path := filepath.Join(c.cfg.Server.DataDir, "spaces", "home-cedar-pilot-mango.db")
+	c.store.Forget("home-cedar-pilot-mango")
 	db, err := sql.Open("sqlite", "file:"+path)
 	if err != nil {
 		t.Fatal(err)

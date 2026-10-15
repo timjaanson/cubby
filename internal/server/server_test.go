@@ -75,8 +75,8 @@ func errCode(b string) string {
 
 func TestNames(t *testing.T) {
 	for name, want := range map[string]bool{
-		"poll-k7m2x9q4": true, "k7m2x9q4": true, "team-lunch-poll-9d24vw6e": true,
-		"poll": false, "poll-7f3a": false, "poll-12345678": false, "poll-chatroom": false, "Poll-k7m2x9q4": false,
+		"poll-cedar-pilot-mango": true, "cedar-pilot-mango-frost": true, "team-lunch-poll-9d24vw6e": true,
+		"poll": false, "poll-7f3a": false, "poll-12345678": false, "poll-chatroom": false, "Poll-cedar-pilot-mango": false,
 		"anon": false, "spaces": false, "whoami": false,
 	} {
 		if names.ValidSpace(name) != want {
@@ -97,7 +97,7 @@ func TestReadWriteDelete(t *testing.T) {
 	c := newTest(t)
 	tok, _ := c.anon()
 	auth := []string{"Authorization", "Bearer " + tok}
-	sp := "/v1/poll-k7m2x9q4"
+	sp := "/v1/poll-cedar-pilot-mango"
 
 	if s, _, b := c.req("GET", sp+"/shared/question", ""); s != 404 || errCode(b) != "not_found" {
 		t.Fatalf("missing read: %d %s", s, b)
@@ -174,7 +174,7 @@ func TestAreas(t *testing.T) {
 	tokB, idB := c.anon()
 	a := []string{"Authorization", "Bearer " + tokA}
 	b := []string{"Authorization", "Bearer " + tokB}
-	sp := "/v1/poll-k7m2x9q4"
+	sp := "/v1/poll-cedar-pilot-mango"
 
 	c.req("PUT", sp+"/users/"+idA+"/vote", `"tacos"`, a...)
 	c.req("PUT", sp+"/users/"+idB+"/vote", `"pizza"`, b...)
@@ -251,7 +251,7 @@ func TestListAndWatch(t *testing.T) {
 	c := newTest(t)
 	tok, _ := c.anon()
 	a := []string{"Authorization", "Bearer " + tok}
-	sp := "/v1/chat-k7m2x9q4"
+	sp := "/v1/chat-cedar-pilot-mango"
 
 	_, _, body := c.req("GET", sp+"/shared/msg.*", "")
 	if !strings.Contains(body, `"items":[]`) {
@@ -305,7 +305,7 @@ func TestListAndWatch(t *testing.T) {
 
 	// A snapshot of nothing returns at once.
 	start := time.Now()
-	_, _, body = c.req("GET", "/v1/none-k7m2x9q4/shared/*/watch?version=0", "")
+	_, _, body = c.req("GET", "/v1/none-cedar-pilot-mango/shared/*/watch?version=0", "")
 	if time.Since(start) > time.Second || !strings.Contains(body, `"changes":[]`) {
 		t.Fatalf("empty snapshot: %s after %s", body, time.Since(start))
 	}
@@ -330,7 +330,7 @@ func TestSpaceFiles(t *testing.T) {
 	c := newTest(t)
 	tok, _ := c.anon()
 	a := []string{"Authorization", "Bearer " + tok}
-	sp := "chat-k7m2x9q4"
+	sp := "chat-cedar-pilot-mango"
 	file := filepath.Join(c.cfg.Server.DataDir, "spaces", sp+".db")
 
 	// Reads don't create a file, writes do.
@@ -381,7 +381,7 @@ func TestSpaceFiles(t *testing.T) {
 func TestCopiedSpaceFile(t *testing.T) {
 	src := newTest(t)
 	tok, _ := src.anon()
-	sp := "moved-k7m2x9q4"
+	sp := "moved-cedar-pilot-mango"
 	src.req("PUT", "/v1/"+sp+"/shared/greeting", "hello", "Authorization", "Bearer "+tok)
 	src.store.Close()
 
@@ -409,10 +409,10 @@ func TestVisitorQuotaAcrossSpaces(t *testing.T) {
 	tok, _ := c.anon()
 	a := []string{"Authorization", "Bearer " + tok}
 	v := strings.Repeat("x", 40)
-	c.req("PUT", "/v1/one-k7m2x9q4/shared/k", v, a...)
+	c.req("PUT", "/v1/one-cedar-pilot-mango/shared/k", v, a...)
 	c.store.ForgetVisitorBytes("") // force a recount from the space files
-	c.req("PUT", "/v1/two-k7m2x9q4/shared/k", v, a...)
-	if s, _, body := c.req("PUT", "/v1/three-k7m2x9q4/shared/k", v, a...); s != 507 || errCode(body) != "visitor_quota_exceeded" {
+	c.req("PUT", "/v1/two-cedar-pilot-mango/shared/k", v, a...)
+	if s, _, body := c.req("PUT", "/v1/three-cedar-pilot-mango/shared/k", v, a...); s != 507 || errCode(body) != "visitor_quota_exceeded" {
 		t.Fatalf("quota: %d %s", s, body)
 	}
 }
@@ -423,13 +423,13 @@ func TestManySpacesEvict(t *testing.T) {
 	tok, _ := c.anon()
 	a := []string{"Authorization", "Bearer " + tok}
 	for i := range store.MaxOpenSpaces + 20 {
-		c.req("PUT", fmt.Sprintf("/v1/s%03d-k7m2x9q4/shared/k", i), "v", a...)
+		c.req("PUT", fmt.Sprintf("/v1/s%03d-cedar-pilot-mango/shared/k", i), "v", a...)
 	}
 	open := c.store.OpenSpaces()
 	if open > store.MaxOpenSpaces {
 		t.Fatalf("%d files open", open)
 	}
-	if _, _, body := c.req("GET", "/v1/s000-k7m2x9q4/shared/k", ""); body != "v" {
+	if _, _, body := c.req("GET", "/v1/s000-cedar-pilot-mango/shared/k", ""); body != "v" {
 		t.Fatalf("evicted space: %q", body)
 	}
 }
@@ -445,30 +445,30 @@ func TestCreateNamedSpace(t *testing.T) {
 	tok, _ := c.anon()
 	a := []string{"Authorization", "Bearer " + tok}
 
-	if st, _, body := c.req("POST", "/v1/spaces?name=throws-d43j3gpf", "", a...); st != 201 || !strings.Contains(body, `"space":"throws-d43j3gpf"`) {
+	if st, _, body := c.req("POST", "/v1/spaces?name=throws-amber-otter-tundra", "", a...); st != 201 || !strings.Contains(body, `"space":"throws-amber-otter-tundra"`) {
 		t.Fatalf("create by name: %d %s", st, body)
 	}
-	if st, _, body := c.req("POST", "/v1/spaces?name=throws-d43j3gpf", "", a...); st != 409 || errCode(body) != "space_exists" {
+	if st, _, body := c.req("POST", "/v1/spaces?name=throws-amber-otter-tundra", "", a...); st != 409 || errCode(body) != "space_exists" {
 		t.Fatalf("taken name: %d %s", st, body)
 	}
 	// A space that exists only because someone wrote to it is taken too.
-	c.req("PUT", "/v1/notes-k7m2x9q4/shared/k", "v", a...)
-	if st, _, body := c.req("POST", "/v1/spaces?name=notes-k7m2x9q4", "", a...); st != 409 || errCode(body) != "space_exists" {
+	c.req("PUT", "/v1/notes-cedar-pilot-mango/shared/k", "v", a...)
+	if st, _, body := c.req("POST", "/v1/spaces?name=notes-cedar-pilot-mango", "", a...); st != 409 || errCode(body) != "space_exists" {
 		t.Fatalf("written space: %d %s", st, body)
 	}
 	if st, _, body := c.req("POST", "/v1/spaces?name=throws", "", a...); st != 400 || errCode(body) != "invalid_space" {
 		t.Fatalf("bad name: %d %s", st, body)
 	}
-	if st, _, body := c.req("POST", "/v1/spaces?name=throws-d43j3gpf&label=x", "", a...); st != 400 || errCode(body) != "invalid_parameter" {
+	if st, _, body := c.req("POST", "/v1/spaces?name=throws-amber-otter-tundra&label=x", "", a...); st != 400 || errCode(body) != "invalid_parameter" {
 		t.Fatalf("name and label: %d %s", st, body)
 	}
 
 	// Locked by name: the key comes back and writing without it fails.
-	st, _, body := c.req("POST", "/v1/spaces?name=status-4m8q2xk7&locked", "", a...)
+	st, _, body := c.req("POST", "/v1/spaces?name=status-board-4m8q2xk7&locked", "", a...)
 	if st != 201 || !strings.Contains(body, `"key":"sk_`) {
 		t.Fatalf("locked by name: %d %s", st, body)
 	}
-	if st, _, body := c.req("PUT", "/v1/status-4m8q2xk7/shared/k", "v", a...); st != 403 || errCode(body) != "space_locked" {
+	if st, _, body := c.req("PUT", "/v1/status-board-4m8q2xk7/shared/k", "v", a...); st != 403 || errCode(body) != "space_locked" {
 		t.Fatalf("locked write without key: %d %s", st, body)
 	}
 }

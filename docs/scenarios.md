@@ -38,7 +38,7 @@ There's no setup step. The space is created by the first save.
 
 <script type="module">
 const API = "https://kv.example.com/v1"
-const NOTE = `${API}/note-51b0hx3k/shared/note`
+const NOTE = `${API}/note-hinge-cocoa-orbit-maple/shared/note`
 
 const $note = document.querySelector("#note")
 const $save = document.querySelector("#save")
@@ -163,7 +163,7 @@ watch()
 
 ```
 $ API=https://kv.example.com/v1
-$ N=$API/note-51b0hx3k/shared/note
+$ N=$API/note-hinge-cocoa-orbit-maple/shared/note
 
 $ curl -s $N
 {"error":"not_found","message":"No such key"}
@@ -209,11 +209,11 @@ $ API=https://kv.example.com/v1
 $ T=$(curl -s -X POST $API/anon | jq -r .token)
 
 $ curl -s -X POST -H "Authorization: Bearer $T" "$API/spaces?label=lunch-poll&locked"
-{"space":"lunch-poll-9d24vw6e","key":"sk_Hq3...keep this private"}
+{"space":"lunch-poll-orbit-lilac-tango-slate","key":"sk_Hq3...keep this private"}
 
 $ curl -s -X PUT -H "Authorization: Bearer $T" -H "Space-Key: sk_Hq3..." \
     --data-binary '{"question":"Lunch today?","options":["pizza","tacos","sushi"]}' \
-    $API/lunch-poll-9d24vw6e/shared/poll
+    $API/lunch-poll-orbit-lilac-tango-slate/shared/poll
 {"version":1791449600001}
 ```
 
@@ -243,7 +243,7 @@ Keep the key somewhere safe. Changing the poll later is the same `PUT`, and open
 <script type="module">
 import { kv } from "https://kv.example.com/kv.js"
 
-const db = kv("lunch-poll-9d24vw6e")
+const db = kv("lunch-poll-orbit-lilac-tango-slate")
 
 const $question = document.querySelector("#question")
 const $options = document.querySelector("#options")
@@ -551,7 +551,7 @@ function render() {
 
 ### Notes
 
-- **The URL is the room.** `#room=room-x3k9m2qa` is just this page's own convention. The store only sees a space name. Anyone with the link can read and write, since the room is an open space.
+- **The URL is the room.** `#room=room-slate-hinge-cocoa-pilot` is just this page's own convention. The store only sees a space name. Anyone with the link can read and write, since the room is an open space.
 - **Messages belong to their authors.** They live in `users/{id}/msg.*`, so authorship comes from the path and can't be faked. Only the author can delete a message, and the server enforces it.
 - **Names are looked up, not copied.** Messages store only text. Renaming yourself updates all your past messages at once.
 - **Presence costs one write every 20 seconds per open page,** and each one wakes everyone's `users/*` watch. Fine for small rooms. Server-side `ttl` is listed under "later" in the spec for when it isn't.
@@ -570,7 +570,7 @@ Everything here uses the `cubby` binary as a client. A `curl` version of each sc
 ```
 $ export CUBBY_SERVER=https://kv.example.com
 $ cubby new homelab --locked
-homelab-4m8q2xk7
+homelab-maple-quilt-tundra-cobalt
 sk_Zr7cQ2vLm8RtY6pW3nB0kZ7aD5fH1sE9uG2iX4oC6q
 ```
 
@@ -584,7 +584,7 @@ The key is saved in `~/.config/cubby/credentials.toml` on this machine. On other
 #!/bin/sh
 set -eu
 export CUBBY_SERVER=https://kv.example.com
-SPACE=homelab-4m8q2xk7
+SPACE=homelab-maple-quilt-tundra-cobalt
 HOST=$(hostname)
 
 disk=$(df -P / | awk 'NR == 2 { print $5 }' | tr -d '%')
@@ -599,11 +599,11 @@ printf '{"disk": %s, "load": %s, "uptime": %s, "at": %s}' \
 Reading it from anywhere, with no token:
 
 ```
-$ cubby ls 'homelab-4m8q2xk7/shared/status.*'
+$ cubby ls 'homelab-maple-quilt-tundra-cobalt/shared/status.*'
 status.nas	{"disk": 41, "load": 0.12, "uptime": 812734.5, "at": 1791449600}
 status.pi	{"disk": 77, "load": 1.83, "uptime": 90211.2, "at": 1791449610}
 
-$ curl -s https://kv.example.com/v1/homelab-4m8q2xk7/shared/status.nas
+$ curl -s https://kv.example.com/v1/homelab-maple-quilt-tundra-cobalt/shared/status.nas
 {"disk": 41, "load": 0.12, "uptime": 812734.5, "at": 1791449600}
 ```
 
@@ -619,7 +619,7 @@ On the server, a long-running watcher, for example as a systemd service:
 set -eu
 export CUBBY_SERVER=https://kv.example.com
 
-exec cubby watch homelab-4m8q2xk7/shared/deploy \
+exec cubby watch homelab-maple-quilt-tundra-cobalt/shared/deploy \
   --from now \
   --state /var/lib/deploy-watcher/version \
   --exec /usr/local/bin/deploy
@@ -633,7 +633,7 @@ exec cubby watch homelab-4m8q2xk7/shared/deploy \
 ```sh
 #!/bin/sh
 set -eu
-SPACE=homelab-4m8q2xk7
+SPACE=homelab-maple-quilt-tundra-cobalt
 
 [ "$KV_DELETED" = 1 ] && exit 0          # a cleared request means nothing to do
 ref=$(cat)                               # the requested version, like v1.4.2
@@ -652,10 +652,10 @@ fi
 Asking for a deploy, from CI or a laptop:
 
 ```
-$ CUBBY_SPACE_KEY=sk_Zr7... cubby set homelab-4m8q2xk7/shared/deploy v1.4.2
+$ CUBBY_SPACE_KEY=sk_Zr7... cubby set homelab-maple-quilt-tundra-cobalt/shared/deploy v1.4.2
 1791449600213
 
-$ cubby watch homelab-4m8q2xk7/shared/deploy-status --from now --raw
+$ cubby watch homelab-maple-quilt-tundra-cobalt/shared/deploy-status --from now --raw
 deploying v1.4.2
 deployed v1.4.2
 ^C
@@ -685,7 +685,7 @@ Publishing:
 #!/bin/sh
 set -eu
 API=https://kv.example.com/v1
-SPACE=homelab-4m8q2xk7
+SPACE=homelab-maple-quilt-tundra-cobalt
 TOKEN=$(cat ~/.homelab-token)
 KEY=sk_Zr7...                             # better read from a file than written here
 
@@ -702,7 +702,7 @@ Watching for deploy requests:
 #!/usr/bin/env bash
 set -u
 API=https://kv.example.com/v1
-URL=$API/homelab-4m8q2xk7/shared/deploy/watch
+URL=$API/homelab-maple-quilt-tundra-cobalt/shared/deploy/watch
 STATE=/var/lib/deploy-watcher/version
 
 version=$(cat "$STATE" 2> /dev/null || true)      # empty: start from now
@@ -740,7 +740,7 @@ An ESP32 board reads temperature, humidity and CO2 every minute and sends all th
 ```
 $ export CUBBY_SERVER=https://kv.example.com
 $ cubby new room --locked
-room-3k8d2m7q
+room-slate-hinge-cocoa-pilot
 sk_Qm4vT8zK1pW6nR3cY0bH5jL9dF2sA7xE4uG1iO8kZ5
 $ curl -s -X POST https://kv.example.com/v1/anon
 {"token":"kv_b8Rt2Wq...","id":"u_d4h8k2m6p0r4t8w2"}
@@ -755,7 +755,7 @@ The board gets its own token, so it's its own visitor. A token stays valid as lo
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 
-const char* URL       = "https://kv.example.com/v1/room-3k8d2m7q/shared/env.*/series";
+const char* URL       = "https://kv.example.com/v1/room-slate-hinge-cocoa-pilot/shared/env.*/series";
 const char* TOKEN     = "kv_b8Rt2Wq...";
 const char* SPACE_KEY = "sk_Qm4vT8zK...";
 
@@ -801,7 +801,7 @@ If the board was offline, it can send buffered readings later with their own tim
 <svg viewBox="0 0 1000 200" preserveAspectRatio="none"><path /></svg>
 
 <script type="module">
-const API = "https://kv.example.com/v1/room-3k8d2m7q/shared"
+const API = "https://kv.example.com/v1/room-slate-hinge-cocoa-pilot/shared"
 
 async function loadChart() {
   const points = []
@@ -865,7 +865,7 @@ watchNow()
 ### The same with curl
 
 ```
-$ S=https://kv.example.com/v1/room-3k8d2m7q/shared
+$ S=https://kv.example.com/v1/room-slate-hinge-cocoa-pilot/shared
 
 $ curl -s -X POST -H "Authorization: Bearer $T" -H "Space-Key: $K" \
     --data-binary '{"temp":21.4,"rh":45,"co2":612}' "$S/env.*/series"
@@ -877,7 +877,7 @@ $ curl -s "$S/env.*"
 $ curl -s "$S/env.temp/series?limit=2"
 {"key":"env.temp","points":[{"t":1791449540017,"value":21.3},{"t":1791449600042,"value":21.4}],"version":1791449600061,"next":null}
 
-$ cubby series room-3k8d2m7q/shared/env.temp --since 1h
+$ cubby series room-slate-hinge-cocoa-pilot/shared/env.temp --since 1h
 1791446040033	21.1
 1791446100028	21.1
 ...

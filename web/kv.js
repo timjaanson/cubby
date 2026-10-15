@@ -1,7 +1,7 @@
 // cubby JS client. An ES module with no dependencies.
 //
 //   import { kv } from "https://kv.example.com/kv.js"
-//   const db = kv("poll-k7m2x9q4")
+//   const db = kv("poll-cedar-pilot-mango-frost")
 //   await db.shared.set("question", "Pizza or tacos?")
 
 const SERVER = new URL(".", import.meta.url).href.replace(/\/$/, "")
@@ -16,7 +16,7 @@ export class KvError extends Error {
   }
 }
 
-const SPACE_RE = /^([a-z0-9]+(-[a-z0-9]+)*-)?[a-z0-9]{8}$/
+const SPACE_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/
 const KEY_RE = /^[A-Za-z0-9._:-]{1,128}$/
 const PATTERN_RE = /^[A-Za-z0-9._:-]{0,127}\*$/
 const VISITOR_RE = /^u_[a-z2-7]{16}$/
@@ -33,23 +33,24 @@ function checkKey(k, patternOk = false) {
     `${JSON.stringify(k)} isn't a valid ${patternOk ? "key or pattern" : "key"}. Keys are 1 to 128 of A-Z a-z 0-9 . _ : - and can't be ".", "..", "watch" or "series".` +
     (patternOk ? " A pattern is a prefix followed by *." : ""))
 }
-const ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789"
+// The 4096 words generated names are made of. The server fills this in when
+// it serves the file, from the same list it uses itself.
+const WORDS = "__CUBBY_WORDS__".split(" ")
+const MAX_LABEL = 35
 
-function validSpace(name) {
-  if (typeof name !== "string" || name.length > 63 || !SPACE_RE.test(name)) return false
-  const suffix = name.slice(-8)
-  const digits = suffix.replace(/[^0-9]/g, "").length
-  return digits >= 2 && 8 - digits >= 2
-}
+// A space name is 16 to 63 lowercase letters, digits and single hyphens.
+const validSpace = name => typeof name === "string" && name.length >= 16 && name.length <= 63 && SPACE_RE.test(name)
 
+// newName returns the label (cleaned up) and four random words, 48 random bits.
 function newName(label = "") {
-  label = String(label).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 54).replace(/-+$/, "")
-  for (;;) {
-    const bytes = crypto.getRandomValues(new Uint8Array(8))
-    const suffix = Array.from(bytes, b => ALNUM[b % 36]).join("")
-    const name = label ? `${label}-${suffix}` : suffix
-    if (validSpace(name)) return name
-  }
+  label = String(label).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, MAX_LABEL).replace(/-+$/, "")
+  // 65536 is a multiple of 4096, so the low 12 bits are unbiased. Four
+  // 3-letter words would be one character short of a valid name; redraw those.
+  let words
+  do {
+    words = Array.from(crypto.getRandomValues(new Uint16Array(4)), n => WORDS[n & 0xfff]).join("-")
+  } while (words.length < 16)
+  return label ? `${label}-${words}` : words
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms))
