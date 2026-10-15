@@ -5,7 +5,6 @@ package config
 import (
 	"fmt"
 	"net/netip"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -100,10 +99,7 @@ type Config struct {
 
 func Default() *Config {
 	c := &Config{}
-	c.Server.Listen = ":8080"
-	if l := os.Getenv("CUBBY_LISTEN"); l != "" {
-		c.Server.Listen = l
-	}
+	c.Server.Listen = DefaultListen
 	c.Server.TrustedProxies = []string{"127.0.0.1/32", "::1/128"}
 	c.Retention.VisitorIdleTTL = Duration(365 * 24 * time.Hour)
 	c.Retention.EmptyVisitorIdleTTL = Duration(30 * 24 * time.Hour)
@@ -120,8 +116,9 @@ func Default() *Config {
 	return c
 }
 
-// loadConfig reads an optional TOML file over the defaults. Missing values
-// keep their defaults.
+// Load reads an optional TOML file over the defaults. Missing values keep
+// their defaults. Flags and environment variables are applied by the caller,
+// on top of what this returns.
 func Load(path string) (*Config, error) {
 	c := Default()
 	if path != "" {
@@ -132,6 +129,11 @@ func Load(path string) (*Config, error) {
 		if un := md.Undecoded(); len(un) > 0 {
 			return nil, fmt.Errorf("config %s: unknown setting %s", path, un[0])
 		}
+	}
+	if l, err := ListenAddr(c.Server.Listen); err != nil {
+		return nil, fmt.Errorf("config %s: %w", path, err)
+	} else {
+		c.Server.Listen = l
 	}
 	for _, p := range c.Server.TrustedProxies {
 		if !strings.Contains(p, "/") {

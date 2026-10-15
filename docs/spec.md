@@ -832,7 +832,7 @@ TOML, passed with `--config`. Everything is optional.
 
 ```toml
 [server]
-listen = ":8080"
+listen = ":28229"
 data_dir = "./data"
 public_url = "https://kv.example.com"   # used by kv.js to find the API
 trusted_proxies = ["127.0.0.1/32"]      # whose X-Forwarded-For to believe
@@ -1042,7 +1042,7 @@ class KvError extends Error {
 The same binary that runs the server is also a command-line client. It's the main way to use the store from shell scripts, cron jobs and terminals. Raw HTTP stays the contract underneath, for anything that can't run the binary: browsers, microcontrollers, other languages, locked-down machines.
 
 ```
-cubby serve                     run the server
+cubby serve [-p PORT]           run the server, port 28229 by default
 cubby admin ...                 administer the local server's data, see Admin
 cubby <command> ...             everything else is a client talking HTTP to a server
 ```
@@ -1071,6 +1071,8 @@ Paths containing `*` must be quoted, as in `cubby ls 'poll-k7m2x9q4/users/*/vote
 | Server URL | `--server` | `CUBBY_SERVER` | `server` |
 | Token | `--token` | `CUBBY_TOKEN` | saved automatically |
 | Space key | `--space-key` | `CUBBY_SPACE_KEY` | saved by `new --locked`, per space |
+
+The server URL defaults to `http://localhost:28229`. A bare port (`9000` or `:9000`) means `http://localhost:9000`, and a host without a scheme gets `http://`.
 
 - Flags win over environment variables, which win over the config file.
 - The config directory is `$XDG_CONFIG_HOME/cubby/`, by default `~/.config/cubby/`.

@@ -10,7 +10,12 @@ The same binary is the server and a command-line client.
 ./cubby serve
 ```
 
-That's the whole setup. It listens on port 8080 and keeps its data in the usual place for your OS (see [Where data lives](#where-data-lives)), creating the directory on first start. No config file is needed.
+That's the whole setup. It listens on port 28229 (CUBBY on a phone keypad) and keeps its data in the usual place for your OS (see [Where data lives](#where-data-lives)), creating the directory on first start. No config file is needed. For another port:
+
+```sh
+cubby serve -p 9000                          # or: CUBBY_LISTEN=9000 cubby serve
+cubby serve --listen 127.0.0.1:9000          # this machine only
+```
 
 Try it from another terminal:
 
@@ -21,7 +26,7 @@ $ cubby set notes-k7m2x9q4/shared/hello "Hello there"
 $ cubby get notes-k7m2x9q4/shared/hello
 Hello there
 
-$ curl http://localhost:8080/v1/notes-k7m2x9q4/shared/hello
+$ curl http://localhost:28229/v1/notes-k7m2x9q4/shared/hello
 Hello there
 ```
 
@@ -100,10 +105,12 @@ Exit codes: 0 ok, 1 not found, 2 version conflict, 3 not allowed, 4 rate limit o
 
 ### Pointing the CLI at a server
 
-It talks to `http://localhost:8080` unless told otherwise:
+It talks to `http://localhost:28229` unless told otherwise. `--server` and `CUBBY_SERVER` take a URL, a host, or just a port for this machine:
 
 ```sh
 export CUBBY_SERVER=https://kv.example.com
+cubby get notes-k7m2x9q4/shared/hello --server 9000      # http://localhost:9000
+CUBBY_SERVER=9000 cubby ls 'notes-k7m2x9q4/shared/*'
 ```
 
 The CLI saves its token, and keys of spaces it created, in `~/.config/cubby/credentials.toml` (mode 0600). For a fixed identity in a script, set `CUBBY_TOKEN`. To write a locked space from another machine, set `CUBBY_SPACE_KEY`.
@@ -138,7 +145,7 @@ The server hosts a small client at `/kv.js`:
 
 ```html
 <script type="module">
-import { kv } from "http://localhost:8080/kv.js"
+import { kv } from "http://localhost:28229/kv.js"
 
 const db = kv("poll-9d24vw6e")
 await db.shared.set("question", "Pizza or tacos?")
@@ -177,11 +184,11 @@ GET  /v1/home-k7m2x9q4/shared/temp/series?since=MS   → the points after MS, ol
 
 ## Configuration
 
-Nothing is required. These cover what most setups change:
+Nothing is required. These cover what most setups change. A flag beats its environment variable, which beats the config file:
 
 | Flag | Environment | Default |
 |---|---|---|
-| `--listen` | `CUBBY_LISTEN` | `:8080` |
+| `-p`, `--port`, `--listen` | `CUBBY_LISTEN` | `:28229`, every interface |
 | `--data` | `CUBBY_DATA` | see [Where data lives](#where-data-lives) |
 | `--config` | `CUBBY_CONFIG` | none |
 | `--quiet` | | logs each request to stderr |
@@ -190,7 +197,7 @@ For limits and retention, pass a TOML file with `--config`. Every setting is opt
 
 ```toml
 [server]
-listen = ":8080"
+listen = ":28229"
 data_dir = "/var/lib/cubby"
 trusted_proxies = ["127.0.0.1/32", "::1/128"]   # whose X-Forwarded-For to believe
 rate_limits = true
@@ -255,7 +262,7 @@ Put it behind a TLS proxy. Caddy is two lines and also gives browsers HTTP/2, wh
 
 ```
 kv.example.com {
-    reverse_proxy localhost:8080
+    reverse_proxy localhost:28229
 }
 ```
 
@@ -267,7 +274,7 @@ Description=cubby
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/cubby serve --listen 127.0.0.1:8080
+ExecStart=/usr/local/bin/cubby serve --listen 127.0.0.1:28229
 DynamicUser=yes
 StateDirectory=cubby
 Restart=on-failure

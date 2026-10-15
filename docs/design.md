@@ -36,12 +36,12 @@ Data is not secret. Anyone who knows a space's name can read its shared data and
 Every feature with plain `curl` against a local server, using only the path and the defaults. The sections below explain the model.
 
 ```sh
-cubby serve &                                       # port 8080, no config
+cubby serve &                                       # port 28229, no config
 
-S=http://localhost:8080/v1/demo-k7m2x9q4              # a space: any label plus 8 random characters
-T=$(curl -s -X POST localhost:8080/v1/anon | jq -r .token)
+S=http://localhost:28229/v1/demo-k7m2x9q4              # a space: any label plus 8 random characters
+T=$(curl -s -X POST localhost:28229/v1/anon | jq -r .token)
 A="Authorization: Bearer $T"                          # needed for writes and for me/, never for other reads
-ID=$(curl -s -H "$A" localhost:8080/v1/whoami | jq -r .id)
+ID=$(curl -s -H "$A" localhost:28229/v1/whoami | jq -r .id)
 ```
 
 Values:
@@ -83,7 +83,7 @@ curl "$S/shared/temp/series?since=$(( $(date +%s) - 3600 ))000"  # the last hour
 A locked space, where only the key holder writes `shared/`:
 
 ```sh
-curl -X POST -H "$A" "localhost:8080/v1/spaces?label=home&locked"   # {"space":"home-…","key":"sk_…"}
+curl -X POST -H "$A" "localhost:28229/v1/spaces?label=home&locked"   # {"space":"home-…","key":"sk_…"}
 # then add -H "Space-Key: sk_…" to writes in that space's shared/
 ```
 

@@ -14,10 +14,11 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/timjaanson/cubby/internal/config"
 	"github.com/timjaanson/cubby/internal/version"
 )
 
-const defaultServer = "http://localhost:8080"
+var defaultServer = "http://localhost:" + strconv.Itoa(config.DefaultPort)
 
 type client struct {
 	server   string
@@ -31,14 +32,10 @@ type client struct {
 func newClient(f *flags) (*client, error) {
 	var cfg cliConfig
 	toml.DecodeFile(filepath.Join(configDir(), "config.toml"), &cfg)
-	server := firstNonEmpty(f.str("server"), os.Getenv("CUBBY_SERVER"), cfg.Server, defaultServer)
-	if !strings.Contains(server, "://") {
-		server = "http://" + server
-	}
+	server := config.ServerURL(firstNonEmpty(f.str("server"), os.Getenv("CUBBY_SERVER"), cfg.Server, defaultServer))
 	if u, err := url.Parse(server); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
 		return nil, &cliError{code: 64, msg: fmt.Sprintf("server %q isn't a URL like https://kv.example.com", server)}
 	}
-	server = strings.TrimRight(server, "/")
 	creds := loadCreds()
 	sc := creds.Servers[server]
 	if sc == nil {

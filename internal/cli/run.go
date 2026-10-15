@@ -11,10 +11,10 @@ import (
 const usage = `cubby: a key-value store over plain HTTP, server and client in one binary.
 
 Server:
-  cubby serve                     run the server on :8080 (see 'cubby help serve')
+  cubby serve [-p PORT]           run the server, port 28229 unless told (see 'cubby help serve')
   cubby admin <command>           look after the server's data (spaces, export, delete, rekey, stats, cleanup)
 
-Client (talks to $CUBBY_SERVER, default http://localhost:8080):
+Client (talks to --server or $CUBBY_SERVER, default http://localhost:28229; a bare port means localhost):
   cubby get <path>                print a value
   cubby set <path> [value|-]      write a value from the argument or stdin
   cubby del <path>                delete a value

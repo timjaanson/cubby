@@ -40,7 +40,14 @@ var commandFlags = map[string]struct {
 func cmdHelp(cmd string) int {
 	switch cmd {
 	case "serve":
-		fmt.Printf("serve [--listen :8080] [--data DIR] [--config FILE] [--quiet]\n  Run the server. Env: CUBBY_LISTEN, CUBBY_DATA, CUBBY_CONFIG.\n  Data goes in %s, created if missing.\n", config.PreviewDataDir())
+		fmt.Printf(`serve [-p PORT | --listen ADDR] [--data DIR] [--config FILE] [--quiet]
+  Run the server on port %d, on every interface.
+  -p, --port 9000                  another port
+  --listen 127.0.0.1:9000          one interface only (also takes a bare port)
+  Env: CUBBY_LISTEN (port or address), CUBBY_DATA, CUBBY_CONFIG. Flags win over env,
+  env wins over the config file.
+  Data goes in %s, created if missing.
+`, config.DefaultPort, config.PreviewDataDir())
 		return 0
 	case "admin":
 		fmt.Print(adminUsage)
@@ -51,7 +58,7 @@ func cmdHelp(cmd string) int {
 		return usageErr(fmt.Errorf("unknown command %q", cmd))
 	}
 	fmt.Println(d.help)
-	fmt.Println("\nCommon flags: --server URL (CUBBY_SERVER), --token T (CUBBY_TOKEN), --space-key K (CUBBY_SPACE_KEY)")
+	fmt.Println("\nCommon flags: --server URL or port (CUBBY_SERVER), --token T (CUBBY_TOKEN), --space-key K (CUBBY_SPACE_KEY)")
 	return 0
 }
 
