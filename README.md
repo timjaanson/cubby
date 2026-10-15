@@ -53,8 +53,9 @@ space                 notes-k7m2x9q4
 ```
 
 - A visitor is an anonymous identity. `POST /v1/anon` gives a token. The CLI and the JS client get one by themselves when they need it.
-- A key is up to 128 of `A-Z a-z 0-9 . _ : -`, and can't be `.`, `..` or `watch`. Group with dots (`msg.1791449600123`), because listing and watching select by prefix (`msg.*`).
+- A key is up to 128 of `A-Z a-z 0-9 . _ : -`, and can't be `.`, `..`, `watch` or `series`. Group with dots (`msg.1791449600123`), because listing and watching select by prefix (`msg.*`).
 - A value is UTF-8 text up to 64 KB. Valid JSON comes back as `application/json`, anything else as `text/plain`, always byte for byte as written.
+- A series key keeps every value added to it, each with a time, for sensor readings and the like. Its value is the newest point. See [Series](#series).
 - Every write gets a version number. Pass it back with `ifVersion` to write only if nobody changed the key meanwhile.
 - Data isn't secret. Anyone who knows a space name can read its `shared/` and `users/` data.
 
@@ -76,6 +77,15 @@ tiny-kv name poll                                          # a fresh valid name,
 tiny-kv whoami | token | url <path>
 ```
 
+Series:
+
+```sh
+tiny-kv add    home-k7m2x9q4/shared/temp 21.4                      # one point; prints its time
+tiny-kv add    'home-k7m2x9q4/shared/env.*' temp=21.4 rh=45 door=open   # env.temp, env.rh, env.door
+echo '{"temp": 21.4}' | tiny-kv add 'home-k7m2x9q4/shared/env.*'      # the same from stdin
+tiny-kv series home-k7m2x9q4/shared/env.temp --since 24h           # t<TAB>value, oldest first
+```
+
 Run a command for every change, and resume where it stopped after a restart:
 
 ```sh
@@ -84,7 +94,7 @@ tiny-kv watch homelab-4m8q2xk7/shared/deploy --from now \
   --exec 'ref=$(cat); [ "$KV_DELETED" = 1 ] || /opt/app/deploy.sh "$ref"'
 ```
 
-The command gets the value on stdin and `KV_KEY`, `KV_VERSION`, `KV_DELETED` and `KV_USER` in its environment.
+The command gets the value on stdin and `KV_KEY`, `KV_VERSION`, `KV_DELETED` and `KV_USER` in its environment, plus `KV_TIME` for a series key.
 
 Exit codes: 0 ok, 1 not found, 2 version conflict, 3 not allowed, 4 rate limit or quota, 5 bad input, 6 server unreachable, 64 bad usage. `tiny-kv help <command>` lists each command's flags.
 
@@ -109,11 +119,16 @@ Everything the CLI does is a single request.
 | write | `PUT /v1/{space}/shared/{key}` with `Authorization: Bearer kv_...`, body is the value |
 | write only if unchanged | `PUT ...?ifVersion=N` (`0` means "only if it doesn't exist") |
 | delete | `DELETE /v1/{space}/shared/{key}` |
-| list | `GET /v1/{space}/shared/msg.*` or `GET /v1/{space}/users/*/vote` |
+| list: matching keys with their values | `GET /v1/{space}/shared/msg.*` or `GET /v1/{space}/users/*/vote` |
 | wait for changes | `GET /v1/{space}/shared/msg.*/watch?version=N` (long poll, 25 s) |
+| add a point to a series | `POST /v1/{space}/shared/temp/series`, body is the value |
+| add to several series | `POST /v1/{space}/shared/env.*/series`, body `{"temp": 21.4, "rh": 45}` |
+| read a series | `GET /v1/{space}/shared/temp/series` (newest 1000) or `?since=MS` (after that time) |
 | create a locked space | `POST /v1/spaces?label=poll&locked` → `{"space": ..., "key": "sk_..."}` |
 
 Writes to `shared/` of a locked space also need `Space-Key: sk_...`. Unknown or repeated query parameters are rejected with 400, so a typo like `ifversion=0` fails instead of overwriting. Errors are JSON with a stable `error` code and a `message`. CORS is open, so pages on any origin can call it.
+
+Every data URL is `/v1/{space}/{area}/{key or pattern}`, optionally followed by `/watch` or `/series`, and nothing after that.
 
 The full contract is in [../SPEC.md](../SPEC.md), with worked examples in [../SCENARIOS.md](../SCENARIOS.md).
 
@@ -131,10 +146,34 @@ await db.user().set("vote", "tacos")
 
 db.users.watch("vote", change => console.log(change.user, change.deleted ? "removed" : change.value))
 await db.shared.update("count", n => (n ?? 0) + 1)       // safe with many writers
+
+await db.shared.add("env.*", { temp: 21.4, rh: 45 })     // a point each in env.temp and env.rh
+const { points } = await db.shared.series("env.temp", { since: Date.now() - 864e5 })
 </script>
 ```
 
 It keeps the visitor token in `localStorage` and finds the API from the URL it was loaded from.
+
+## Series
+
+A key becomes a series with its first `POST {key}/series`. From then on:
+
+```
+POST /v1/home-k7m2x9q4/shared/temp/series            21.4           → 201 {"version": …, "t": 1792056454796}
+POST /v1/home-k7m2x9q4/shared/temp/series?t=MS       21.2           a reading sent late, with its own time
+POST /v1/home-k7m2x9q4/shared/env.*/series           {"temp": 21.5, "rh": 45}
+                                                     → 200 {"version": …, "t": …, "keys": ["env.temp", "env.rh"]}
+GET  /v1/home-k7m2x9q4/shared/temp                   → 21.4, the newest point, with header KV-Time: 1792056454796
+GET  /v1/home-k7m2x9q4/shared/temp/series            → {"key": "temp", "points": [{"t": …, "value": 21.4}, …], "version": …, "next": null}
+GET  /v1/home-k7m2x9q4/shared/temp/series?since=MS   → the points after MS, oldest first; pass "next" back as since for more
+```
+
+- With a key in the URL, the body is one point, whatever its shape: a number, text, an object. With `prefix*`, the body is an object, and each member becomes a point in series `prefix` + name, all at the same time. Up to 100 members, all or nothing.
+- Points are stored as sent, up to 1 KB each. The server never calculates anything from them.
+- `PUT` on a series returns 409 `is_series`, and `/series` on a plain key returns 409 `not_series`. `DELETE` removes a series with all its points.
+- Each series keeps its newest 50,000 points and drops the oldest, so a device that sends forever never starts failing.
+- Lists and watches include `t` for series keys. Watching gives the newest point, and `series?since=` catches up on every point.
+- A `POST` counts as one write for rate limits, however many series it adds to. Points count towards the space's storage, not the visitor's.
 
 ## Configuration
 
@@ -164,6 +203,8 @@ tombstone_ttl = "7d"
 
 [limits]
 max_value_size = "64KB"
+max_point_size = "1KB"            # one point in a series
+max_series_points = 50000         # per series; the oldest are dropped
 max_visitor_bytes = "1MB"
 max_space_bytes = "5MB"
 max_space_keys = 10000
@@ -173,6 +214,7 @@ max_spaces = 1000
 [spaces.status-k7m2x9q4]          # pinned: never cleaned up, own limits
 max_bytes = "100MB"
 max_value_size = "256KB"
+max_series_points = 500000
 ```
 
 ## Where data lives
@@ -243,7 +285,7 @@ WantedBy=multi-user.target
 ```sh
 tiny-kv admin spaces            # name, kind, size, keys, last activity
 tiny-kv admin stats
-tiny-kv admin export <space>    # JSON lines
+tiny-kv admin export <space>    # JSON lines: every key, then every series point
 tiny-kv admin delete <space>
 tiny-kv admin rekey <space>     # lock a space or replace its key
 tiny-kv admin cleanup           # run the hourly cleanup now
@@ -268,4 +310,6 @@ go build .          # just for this machine
 - **Admin needs the running server.** It doesn't fall back to opening files directly. That keeps one path for every change.
 - **When `watch --from now` hits an expired version** it continues from now instead of replaying the current state, so an `--exec` deploy hook never reruns old requests.
 - **Visitor cleanup turns their `users/` keys into tombstones**, so watchers see them go, instead of deleting rows silently.
-- Not built yet: proof of work on `/v1/anon`, and everything else under "Later" in the spec.
+- **List, watch and series responses compact JSON values**, so `{"a": 1}` comes back as `{"a":1}`. A plain `GET` returns the bytes exactly as written.
+- **Space size counts the newest point twice** for a series: once as the key's value and once as a point. It's a few bytes per series and keeps the accounting simple.
+- Not built yet: proof of work on `/v1/anon`, and everything else under "Later" in the spec, including reading several series at once and `?format=text`.

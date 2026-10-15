@@ -26,7 +26,7 @@ import (
 const adminUsage = `tiny-kv admin <command> [--data DIR]
 
   spaces            list spaces with size, keys and last activity
-  export <space>    dump every key as JSON lines
+  export <space>    dump every key, then every series point, as JSON lines
   delete <space>    delete a space and its file
   rekey <space>     lock a space, or replace its key, and print the new key
   stats             totals, visitors and the largest spaces
@@ -139,7 +139,13 @@ func (s *Server) adminHandler() http.Handler {
 				area = "me:" + e.Area[2:]
 			}
 			it := toItem(e)
-			return enc.Encode(map[string]any{"area": area, "key": e.Key, "value": it.Value, "version": e.Version, "writer": e.Writer})
+			line := map[string]any{"area": area, "key": e.Key, "value": it.Value, "version": e.Version, "writer": e.Writer}
+			if e.Series {
+				line["series"], line["t"] = true, e.T
+			}
+			return enc.Encode(line)
+		}, func(p Point) error {
+			return enc.Encode(map[string]any{"area": adminArea(p.Area), "key": p.Key, "t": p.T, "value": jsonValue(p.Value, p.IsJSON)})
 		})
 		if err != nil {
 			log.Printf("admin export %s: %v", name, err)
@@ -378,4 +384,15 @@ func humanBytes(n int64) string {
 		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
 	}
 	return fmt.Sprintf("%d B", n)
+}
+
+// adminArea turns a stored area into the form used in exports.
+func adminArea(a string) string {
+	switch {
+	case strings.HasPrefix(a, "u:"):
+		return "users/" + a[2:]
+	case strings.HasPrefix(a, "m:"):
+		return "me:" + a[2:]
+	}
+	return "shared"
 }

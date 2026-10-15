@@ -62,13 +62,50 @@ CREATE TABLE IF NOT EXISTS kv (
   writer     TEXT NOT NULL,
   size       INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
+  series     INTEGER NOT NULL DEFAULT 0, -- 1 for a series key
+  t          INTEGER,                    -- newest point's time in ms, series only
+  n          INTEGER NOT NULL DEFAULT 0, -- number of points, series only
   PRIMARY KEY (area, key)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS kv_by_version ON kv (area, version);
 CREATE INDEX IF NOT EXISTS kv_users ON kv (key, area) WHERE area >= 'u:' AND area < 'u;';
 CREATE INDEX IF NOT EXISTS kv_tombstones ON kv (updated_at) WHERE value IS NULL;
 CREATE TABLE IF NOT EXISTS usage (writer TEXT PRIMARY KEY, bytes INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS points (
+  area    TEXT NOT NULL,
+  key     TEXT NOT NULL,
+  t       INTEGER NOT NULL,
+  value   BLOB NOT NULL,
+  is_json INTEGER NOT NULL,
+  PRIMARY KEY (area, key, t)
+) WITHOUT ROWID;
 `
+
+// migrateSpace brings a space file from before series up to date. Files
+// created since have everything already, and running it twice is harmless.
+func migrateSpace(db *sql.DB) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info('kv')`)
+	if err != nil {
+		return err
+	}
+	has := map[string]bool{}
+	for rows.Next() {
+		var n string
+		rows.Scan(&n)
+		has[n] = true
+	}
+	rows.Close()
+	for _, col := range []string{"series INTEGER NOT NULL DEFAULT 0", "t INTEGER", "n INTEGER NOT NULL DEFAULT 0"} {
+		name, _, _ := strings.Cut(col, " ")
+		if !has[name] {
+			if _, err := db.Exec(`ALTER TABLE kv ADD COLUMN ` + col); err != nil {
+				return err
+			}
+		}
+	}
+	_, err = db.Exec(spaceSchema)
+	return err
+}
 
 const maxOpenSpaces = 64
 
@@ -329,6 +366,10 @@ func (s *Store) acquire(name string, create bool, keyHash string) (sp *spaceDB, 
 					return nil, false, fmt.Errorf("create space %s: %w", name, err)
 				}
 				created = true
+			} else if err := migrateSpace(db); err != nil {
+				db.Close()
+				s.mu.Unlock()
+				return nil, false, fmt.Errorf("open space %s: %w", name, err)
 			}
 			m, err := readMeta(db)
 			if err != nil {
@@ -746,6 +787,8 @@ type Entry struct {
 	User    string
 	Writer  string
 	Area    string
+	Series  bool
+	T       int64 // newest point's time, series only
 }
 
 func (s *Store) get(space, area, key string) (*Entry, error) {
@@ -755,8 +798,10 @@ func (s *Store) get(space, area, key string) (*Entry, error) {
 	}
 	defer s.release(sp)
 	e := &Entry{Key: key}
-	err = sp.db.QueryRow(`SELECT value, is_json, version FROM kv WHERE area = ? AND key = ? AND value IS NOT NULL`,
-		area, key).Scan(&e.Value, &e.IsJSON, &e.Version)
+	var t sql.NullInt64
+	err = sp.db.QueryRow(`SELECT value, is_json, version, series, t FROM kv WHERE area = ? AND key = ? AND value IS NOT NULL`,
+		area, key).Scan(&e.Value, &e.IsJSON, &e.Version, &e.Series, &t)
+	e.T = t.Int64
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -803,9 +848,11 @@ func scanEntries(rows *sql.Rows, allUsers bool) ([]Entry, error) {
 	var out []Entry
 	for rows.Next() {
 		var e Entry
-		if err := rows.Scan(&e.Area, &e.Key, &e.Value, &e.IsJSON, &e.Version); err != nil {
+		var t sql.NullInt64
+		if err := rows.Scan(&e.Area, &e.Key, &e.Value, &e.IsJSON, &e.Version, &e.Series, &t); err != nil {
 			return nil, err
 		}
+		e.T = t.Int64
 		if allUsers {
 			e.User = strings.TrimPrefix(e.Area, "u:")
 		}
@@ -858,7 +905,7 @@ func (s *Store) list(t target, after string, limit int, desc bool) (items []Entr
 			args = append(args, after)
 		}
 	}
-	q := fmt.Sprintf(`SELECT area, key, value, is_json, version FROM kv WHERE %s ORDER BY key %s, area %s LIMIT ?`, where, ord, ord)
+	q := fmt.Sprintf(`SELECT area, key, value, is_json, version, series, t FROM kv WHERE %s ORDER BY key %s, area %s LIMIT ?`, where, ord, ord)
 	rows, err := sp.db.Query(q, append(args, limit+1)...)
 	if err != nil {
 		return nil, "", 0, err
@@ -911,7 +958,7 @@ func (s *Store) changes(t target, after int64, limit int) ([]Entry, int64, error
 	if after == 0 {
 		where += " AND value IS NOT NULL"
 	}
-	rows, err := sp.db.Query(`SELECT area, key, value, is_json, version FROM kv WHERE `+where+` ORDER BY version LIMIT ?`, append(args, limit+1)...)
+	rows, err := sp.db.Query(`SELECT area, key, value, is_json, version, series, t FROM kv WHERE `+where+` ORDER BY version LIMIT ?`, append(args, limit+1)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -919,8 +966,17 @@ func (s *Store) changes(t target, after int64, limit int) ([]Entry, int64, error
 	return out, m.seq, err
 }
 
-// export returns every live entry with its area and writer.
-func (s *Store) export(space string, fn func(Entry) error) error {
+// Point is one entry of a series.
+type Point struct {
+	Area, Key string
+	T         int64
+	Value     []byte
+	IsJSON    bool
+}
+
+// export returns every live entry with its area and writer, then every
+// series point.
+func (s *Store) export(space string, fn func(Entry) error, pfn func(Point) error) error {
 	sp, _, err := s.acquire(space, false, "")
 	if err != nil {
 		return err
@@ -929,21 +985,41 @@ func (s *Store) export(space string, fn func(Entry) error) error {
 		return errNoSpace
 	}
 	defer s.release(sp)
-	rows, err := sp.db.Query(`SELECT area, key, value, is_json, version, writer FROM kv WHERE value IS NOT NULL ORDER BY area, key`)
+	rows, err := sp.db.Query(`SELECT area, key, value, is_json, version, writer, series, t FROM kv WHERE value IS NOT NULL ORDER BY area, key`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var e Entry
-		if err := rows.Scan(&e.Area, &e.Key, &e.Value, &e.IsJSON, &e.Version, &e.Writer); err != nil {
+		var t sql.NullInt64
+		if err := rows.Scan(&e.Area, &e.Key, &e.Value, &e.IsJSON, &e.Version, &e.Writer, &e.Series, &t); err != nil {
 			return err
 		}
+		e.T = t.Int64
 		if err := fn(e); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	prows, err := sp.db.Query(`SELECT area, key, t, value, is_json FROM points ORDER BY area, key, t`)
+	if err != nil {
+		return err
+	}
+	defer prows.Close()
+	for prows.Next() {
+		var p Point
+		if err := prows.Scan(&p.Area, &p.Key, &p.T, &p.Value, &p.IsJSON); err != nil {
+			return err
+		}
+		if err := pfn(p); err != nil {
+			return err
+		}
+	}
+	return prows.Err()
 }
 
 // ---------- writes ----------
@@ -1021,9 +1097,10 @@ func (s *Store) write(ctx context.Context, r writeReq) (res writeResult, err err
 		writer  string
 		size    int64
 		row     bool
+		series  bool
 	}
-	err = tx.QueryRow(`SELECT value, version, writer, size FROM kv WHERE area = ? AND key = ?`,
-		r.area, r.key).Scan(&old.value, &old.version, &old.writer, &old.size)
+	err = tx.QueryRow(`SELECT value, version, writer, size, series FROM kv WHERE area = ? AND key = ?`,
+		r.area, r.key).Scan(&old.value, &old.version, &old.writer, &old.size, &old.series)
 	if err == nil {
 		old.row = true
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -1040,6 +1117,20 @@ func (s *Store) write(ctx context.Context, r writeReq) (res writeResult, err err
 	if r.ifVersion != nil && *r.ifVersion != cur {
 		return res, &apiError{Status: 412, Code: "version_conflict", Message: "The key changed since that version.", Extra: map[string]any{"currentVersion": cur}}
 	}
+	if live && old.series && !del {
+		return res, errIsSeries(r.key)
+	}
+	// Deleting a series deletes its points.
+	var pointBytes int64
+	if del && old.series {
+		if err := tx.QueryRow(`SELECT coalesce(sum(length(key) + length(value)), 0) FROM points WHERE area = ? AND key = ?`,
+			r.area, r.key).Scan(&pointBytes); err != nil {
+			return res, err
+		}
+		if _, err := tx.Exec(`DELETE FROM points WHERE area = ? AND key = ?`, r.area, r.key); err != nil {
+			return res, err
+		}
+	}
 	if live && !del && bytes.Equal(old.value, r.value) {
 		return writeResult{version: cur}, nil
 	}
@@ -1052,7 +1143,7 @@ func (s *Store) write(ctx context.Context, r writeReq) (res writeResult, err err
 	if old.row {
 		oldSize = old.size
 	}
-	spaceDelta := newSize - oldSize
+	spaceDelta := newSize - oldSize - pointBytes
 	keysDelta := 0
 	switch {
 	case !del && !live:
@@ -1093,10 +1184,11 @@ func (s *Store) write(ctx context.Context, r writeReq) (res writeResult, err err
 	if !del {
 		val = r.value
 	}
-	if _, err := tx.Exec(`INSERT INTO kv (area, key, value, is_json, version, writer, size, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	if _, err := tx.Exec(`INSERT INTO kv (area, key, value, is_json, version, writer, size, updated_at, series, t, n)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0)
 		ON CONFLICT (area, key) DO UPDATE SET value = excluded.value, is_json = excluded.is_json,
-		version = excluded.version, writer = excluded.writer, size = excluded.size, updated_at = excluded.updated_at`,
+		version = excluded.version, writer = excluded.writer, size = excluded.size, updated_at = excluded.updated_at,
+		series = 0, t = NULL, n = 0`,
 		r.area, r.key, val, r.isJSON, version, writer, newSize, now); err != nil {
 		return res, err
 	}
@@ -1192,13 +1284,17 @@ func (s *Store) dropVisitorRows(space, id string) error {
 		if strings.HasPrefix(r.area, "u:") && r.live {
 			seq++
 			bytesD += int64(len(r.key)) - r.size
-			tx.Exec(`UPDATE kv SET value = NULL, version = ?, size = ?, updated_at = ? WHERE area = ? AND key = ?`, seq, len(r.key), now, r.area, r.key)
+			tx.Exec(`UPDATE kv SET value = NULL, version = ?, size = ?, updated_at = ?, series = 0, t = NULL, n = 0 WHERE area = ? AND key = ?`, seq, len(r.key), now, r.area, r.key)
 			changed = true
 		} else {
 			bytesD -= r.size
 			tx.Exec(`DELETE FROM kv WHERE area = ? AND key = ?`, r.area, r.key)
 		}
 	}
+	var pointBytes int64
+	tx.QueryRow(`SELECT coalesce(sum(length(key) + length(value)), 0) FROM points WHERE area IN (?, ?)`, "u:"+id, "m:"+id).Scan(&pointBytes)
+	tx.Exec(`DELETE FROM points WHERE area IN (?, ?)`, "u:"+id, "m:"+id)
+	bytesD -= pointBytes
 	tx.Exec(`DELETE FROM usage WHERE writer = ?`, id)
 	for k, v := range map[string]any{"seq": seq, "bytes": m.bytes + bytesD, "keys": m.keys + keysD} {
 		setMeta(tx, k, v)

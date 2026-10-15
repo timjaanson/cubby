@@ -312,7 +312,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.Set("Access-Control-Allow-Origin", "*")
-	h.Set("Access-Control-Expose-Headers", "ETag, Retry-After")
+	h.Set("Access-Control-Expose-Headers", "ETag, Retry-After, KV-Time")
 	h.Set("Cache-Control", "no-store")
 
 	// Token: header wins over the query parameter.
@@ -424,12 +424,15 @@ func (s *Server) route(c *reqCtx) error {
 		return &apiError{Status: 404, Code: "not_found", Message: "No such area. Use shared, users/{id} or me."}
 	}
 
-	watch := false
+	// /{target} or /{target}/{action}, nothing after the action.
+	action := ""
 	switch {
-	case len(rest) == 2 && rest[1] == "watch":
-		watch = true
+	case len(rest) == 2 && actionWords[rest[1]]:
+		action = rest[1]
+	case len(rest) == 2:
+		return &apiError{Status: 400, Code: "invalid_key", Message: "After a key or pattern, a path can only end in /watch or /series. Keys can't contain slashes."}
 	case len(rest) != 1:
-		return &apiError{Status: 400, Code: "invalid_key", Message: "Keys can't contain slashes."}
+		return &apiError{Status: 400, Code: "invalid_key", Message: "Keys can't contain slashes, and nothing comes after /watch or /series."}
 	}
 	name := rest[0]
 	switch {
@@ -439,10 +442,31 @@ func (s *Server) route(c *reqCtx) error {
 		t.key = name
 	default:
 		return &apiError{Status: 400, Code: "invalid_key",
-			Message: "A key is 1 to 128 of A-Z a-z 0-9 . _ : - and can't be \".\", \"..\" or \"watch\". A pattern is a prefix followed by *."}
+			Message: "A key is 1 to 128 of A-Z a-z 0-9 . _ : - and can't be \".\", \"..\", \"watch\" or \"series\". A pattern is a prefix followed by *."}
 	}
 
-	if watch {
+	if action == "series" {
+		if t.allUsers {
+			return &apiError{Status: 400, Code: "invalid_key", Message: "Series can't be read or added across users/*/ yet. Use users/{id}/{key}/series."}
+		}
+		switch m {
+		case http.MethodGet, http.MethodHead:
+			if t.pattern {
+				return &apiError{Status: 400, Code: "invalid_key", Message: "Series are read one key at a time. To see the newest point of each, GET the pattern without /series."}
+			}
+			if err := checkParams(c.r, "since", "limit"); err != nil {
+				return err
+			}
+			return s.seriesRead(c, t)
+		case http.MethodPost:
+			if err := checkParams(c.r, "t"); err != nil {
+				return err
+			}
+			return s.seriesAdd(c, t)
+		}
+		return methodErrMsg("GET, HEAD, POST", "A series takes POST to add points and GET to read them. To replace or delete the key, use the path without /series.")
+	}
+	if action == "watch" {
 		if m != http.MethodGet {
 			return methodErr("GET")
 		}
@@ -454,7 +478,10 @@ func (s *Server) route(c *reqCtx) error {
 	isRead := m == http.MethodGet || m == http.MethodHead
 	if t.allUsers || t.pattern {
 		if !isRead {
-			return methodErr("GET, HEAD")
+			if m == http.MethodPost && t.pattern && !t.allUsers {
+				return methodErrMsg("GET, HEAD", "To add a point to each of several series, POST to "+name+"/series.")
+			}
+			return methodErrMsg("GET, HEAD", "Patterns and users/*/ are read-only. Write and delete one key at a time.")
 		}
 		if err := checkParams(c.r, "limit", "order", "after"); err != nil {
 			return err
@@ -472,6 +499,8 @@ func (s *Server) route(c *reqCtx) error {
 			return err
 		}
 		return s.write(c, t)
+	case http.MethodPost:
+		return methodErrMsg("GET, HEAD, PUT, DELETE", "To add a point use "+t.key+"/series. To replace the value use PUT.")
 	}
 	return methodErr("GET, HEAD, PUT, DELETE")
 }
@@ -524,7 +553,11 @@ func parseUint(s string) (int64, bool) {
 }
 
 func methodErr(allow string) error {
-	return &apiError{Status: 405, Code: "method_not_allowed", Message: "Method not allowed here.", Extra: map[string]any{"allow": allow}}
+	return methodErrMsg(allow, "Method not allowed here.")
+}
+
+func methodErrMsg(allow, msg string) error {
+	return &apiError{Status: 405, Code: "method_not_allowed", Message: msg, Extra: map[string]any{"allow": allow}}
 }
 
 // ---------- handlers ----------
@@ -609,6 +642,9 @@ func (s *Server) read(c *reqCtx, t target) error {
 	}
 	h := c.header()
 	h.Set("ETag", etag(e.Version))
+	if e.Series {
+		h.Set("KV-Time", strconv.FormatInt(e.T, 10))
+	}
 	if inm := c.r.Header.Get("If-None-Match"); inm != "" && strings.TrimPrefix(inm, "W/") == etag(e.Version) {
 		c.status = 304
 		c.w.WriteHeader(304)
@@ -737,10 +773,15 @@ type itemJSON struct {
 	Deleted bool            `json:"deleted,omitempty"`
 	Version int64           `json:"version"`
 	User    string          `json:"user,omitempty"`
+	T       *int64          `json:"t,omitempty"`
 }
 
 func toItem(e Entry) itemJSON {
 	it := itemJSON{Key: e.Key, Version: e.Version, User: e.User}
+	if e.Series && e.Value != nil {
+		t := e.T
+		it.T = &t
+	}
 	switch {
 	case e.Value == nil:
 		it.Deleted = true

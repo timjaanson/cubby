@@ -35,6 +35,8 @@ Client (talks to $TINY_KV_SERVER, default http://localhost:8080):
   tiny-kv ls <path>                 list a key or pattern, one tab-separated line per item
   tiny-kv watch <path>              print changes as they happen
   tiny-kv update <path>             read, change with --exec or $EDITOR, write back safely
+  tiny-kv add <path> [value]        add a point to a series ('space/shared/env.*' a=1 b=2 for several)
+  tiny-kv series <path>             print a series' points, oldest first
   tiny-kv new [--label L] [--locked]  create a space on the server
   tiny-kv name [label]              make up a valid space name, no server needed
   tiny-kv whoami | token | url <path>

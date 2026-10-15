@@ -43,8 +43,12 @@ func validSpace(name string) bool {
 // collapse as path segments, so such a key could never be reached and would
 // send the request somewhere else.
 func validKey(k string) bool {
-	return keyRe.MatchString(k) && k != "watch" && k != "." && k != ".."
+	return keyRe.MatchString(k) && !actionWords[k] && k != "." && k != ".."
 }
+
+// actionWords can follow a key in a path, so they can't be keys themselves.
+var actionWords = map[string]bool{"watch": true, "series": true}
+
 func validPattern(p string) bool { return patternRe.MatchString(p) }
 func validVisitor(id string) bool {
 	return visitorRe.MatchString(id)

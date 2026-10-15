@@ -21,7 +21,8 @@ const KEY_RE = /^[A-Za-z0-9._:-]{1,128}$/
 const PATTERN_RE = /^[A-Za-z0-9._:-]{0,127}\*$/
 const VISITOR_RE = /^u_[a-z2-7]{16}$/
 
-const validKey = k => typeof k === "string" && KEY_RE.test(k) && k !== "watch" && k !== "." && k !== ".."
+// "watch" and "series" can follow a key in a path, so they aren't keys.
+const validKey = k => typeof k === "string" && KEY_RE.test(k) && k !== "watch" && k !== "series" && k !== "." && k !== ".."
 const validTarget = t => validKey(t) || (typeof t === "string" && PATTERN_RE.test(t))
 
 // Checked before any request. Keys go into the URL, where "#", "?", "/" or
@@ -29,7 +30,7 @@ const validTarget = t => validKey(t) || (typeof t === "string" && PATTERN_RE.tes
 function checkKey(k, patternOk = false) {
   if (patternOk ? validTarget(k) : validKey(k)) return
   throw new KvError(0, "invalid_key",
-    `${JSON.stringify(k)} isn't a valid ${patternOk ? "key or pattern" : "key"}. Keys are 1 to 128 of A-Z a-z 0-9 . _ : - and can't be ".", ".." or "watch".` +
+    `${JSON.stringify(k)} isn't a valid ${patternOk ? "key or pattern" : "key"}. Keys are 1 to 128 of A-Z a-z 0-9 . _ : - and can't be ".", "..", "watch" or "series".` +
     (patternOk ? " A pattern is a prefix followed by *." : ""))
 }
 const ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789"
@@ -176,7 +177,10 @@ export function kv(space, opts = {}) {
         const version = Number((res.headers.get("ETag") || "").replace(/"/g, ""))
         const text = await res.text()
         const isJSON = (res.headers.get("Content-Type") || "").startsWith("application/json")
-        return { value: isJSON ? JSON.parse(text) : text, version }
+        const entry = { value: isJSON ? JSON.parse(text) : text, version }
+        const t = res.headers.get("KV-Time")
+        if (t) entry.t = Number(t)
+        return entry
       },
       async get(key) {
         const e = await a.getEntry(key)
@@ -213,6 +217,31 @@ export function kv(space, opts = {}) {
             await sleep(50 + Math.random() * 150)
           }
         }
+      },
+      // add("temp", 21.4) adds one point; value can be any JSON value, an
+      // object is one point. add("env.*", { temp: 21.4, rh: 45 }) adds one
+      // point to env.temp and one to env.rh. The target decides, never the value.
+      async add(target, value, o = {}) {
+        checkKey(target, true)
+        checkWrite()
+        const batch = target.endsWith("*")
+        if (batch && (value === null || typeof value !== "object" || Array.isArray(value))) {
+          throw new KvError(0, "batch_needs_object", `Adding to ${target} takes an object like { temp: 21.4 }; each property becomes a point in its own series.`)
+        }
+        const body = JSON.stringify(value)
+        if (body === undefined) throw new KvError(0, "invalid_value", "That value can't be stored as JSON.")
+        const res = await request("POST", (await pathOf(target)) + "/series", { body, auth: true, shared, query: { t: o.t } })
+        if (!res.ok) throw await fail(res)
+        return res.json()
+      },
+      // One request. Points come oldest first; pass next back as since for more.
+      // null if the key doesn't exist.
+      async series(key, o = {}) {
+        checkKey(key)
+        const res = await request("GET", (await pathOf(key)) + "/series", { auth: needsAuth, query: { since: o.since, limit: o.limit } })
+        if (res.status === 404) return null
+        if (!res.ok) throw await fail(res)
+        return res.json()
       },
       list: (target, o) => list(pathOf, needsAuth, target, o),
       watch: (target, onChange, o) => watch(pathOf, needsAuth, target, onChange, o),

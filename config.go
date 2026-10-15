@@ -61,9 +61,10 @@ func parseDuration(s string) (time.Duration, error) {
 }
 
 type PinnedSpace struct {
-	MaxBytes     Size `toml:"max_bytes"`
-	MaxValueSize Size `toml:"max_value_size"`
-	MaxKeys      int  `toml:"max_keys"`
+	MaxBytes        Size `toml:"max_bytes"`
+	MaxValueSize    Size `toml:"max_value_size"`
+	MaxKeys         int  `toml:"max_keys"`
+	MaxSeriesPoints int  `toml:"max_series_points"`
 }
 
 type Config struct {
@@ -81,6 +82,8 @@ type Config struct {
 	} `toml:"retention"`
 	Limits struct {
 		MaxValueSize    Size `toml:"max_value_size"`
+		MaxPointSize    Size `toml:"max_point_size"`
+		MaxSeriesPoints int  `toml:"max_series_points"`
 		MaxVisitorBytes Size `toml:"max_visitor_bytes"`
 		MaxSpaceBytes   Size `toml:"max_space_bytes"`
 		MaxSpaceKeys    int  `toml:"max_space_keys"`
@@ -104,6 +107,8 @@ func defaultConfig() *Config {
 	c.Retention.SpaceIdleTTL = Duration(180 * 24 * time.Hour)
 	c.Retention.TombstoneTTL = Duration(7 * 24 * time.Hour)
 	c.Limits.MaxValueSize = 64 << 10
+	c.Limits.MaxPointSize = 1 << 10
+	c.Limits.MaxSeriesPoints = 50000
 	c.Limits.MaxVisitorBytes = 1 << 20
 	c.Limits.MaxSpaceBytes = 5 << 20
 	c.Limits.MaxSpaceKeys = 10000
@@ -139,6 +144,9 @@ func loadConfig(path string) (*Config, error) {
 		}
 		c.trusted = append(c.trusted, pfx)
 	}
+	if c.Limits.MaxPointSize < 1 || c.Limits.MaxSeriesPoints < 1 {
+		return nil, fmt.Errorf("config %s: max_point_size and max_series_points must be positive", path)
+	}
 	for name := range c.Spaces {
 		if !validSpace(name) {
 			return nil, fmt.Errorf("config: pinned space %q is not a valid name", name)
@@ -164,6 +172,15 @@ func (c *Config) limitsFor(space string) (maxValue, maxBytes int64, maxKeys int)
 		if p.MaxKeys > 0 {
 			maxKeys = p.MaxKeys
 		}
+	}
+	return
+}
+
+// seriesLimitsFor returns the point size and points-per-series limits.
+func (c *Config) seriesLimitsFor(space string) (maxPoint int64, maxPoints int) {
+	maxPoint, maxPoints = int64(c.Limits.MaxPointSize), c.Limits.MaxSeriesPoints
+	if p, ok := c.Spaces[space]; ok && p.MaxSeriesPoints > 0 {
+		maxPoints = p.MaxSeriesPoints
 	}
 	return
 }
