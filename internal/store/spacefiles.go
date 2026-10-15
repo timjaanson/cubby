@@ -135,8 +135,8 @@ func (s *Store) initSpace(db *sql.DB, name, keyHash string) error {
 // acquire returns an open space with its gate held shared. It returns nil if
 // the space doesn't exist and create is false. Call release when done.
 func (s *Store) Acquire(name string, create bool, keyHash string) (sp *spaceDB, created bool, err error) {
-	if !names.StoredSpace(name) {
-		return nil, false, &apierr.Error{Status: 400, Code: "invalid_space", Message: "Not a valid space name."}
+	if !names.SafeSpaceFile(name) {
+		return nil, false, &apierr.Error{Status: 400, Code: "invalid_space", Message: "Not a usable space name."}
 	}
 	for {
 		s.mu.Lock()
@@ -264,8 +264,8 @@ func (s *Store) Rescan() error {
 		if !ok || e.IsDir() {
 			continue
 		}
-		if !names.StoredSpace(name) {
-			log.Printf("ignoring spaces/%s: not a valid space name", e.Name())
+		if !names.SafeSpaceFile(name) {
+			log.Printf("ignoring spaces/%s: not a usable space file name", e.Name())
 			continue
 		}
 		onDisk[name] = true

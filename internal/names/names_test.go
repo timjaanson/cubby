@@ -119,3 +119,24 @@ func TestNewSpaceName(t *testing.T) {
 		t.Fatalf("suggestion %q", n)
 	}
 }
+
+func TestSafeSpaceFile(t *testing.T) {
+	for name, want := range map[string]bool{
+		"a":                       true,
+		"poll-k7m2x9q4":           true, // fails ValidSpace, still file-safe
+		"cedar-pilot-mango-frost": true,
+		strings.Repeat("a", 63):   true,
+		strings.Repeat("a", 64):   false,
+		"":                        false,
+		"..":                      false,
+		"a/b":                     false,
+		"a.db":                    false,
+		"Poll":                    false,
+		"-a":                      false,
+		"a--b":                    false,
+	} {
+		if SafeSpaceFile(name) != want {
+			t.Errorf("SafeSpaceFile(%q) = %v", name, !want)
+		}
+	}
+}

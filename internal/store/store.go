@@ -126,10 +126,11 @@ func (s *Store) Touch(name string) {
 func NowMs() int64 { return time.Now().UnixMilli() }
 func nowS() int64  { return time.Now().Unix() }
 
-// spacePath maps a space to its file. Names are checked here as well as in
-// the router, so no caller can ever produce a path outside spaces/.
+// spacePath maps a space to its file. It panics on a name that isn't
+// file-safe, so no caller can ever produce a path outside spaces/. Whether a
+// name is allowed over the API is the router's job, not the store's.
 func (s *Store) spacePath(name string) string {
-	if !names.StoredSpace(name) {
+	if !names.SafeSpaceFile(name) {
 		panic("cubby: unchecked space name " + strconv.Quote(name))
 	}
 	return filepath.Join(s.dir, "spaces", name+".db")

@@ -1,5 +1,10 @@
 // Package names validates space names, keys, patterns and visitor IDs, and
 // makes the random names, tokens and hashes the rest of the code uses.
+//
+// Space names have two checks. ValidSpace is the rule for names used over
+// the API. SafeSpaceFile only makes sure a name is safe to use as a file
+// name, and is what the store and admin use, so tightening the API rule
+// never makes spaces already on disk unreadable.
 package names
 
 import (
@@ -23,7 +28,7 @@ var (
 )
 
 const (
-	MinSpace = 16 // shortest space name the server accepts
+	MinSpace = 16 // shortest space name the API accepts
 	MaxSpace = 63
 	// MaxLabel leaves room for "-" and four words of up to 6 letters.
 	MaxLabel = MaxSpace - 1 - (4*6 + 3)
@@ -44,19 +49,21 @@ func init() {
 	}
 }
 
-// ValidSpace checks the space name rule: 16 to 63 lowercase letters, digits
-// and single hyphens, not starting or ending with a hyphen. The length is all
-// it checks; a name is as hard to guess as whoever picked it made it.
+// ValidSpace is the API's rule for space names: 16 to 63 lowercase letters,
+// digits and single hyphens, not starting or ending with a hyphen. It checks
+// length and characters only; a hand-picked name is as hard to guess as
+// whoever picked it made it.
 func ValidSpace(name string) bool {
 	return len(name) >= MinSpace && len(name) <= MaxSpace && spaceRe.MatchString(name)
 }
 
-// StoredSpace checks the looser rule for names already on disk: the same
-// characters, 1 to 63 long. Spaces created before v0.8.0 have shorter names
-// like poll-k7m2x9q4. The API refuses them, but the store, cleanup and admin
-// still open, count, list, export and delete them. The characters alone keep
-// a name safe as a file name.
-func StoredSpace(name string) bool {
+// SafeSpaceFile reports whether name can be used as a space's file name:
+// 1 to 63 lowercase letters, digits and single hyphens, so it can't contain
+// a path separator or "..". It has no minimum length beyond 1. Spaces whose
+// names fail ValidSpace, for example ones created under an older rule, can
+// still be opened, counted, listed, exported, deleted and cleaned up; the
+// API just can't reach them.
+func SafeSpaceFile(name string) bool {
 	return len(name) >= 1 && len(name) <= MaxSpace && spaceRe.MatchString(name)
 }
 
@@ -66,7 +73,7 @@ func ValidLabel(l string) bool {
 	return len(l) <= MaxLabel && LabelRe.MatchString(l)
 }
 
-// validKey also rules out "." and "..", which browsers, fetch and curl
+// ValidKey also rules out "." and "..", which browsers, fetch and curl
 // collapse as path segments, so such a key could never be reached and would
 // send the request somewhere else.
 func ValidKey(k string) bool {

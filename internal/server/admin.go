@@ -47,9 +47,10 @@ func (s *Server) AdminHandler() http.Handler {
 	ok := func(w http.ResponseWriter, r *http.Request, v any) {
 		(&reqCtx{w: w, r: r}).json(200, v)
 	}
+	// Admin works on any space on disk, including names the API refuses.
 	space := func(w http.ResponseWriter, r *http.Request) (string, bool) {
 		name := r.PathValue("space")
-		if !names.StoredSpace(name) {
+		if !names.SafeSpaceFile(name) {
 			fail(w, r, &apierr.Error{Status: 400, Code: "invalid_space", Message: name + " isn't a valid space name."})
 			return "", false
 		}
