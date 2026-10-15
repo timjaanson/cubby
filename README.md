@@ -130,7 +130,7 @@ Writes to `shared/` of a locked space also need `Space-Key: sk_...`. Unknown or 
 
 Every data URL is `/v1/{space}/{area}/{key or pattern}`, optionally followed by `/watch` or `/series`, and nothing after that.
 
-The full contract is in [../SPEC.md](../SPEC.md), with worked examples in [../SCENARIOS.md](../SCENARIOS.md).
+The full contract is in [docs/spec.md](docs/spec.md), with worked examples in [docs/scenarios.md](docs/scenarios.md).
 
 ## JS client
 
@@ -300,8 +300,25 @@ Needs Go 1.26 or newer. No C compiler: SQLite is pure Go, so every binary is sta
 ```sh
 go test ./...
 ./build.sh          # writes dist/cubby-macos, dist/cubby-linux-amd64, dist/cubby-linux-arm64
-go build .          # just for this machine
+go build ./cmd/cubby   # just for this machine, writes ./cubby
 ```
+
+## Code layout
+
+```
+cmd/cubby/          main: hands the command line to internal/cli
+internal/cli/       the cubby command: serve, admin, and the client commands
+internal/server/    HTTP API, rate limits, watches, admin socket handler
+internal/store/     SQLite storage: spaces, keys, series, visitors, cleanup
+internal/config/    config file, defaults, data directory lookup
+internal/names/     name and key validation, random names and tokens
+internal/apierr/    the API error type and shared errors
+internal/version/   build version, set by build.sh
+web/kv.js           the JS client, embedded and served at /kv.js
+docs/               design.md (the model), spec.md (the contract), scenarios.md (worked examples)
+```
+
+Dependencies point one way: `cli` uses `server`, `server` uses `store`, and everything can use `config`, `names` and `apierr`. `store` never imports `server`.
 
 ## Differences from the design docs
 

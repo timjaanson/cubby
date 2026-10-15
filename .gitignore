@@ -2,3 +2,4 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+/cubby

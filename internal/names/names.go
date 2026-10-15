@@ -1,4 +1,6 @@
-package main
+// Package names validates space names, keys, patterns and visitor IDs, and
+// makes the random names, tokens and hashes the rest of the code uses.
+package names
 
 import (
 	"crypto/rand"
@@ -12,18 +14,18 @@ import (
 
 var (
 	spaceRe   = regexp.MustCompile(`^([a-z0-9]+(-[a-z0-9]+)*-)?[a-z0-9]{8}$`)
-	labelRe   = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
-	keyRe     = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+	LabelRe   = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+	KeyRe     = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 	patternRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{0,127}\*$`)
 	visitorRe = regexp.MustCompile(`^u_[a-z2-7]{16}$`)
-	tokenRe   = regexp.MustCompile(`^kv_[A-Za-z0-9_-]{43}$`)
+	TokenRe   = regexp.MustCompile(`^kv_[A-Za-z0-9_-]{43}$`)
 )
 
 const alnum = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 // validSpace checks the space name rule: optional label, 8-char suffix with
 // at least 2 digits and 2 letters, at most 63 characters.
-func validSpace(name string) bool {
+func ValidSpace(name string) bool {
 	if len(name) > 63 || !spaceRe.MatchString(name) {
 		return false
 	}
@@ -42,15 +44,15 @@ func validSpace(name string) bool {
 // validKey also rules out "." and "..", which browsers, fetch and curl
 // collapse as path segments, so such a key could never be reached and would
 // send the request somewhere else.
-func validKey(k string) bool {
-	return keyRe.MatchString(k) && !actionWords[k] && k != "." && k != ".."
+func ValidKey(k string) bool {
+	return KeyRe.MatchString(k) && !ActionWords[k] && k != "." && k != ".."
 }
 
 // actionWords can follow a key in a path, so they can't be keys themselves.
-var actionWords = map[string]bool{"watch": true, "series": true}
+var ActionWords = map[string]bool{"watch": true, "series": true}
 
-func validPattern(p string) bool { return patternRe.MatchString(p) }
-func validVisitor(id string) bool {
+func ValidPattern(p string) bool { return patternRe.MatchString(p) }
+func ValidVisitor(id string) bool {
 	return visitorRe.MatchString(id)
 }
 
@@ -64,7 +66,7 @@ func randomSuffix() string {
 			out[i] = alnum[int(b[i])%len(alnum)]
 		}
 		s := string(out)
-		if validSpace(s) {
+		if ValidSpace(s) {
 			return s
 		}
 	}
@@ -72,7 +74,7 @@ func randomSuffix() string {
 
 // newSpaceName builds a valid name from a label. Invalid label characters are
 // dropped so it can also produce a suggestion for a bad name.
-func newSpaceName(label string) string {
+func NewSpaceName(label string) string {
 	label = cleanLabel(label)
 	max := 63 - 9
 	if len(label) > max {
@@ -104,30 +106,30 @@ func cleanLabel(s string) string {
 }
 
 // suggestFor makes a valid name from an invalid one, keeping its readable part.
-func suggestFor(bad string) string {
-	return newSpaceName(bad)
+func SuggestFor(bad string) string {
+	return NewSpaceName(bad)
 }
 
-func newVisitorID() string {
+func NewVisitorID() string {
 	b := make([]byte, 10)
 	rand.Read(b)
 	return "u_" + strings.ToLower(base32.StdEncoding.EncodeToString(b))
 }
 
-func randomToken(prefix string) string {
+func RandomToken(prefix string) string {
 	b := make([]byte, 32)
 	rand.Read(b)
 	return prefix + base64.RawURLEncoding.EncodeToString(b)
 }
 
-func hashSecret(s string) string {
+func HashSecret(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])
 }
 
 // prefixRange turns a pattern prefix into [lo, hi) for key range scans.
 // An empty prefix matches everything.
-func prefixRange(prefix string) (string, string) {
+func PrefixRange(prefix string) (string, string) {
 	if prefix == "" {
 		return "", "\xff"
 	}

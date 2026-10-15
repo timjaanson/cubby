@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"os"
@@ -41,7 +41,7 @@ func readOnly(t *testing.T, dir string) {
 
 func TestDataDirNormalUser(t *testing.T) {
 	home, _ := isolate(t)
-	dir, note, err := resolveDataDir("", "")
+	dir, note, err := ResolveDataDir("", "")
 	if err != nil || dir != userDir(home) || note != "" {
 		t.Fatalf("got %q %q %v", dir, note, err)
 	}
@@ -53,7 +53,7 @@ func TestDataDirNormalUser(t *testing.T) {
 func TestDataDirNoUsableHome(t *testing.T) {
 	_, work := isolate(t)
 	t.Setenv("HOME", "/")
-	dir, _, err := resolveDataDir("", "")
+	dir, _, err := ResolveDataDir("", "")
 	if err != nil || dir != filepath.Join(work, "cubby-data") {
 		t.Fatalf("got %q %v", dir, err)
 	}
@@ -62,13 +62,13 @@ func TestDataDirNoUsableHome(t *testing.T) {
 func TestDataDirReadOnlyHome(t *testing.T) {
 	home, work := isolate(t)
 	readOnly(t, home)
-	dir, note, err := resolveDataDir("", "")
+	dir, note, err := ResolveDataDir("", "")
 	if err != nil || dir != filepath.Join(work, "cubby-data") || !strings.Contains(note, "isn't writable") {
 		t.Fatalf("got %q %q %v", dir, note, err)
 	}
 	// Admin finds the same place without being told.
 	os.WriteFile(filepath.Join(dir, "server.db"), nil, 0o600)
-	if found, err := findDataDir(""); err != nil || found != dir {
+	if found, err := FindDataDir(""); err != nil || found != dir {
 		t.Fatalf("findDataDir: %q %v", found, err)
 	}
 }
@@ -78,7 +78,7 @@ func TestDataDirExistingDataWins(t *testing.T) {
 	fallback := filepath.Join(work, "cubby-data")
 	os.MkdirAll(fallback, 0o700)
 	os.WriteFile(filepath.Join(fallback, "server.db"), nil, 0o600)
-	dir, _, err := resolveDataDir("", "")
+	dir, _, err := ResolveDataDir("", "")
 	if err != nil || dir != fallback {
 		t.Fatalf("got %q %v", dir, err)
 	}
@@ -101,17 +101,17 @@ func TestDataDirExplicitNoFallback(t *testing.T) {
 		if os.Getenv("CUBBY_DATA") == "" {
 			flag = filepath.Join(locked, "d")
 		}
-		_, _, err := resolveDataDir(flag, "")
+		_, _, err := ResolveDataDir(flag, "")
 		if err == nil || !strings.Contains(err.Error(), "can't use") {
 			t.Fatalf("explicit unwritable dir: %v", err)
 		}
 	}
 	// Relative explicit paths become absolute.
 	t.Setenv("CUBBY_DATA", "")
-	if dir, _, err := resolveDataDir("rel", ""); err != nil || dir != filepath.Join(work, "rel") {
+	if dir, _, err := ResolveDataDir("rel", ""); err != nil || dir != filepath.Join(work, "rel") {
 		t.Fatalf("relative: %q %v", dir, err)
 	}
-	if dir, _, _ := resolveDataDir("", "fromcfg"); dir != filepath.Join(work, "fromcfg") {
+	if dir, _, _ := ResolveDataDir("", "fromcfg"); dir != filepath.Join(work, "fromcfg") {
 		t.Fatalf("config data_dir: %q", dir)
 	}
 }
@@ -120,12 +120,12 @@ func TestDataDirNothingWritable(t *testing.T) {
 	home, work := isolate(t)
 	readOnly(t, home)
 	readOnly(t, work)
-	_, _, err := resolveDataDir("", "")
+	_, _, err := ResolveDataDir("", "")
 	if err == nil || !strings.Contains(err.Error(), "no writable place") || !strings.Contains(err.Error(), "--data") {
 		t.Fatalf("got %v", err)
 	}
-	if !strings.Contains(previewDataDir(), "nowhere writable") {
-		t.Fatalf("preview: %s", previewDataDir())
+	if !strings.Contains(PreviewDataDir(), "nowhere writable") {
+		t.Fatalf("preview: %s", PreviewDataDir())
 	}
 }
 
@@ -133,11 +133,11 @@ func TestDataDirXDG(t *testing.T) {
 	home, _ := isolate(t)
 	xdg := filepath.Join(home, "xdg")
 	t.Setenv("XDG_DATA_HOME", xdg)
-	if dir, _, _ := resolveDataDir("", ""); dir != filepath.Join(xdg, "cubby") {
+	if dir, _, _ := ResolveDataDir("", ""); dir != filepath.Join(xdg, "cubby") {
 		t.Fatalf("absolute XDG_DATA_HOME: %q", dir)
 	}
 	t.Setenv("XDG_DATA_HOME", "relative/xdg")
-	if dir, _, _ := resolveDataDir("", ""); dir != userDir(home) {
+	if dir, _, _ := ResolveDataDir("", ""); dir != userDir(home) {
 		t.Fatalf("relative XDG_DATA_HOME must be ignored: %q", dir)
 	}
 }
@@ -145,7 +145,7 @@ func TestDataDirXDG(t *testing.T) {
 func TestDataDirSystemd(t *testing.T) {
 	_, work := isolate(t)
 	t.Setenv("STATE_DIRECTORY", filepath.Join(work, "state")+":"+filepath.Join(work, "other"))
-	if dir, _, err := resolveDataDir("", ""); err != nil || dir != filepath.Join(work, "state") {
+	if dir, _, err := ResolveDataDir("", ""); err != nil || dir != filepath.Join(work, "state") {
 		t.Fatalf("got %q %v", dir, err)
 	}
 }

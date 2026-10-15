@@ -7,14 +7,14 @@ set -eu
 cd "$(dirname "$0")"
 
 VERSION=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}
-LDFLAGS="-s -w -X main.version=$VERSION"
+LDFLAGS="-s -w -X github.com/timjaanson/cubby/internal/version.Version=$VERSION"
 export CGO_ENABLED=0
 
 rm -rf dist && mkdir dist
 
 build() {
   echo "building $1/$2"
-  GOOS=$1 GOARCH=$2 go build -trimpath -ldflags "$LDFLAGS" -o "dist/$3" .
+  GOOS=$1 GOARCH=$2 go build -trimpath -ldflags "$LDFLAGS" -o "dist/$3" ./cmd/cubby
 }
 
 build linux amd64 cubby-linux-amd64

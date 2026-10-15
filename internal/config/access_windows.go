@@ -1,5 +1,5 @@
 //go:build windows
 
-package main
+package config
 
 func accessW(path string) bool { return true }

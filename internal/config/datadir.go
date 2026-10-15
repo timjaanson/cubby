@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"errors"
@@ -111,7 +111,7 @@ func writableDir(dir string) error {
 
 // resolveDataDir picks the data directory for the server. note explains a
 // fallback choice, so the server can say why it didn't use the usual place.
-func resolveDataDir(flag, fromConfig string) (dir, note string, err error) {
+func ResolveDataDir(flag, fromConfig string) (dir, note string, err error) {
 	if d, src := explicitDataDir(flag, fromConfig); d != "" {
 		abs, _ := filepath.Abs(d)
 		if err := writableDir(abs); err != nil {
@@ -143,7 +143,7 @@ func resolveDataDir(flag, fromConfig string) (dir, note string, err error) {
 }
 
 // findDataDir locates existing data without creating anything, for admin.
-func findDataDir(flag string) (string, error) {
+func FindDataDir(flag string) (string, error) {
 	if d, _ := explicitDataDir(flag, ""); d != "" {
 		return filepath.Abs(d)
 	}
@@ -158,7 +158,7 @@ func findDataDir(flag string) (string, error) {
 }
 
 // previewDataDir says where a server would put its data, without creating it.
-func previewDataDir() string {
+func PreviewDataDir() string {
 	if d, src := explicitDataDir("", ""); d != "" {
 		abs, _ := filepath.Abs(d)
 		return abs + " (from " + src + ")"

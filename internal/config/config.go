@@ -1,4 +1,6 @@
-package main
+// Package config loads the server's TOML config, fills in defaults, and
+// finds the data directory.
+package config
 
 import (
 	"fmt"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/timjaanson/cubby/internal/names"
 )
 
 // Size is a byte count written like "64KB" in config.
@@ -24,7 +27,7 @@ func (s *Size) UnmarshalText(b []byte) error {
 type Duration time.Duration
 
 func (d *Duration) UnmarshalText(b []byte) error {
-	v, err := parseDuration(string(b))
+	v, err := ParseDuration(string(b))
 	*d = Duration(v)
 	return err
 }
@@ -48,7 +51,7 @@ func parseSize(s string) (int64, error) {
 	return n * mult, nil
 }
 
-func parseDuration(s string) (time.Duration, error) {
+func ParseDuration(s string) (time.Duration, error) {
 	s = strings.TrimSpace(s)
 	if n, ok := strings.CutSuffix(s, "d"); ok {
 		v, err := strconv.Atoi(n)
@@ -92,10 +95,10 @@ type Config struct {
 	} `toml:"limits"`
 	Spaces map[string]PinnedSpace `toml:"spaces"`
 
-	trusted []netip.Prefix
+	Trusted []netip.Prefix `toml:"-"` // parsed from Server.TrustedProxies
 }
 
-func defaultConfig() *Config {
+func Default() *Config {
 	c := &Config{}
 	c.Server.Listen = ":8080"
 	if l := os.Getenv("CUBBY_LISTEN"); l != "" {
@@ -119,8 +122,8 @@ func defaultConfig() *Config {
 
 // loadConfig reads an optional TOML file over the defaults. Missing values
 // keep their defaults.
-func loadConfig(path string) (*Config, error) {
-	c := defaultConfig()
+func Load(path string) (*Config, error) {
+	c := Default()
 	if path != "" {
 		md, err := toml.DecodeFile(path, c)
 		if err != nil {
@@ -142,25 +145,25 @@ func loadConfig(path string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("trusted_proxies: %w", err)
 		}
-		c.trusted = append(c.trusted, pfx)
+		c.Trusted = append(c.Trusted, pfx)
 	}
 	if c.Limits.MaxPointSize < 1 || c.Limits.MaxSeriesPoints < 1 {
 		return nil, fmt.Errorf("config %s: max_point_size and max_series_points must be positive", path)
 	}
 	for name := range c.Spaces {
-		if !validSpace(name) {
+		if !names.ValidSpace(name) {
 			return nil, fmt.Errorf("config: pinned space %q is not a valid name", name)
 		}
 	}
 	return c, nil
 }
 
-func (c *Config) rateLimitsOn() bool {
+func (c *Config) RateLimitsOn() bool {
 	return c.Server.RateLimits == nil || *c.Server.RateLimits
 }
 
 // limitsFor returns the value size, byte and key limits for a space.
-func (c *Config) limitsFor(space string) (maxValue, maxBytes int64, maxKeys int) {
+func (c *Config) LimitsFor(space string) (maxValue, maxBytes int64, maxKeys int) {
 	maxValue, maxBytes, maxKeys = int64(c.Limits.MaxValueSize), int64(c.Limits.MaxSpaceBytes), c.Limits.MaxSpaceKeys
 	if p, ok := c.Spaces[space]; ok {
 		if p.MaxValueSize > 0 {
@@ -177,7 +180,7 @@ func (c *Config) limitsFor(space string) (maxValue, maxBytes int64, maxKeys int)
 }
 
 // seriesLimitsFor returns the point size and points-per-series limits.
-func (c *Config) seriesLimitsFor(space string) (maxPoint int64, maxPoints int) {
+func (c *Config) SeriesLimitsFor(space string) (maxPoint int64, maxPoints int) {
 	maxPoint, maxPoints = int64(c.Limits.MaxPointSize), c.Limits.MaxSeriesPoints
 	if p, ok := c.Spaces[space]; ok && p.MaxSeriesPoints > 0 {
 		maxPoints = p.MaxSeriesPoints
@@ -185,7 +188,7 @@ func (c *Config) seriesLimitsFor(space string) (maxPoint int64, maxPoints int) {
 	return
 }
 
-func (c *Config) pinned(space string) bool {
+func (c *Config) Pinned(space string) bool {
 	_, ok := c.Spaces[space]
 	return ok
 }

@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"encoding/json"
@@ -11,25 +11,29 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/timjaanson/cubby/internal/config"
+	"github.com/timjaanson/cubby/internal/names"
+	"github.com/timjaanson/cubby/internal/store"
 )
 
 type tc struct {
 	t     *testing.T
 	url   string
-	store *Store
-	cfg   *Config
+	store *store.Store
+	cfg   *config.Config
 }
 
 func newTest(t *testing.T) *tc {
-	cfg := defaultConfig()
+	cfg := config.Default()
 	cfg.Server.DataDir = t.TempDir()
-	cfg2, _ := loadConfig("")
-	cfg.trusted = cfg2.trusted
-	store, err := openStore(cfg)
+	cfg2, _ := config.Load("")
+	cfg.Trusted = cfg2.Trusted
+	store, err := store.Open(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(newServer(cfg, store, nil))
+	ts := httptest.NewServer(New(cfg, store, nil))
 	t.Cleanup(func() { ts.Close(); store.Close() })
 	return &tc{t: t, url: ts.URL, store: store, cfg: cfg}
 }
@@ -75,16 +79,16 @@ func TestNames(t *testing.T) {
 		"poll": false, "poll-7f3a": false, "poll-12345678": false, "poll-chatroom": false, "Poll-k7m2x9q4": false,
 		"anon": false, "spaces": false, "whoami": false,
 	} {
-		if validSpace(name) != want {
+		if names.ValidSpace(name) != want {
 			t.Errorf("validSpace(%q) = %v", name, !want)
 		}
 	}
 	for range 100 {
-		if n := newSpaceName("My Poll!"); !validSpace(n) || !strings.HasPrefix(n, "my-poll-") {
+		if n := names.NewSpaceName("My Poll!"); !names.ValidSpace(n) || !strings.HasPrefix(n, "my-poll-") {
 			t.Fatalf("bad generated name %q", n)
 		}
 	}
-	if !validVisitor(newVisitorID()) {
+	if !names.ValidVisitor(names.NewVisitorID()) {
 		t.Fatal("bad visitor id")
 	}
 }
@@ -349,7 +353,7 @@ func TestSpaceFiles(t *testing.T) {
 		done <- s
 	}()
 	time.Sleep(200 * time.Millisecond)
-	if err := c.store.deleteSpace(sp); err != nil {
+	if err := c.store.DeleteSpace(sp); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -391,7 +395,7 @@ func TestCopiedSpaceFile(t *testing.T) {
 		t.Fatalf("copied space: %q", body)
 	}
 	found := false
-	for _, r := range dst.store.spaces() {
+	for _, r := range dst.store.Spaces() {
 		found = found || (r.Name == sp && r.Keys == 1)
 	}
 	if !found {
@@ -406,9 +410,7 @@ func TestVisitorQuotaAcrossSpaces(t *testing.T) {
 	a := []string{"Authorization", "Bearer " + tok}
 	v := strings.Repeat("x", 40)
 	c.req("PUT", "/v1/one-k7m2x9q4/shared/k", v, a...)
-	c.store.cacheMu.Lock()
-	c.store.vbytes = map[string]int64{} // force a recount from the space files
-	c.store.cacheMu.Unlock()
+	c.store.ForgetVisitorBytes("") // force a recount from the space files
 	c.req("PUT", "/v1/two-k7m2x9q4/shared/k", v, a...)
 	if s, _, body := c.req("PUT", "/v1/three-k7m2x9q4/shared/k", v, a...); s != 507 || errCode(body) != "visitor_quota_exceeded" {
 		t.Fatalf("quota: %d %s", s, body)
@@ -420,13 +422,11 @@ func TestManySpacesEvict(t *testing.T) {
 	c.cfg.Server.RateLimits = new(bool)
 	tok, _ := c.anon()
 	a := []string{"Authorization", "Bearer " + tok}
-	for i := range maxOpenSpaces + 20 {
+	for i := range store.MaxOpenSpaces + 20 {
 		c.req("PUT", fmt.Sprintf("/v1/s%03d-k7m2x9q4/shared/k", i), "v", a...)
 	}
-	c.store.mu.Lock()
-	open := len(c.store.open)
-	c.store.mu.Unlock()
-	if open > maxOpenSpaces {
+	open := c.store.OpenSpaces()
+	if open > store.MaxOpenSpaces {
 		t.Fatalf("%d files open", open)
 	}
 	if _, _, body := c.req("GET", "/v1/s000-k7m2x9q4/shared/k", ""); body != "v" {

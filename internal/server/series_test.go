@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"database/sql"
@@ -320,31 +320,22 @@ func TestSeriesRetentionAndBytes(t *testing.T) {
 	keyRow := int64(len("temp") + len("11"))
 	points := int64(5 * (len("temp") + 1))
 	points += int64(len("10") + len("11") - 2) // two of them have two digits
-	c.store.mu.Lock()
-	got := c.store.stats["home-k7m2x9q4"].bytes
-	c.store.mu.Unlock()
+	got := c.store.SpaceBytes("home-k7m2x9q4")
 	if got != keyRow+points {
 		t.Fatalf("space bytes %d, want %d", got, keyRow+points)
 	}
-	c.store.cacheMu.Lock()
-	delete(c.store.vbytes, id)
-	c.store.cacheMu.Unlock()
-	if vb, _ := c.store.visitorTotal(id); vb != keyRow {
+	c.store.ForgetVisitorBytes(id)
+	if vb, _ := c.store.VisitorTotal(id); vb != keyRow {
 		t.Fatalf("visitor bytes %d, want %d", vb, keyRow)
 	}
 
 	// Deleting the series frees everything but the tombstone.
 	c.req("DELETE", S+"/temp", "", auth...)
-	c.store.mu.Lock()
-	got = c.store.stats["home-k7m2x9q4"].bytes
-	c.store.mu.Unlock()
+	got = c.store.SpaceBytes("home-k7m2x9q4")
 	if got != int64(len("temp")) {
 		t.Fatalf("after delete: %d bytes", got)
 	}
-	var n int
-	sp, _, _ := c.store.acquire("home-k7m2x9q4", false, "")
-	sp.db.QueryRow(`SELECT count(*) FROM points`).Scan(&n)
-	c.store.release(sp)
+	n, _ := c.store.PointCount("home-k7m2x9q4")
 	if n != 0 {
 		t.Fatalf("%d points left after delete", n)
 	}
@@ -422,7 +413,7 @@ func TestSeriesMigratesOldFiles(t *testing.T) {
 	S := "/v1/home-k7m2x9q4/shared"
 	c.req("PUT", S+"/note", "hi", auth...)
 	path := filepath.Join(c.cfg.Server.DataDir, "spaces", "home-k7m2x9q4.db")
-	c.store.forget("home-k7m2x9q4")
+	c.store.Forget("home-k7m2x9q4")
 	db, err := sql.Open("sqlite", "file:"+path)
 	if err != nil {
 		t.Fatal(err)
@@ -433,7 +424,7 @@ func TestSeriesMigratesOldFiles(t *testing.T) {
 		}
 	}
 	db.Close()
-	c.store.rescan()
+	c.store.Rescan()
 	if _, _, b := c.req("GET", S+"/note", ""); b != "hi" {
 		t.Fatalf("old data: %s", b)
 	}
