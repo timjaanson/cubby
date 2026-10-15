@@ -472,3 +472,36 @@ func TestCreateNamedSpace(t *testing.T) {
 		t.Fatalf("locked write without key: %d %s", st, body)
 	}
 }
+
+// Unknown routes, the root and /v1 itself all give the same bare 404, with no
+// hints about the API.
+func TestQuietRoutes(t *testing.T) {
+	c := newTest(t)
+	var first string
+	for _, p := range []string{"/", "/v1", "/v1/", "/v1/x", "/v1/x/y", "/nope", "/v2/a/b/c",
+		"/v1/cedar-pilot-mango-frost/other/k", "/v1/cedar-pilot-mango-frost/users/k"} {
+		s, _, b := c.req("GET", p, "")
+		if s != 404 || errCode(b) != "not_found" {
+			t.Fatalf("%s: %d %s", p, s, b)
+		}
+		if first == "" {
+			first = b
+		} else if b != first {
+			t.Errorf("%s: body %s differs from %s", p, b, first)
+		}
+		for _, leak := range []string{"/v1", "shared", "kv.js", "health", "cubby"} {
+			if strings.Contains(b, leak) {
+				t.Errorf("%s: body mentions %q: %s", p, leak, b)
+			}
+		}
+	}
+	s, _, b := c.req("GET", "/health", "")
+	var h struct {
+		OK      bool
+		Version string
+	}
+	json.Unmarshal([]byte(b), &h)
+	if s != 200 || !h.OK || h.Version == "" {
+		t.Fatalf("health: %d %s", s, b)
+	}
+}

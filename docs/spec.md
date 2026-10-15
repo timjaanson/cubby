@@ -580,8 +580,11 @@ See [Series](#11-series).
 | Route | Returns |
 |---|---|
 | `GET /kv.js` | the JS client as an ES module |
-| `GET /health` | 200 `{"ok": true}` |
+| `GET /health` | 200 `{"ok": true, "version": "v0.8.1"}` |
 | `OPTIONS` anything | the CORS preflight response |
+| anything else, including `/` and `/v1` | 404 `{"error": "not_found", "message": "No such route."}` |
+
+The server doesn't describe itself. Unknown routes all get the same 404 with no hints, so a stray visitor learns nothing about the API. Clients and these docs are where the paths are explained.
 
 ## 10. Watching
 

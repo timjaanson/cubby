@@ -5,7 +5,6 @@ package server
 import (
 	"bytes"
 	_ "embed"
-	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -78,17 +77,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch r.URL.Path {
 	case "/health":
-		c.json(200, map[string]any{"ok": true})
+		c.json(200, map[string]any{"ok": true, "version": version.Version})
 		return
 	case "/kv.js":
 		h.Set("Content-Type", "text/javascript; charset=utf-8")
 		h.Set("Cache-Control", "public, max-age=3600")
 		h.Set("Access-Control-Allow-Origin", "*")
 		http.ServeContent(sw, r, "kv.js", version.BuildTime, bytes.NewReader(web.KVJS))
-		return
-	case "/":
-		h.Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintf(sw, "cubby %s\n\nAPI under /v1, JS client at /kv.js, health at /health.\n", version.Version)
 		return
 	}
 
@@ -172,7 +167,7 @@ func (s *Server) route(c *reqCtx) error {
 		}
 	}
 	if len(seg) < 3 {
-		return &apierr.Error{Status: 404, Code: "not_found", Message: "No such route. Paths look like /v1/{space}/shared/{key}."}
+		return &apierr.Error{Status: 404, Code: "not_found", Message: "No such route."}
 	}
 
 	space := seg[0]
@@ -198,7 +193,7 @@ func (s *Server) route(c *reqCtx) error {
 		t.Area, rest = "m:"+id, seg[2:]
 	case "users":
 		if len(seg) < 4 {
-			return &apierr.Error{Status: 404, Code: "not_found", Message: "No such route. Paths look like /v1/{space}/users/{id}/{key}."}
+			return &apierr.Error{Status: 404, Code: "not_found", Message: "No such route."}
 		}
 		if seg[2] == "*" {
 			t.AllUsers = true
@@ -209,7 +204,7 @@ func (s *Server) route(c *reqCtx) error {
 		}
 		rest = seg[3:]
 	default:
-		return &apierr.Error{Status: 404, Code: "not_found", Message: "No such area. Use shared, users/{id} or me."}
+		return &apierr.Error{Status: 404, Code: "not_found", Message: "No such route."}
 	}
 
 	// /{target} or /{target}/{action}, nothing after the action.
