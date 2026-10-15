@@ -12,6 +12,7 @@ const usage = `cubby: a key-value store over plain HTTP, server and client in on
 
 Server:
   cubby serve [-p PORT]           run the server, port 28229 unless told (see 'cubby help serve')
+  cubby config [--defaults]       print the server config as TOML, to check it or start a file
   cubby admin <command>           look after the server's data (spaces, export, delete, rekey, stats, cleanup)
 
 Client (talks to --server or $CUBBY_SERVER, default http://localhost:28229; a bare port means localhost):
@@ -47,6 +48,8 @@ func Run(args []string) int {
 		code = cmdServe(rest)
 	case "admin":
 		code = cmdAdmin(rest)
+	case "config":
+		code = cmdConfig(rest)
 	case "version", "--version", "-v":
 		fmt.Println("cubby", version.Version)
 	case "help", "--help", "-h":

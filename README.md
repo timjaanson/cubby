@@ -193,7 +193,15 @@ Nothing is required. These cover what most setups change. A flag beats its envir
 | `--config` | `CUBBY_CONFIG` | none |
 | `--quiet` | | logs each request to stderr |
 
-For limits and retention, pass a TOML file with `--config`. Every setting is optional, and the values below are the defaults:
+For limits and retention, pass a TOML file with `--config`. The binary writes one for you, with a comment on every setting:
+
+```sh
+cubby config --defaults > cubby.toml     # every setting at its default
+cubby serve --config cubby.toml
+cubby config --config cubby.toml -p 9000 # check what serve would use; changed values say "# default: ..."
+```
+
+`cubby config` resolves settings exactly as `serve` does, so it also answers "which port and data directory will this use?" without starting anything. Every setting is optional, and the values below are the defaults:
 
 ```toml
 [server]

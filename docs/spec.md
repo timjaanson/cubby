@@ -1043,6 +1043,7 @@ The same binary that runs the server is also a command-line client. It's the mai
 
 ```
 cubby serve [-p PORT]           run the server, port 28229 by default
+cubby config [--defaults]       print the server config as commented TOML: what serve would use, or the defaults
 cubby admin ...                 administer the local server's data, see Admin
 cubby <command> ...             everything else is a client talking HTTP to a server
 ```

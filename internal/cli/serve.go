@@ -20,32 +20,16 @@ import (
 )
 
 func cmdServe(args []string) int {
-	f, err := parseFlags(args, []string{"listen", "port", "p", "data", "config"}, []string{"quiet", "q"})
+	f, err := parseFlags(args, serveFlags, []string{"quiet", "q"})
 	if err == nil && len(f.args) > 0 {
 		err = fmt.Errorf("serve takes no arguments, got %q", f.args[0])
 	}
 	if err != nil {
 		return usageErr(err)
 	}
-	cfg, err := config.Load(firstNonEmpty(f.str("config"), os.Getenv("CUBBY_CONFIG")))
+	cfg, _, err := serveConfig(f)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "cubby:", err)
-		return 64
-	}
-	// Precedence: flag, then CUBBY_LISTEN, then the config file, then the default.
-	listen := firstNonEmpty(f.str("listen"), f.str("port"), f.str("p"))
-	if n := len(nonEmpty(f.str("listen"), f.str("port"), f.str("p"))); n > 1 {
-		return usageErr(fmt.Errorf("give one of --listen, --port or -p, not %d", n))
-	}
-	if listen == "" {
-		listen = os.Getenv("CUBBY_LISTEN")
-	}
-	if listen != "" {
-		addr, err := config.ListenAddr(listen)
-		if err != nil {
-			return usageErr(err)
-		}
-		cfg.Server.Listen = addr
+		return configErr(err)
 	}
 	dir, note, err := config.ResolveDataDir(f.str("data"), cfg.Server.DataDir)
 	if err != nil {

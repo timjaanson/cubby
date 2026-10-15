@@ -45,12 +45,15 @@ func cmdHelp(cmd string) int {
   -p, --port 9000                  another port
   --listen 127.0.0.1:9000          one interface only (also takes a bare port)
   Env: CUBBY_LISTEN (port or address), CUBBY_DATA, CUBBY_CONFIG. Flags win over env,
-  env wins over the config file.
+  env wins over the config file. 'cubby config' shows the result.
   Data goes in %s, created if missing.
 `, config.DefaultPort, config.PreviewDataDir())
 		return 0
 	case "admin":
 		fmt.Print(adminUsage)
+		return 0
+	case "config":
+		fmt.Print(configUsage)
 		return 0
 	}
 	d, ok := commandFlags[cmd]

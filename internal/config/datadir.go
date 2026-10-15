@@ -157,24 +157,35 @@ func FindDataDir(flag string) (string, error) {
 	return "", fmt.Errorf("no cubby data found in %s. Start the server with 'cubby serve', or pass --data DIR", strings.Join(looked, ", "))
 }
 
-// previewDataDir says where a server would put its data, without creating it.
+// PreviewDataDir says where a server would put its data, without creating it.
 func PreviewDataDir() string {
-	if d, src := explicitDataDir("", ""); d != "" {
+	dir, how := DataDirPreview("", "")
+	if how == "" {
+		return dir
+	}
+	return dir + " (" + how + ")"
+}
+
+// DataDirPreview is ResolveDataDir without side effects: the directory a
+// server started with these inputs would use, and why. dir is empty when
+// nothing is writable.
+func DataDirPreview(flag, fromConfig string) (dir, how string) {
+	if d, src := explicitDataDir(flag, fromConfig); d != "" {
 		abs, _ := filepath.Abs(d)
-		return abs + " (from " + src + ")"
+		return abs, "from " + src
 	}
 	cands := dataDirCandidates()
 	for _, c := range cands {
 		if hasData(c.dir) {
-			return c.dir + " (existing data)"
+			return c.dir, "existing data"
 		}
 	}
 	for _, c := range cands {
 		if canCreate(c.dir) {
-			return c.dir
+			return c.dir, ""
 		}
 	}
-	return "nowhere writable, pass --data DIR"
+	return "", "nowhere writable, pass --data DIR"
 }
 
 // canCreate reports whether dir exists and is writable, or its nearest
