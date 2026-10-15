@@ -300,13 +300,13 @@ Needs Go 1.26 or newer. No C compiler: SQLite is pure Go, so every binary is sta
 ```sh
 go test ./...
 ./build.sh          # writes dist/cubby-macos, dist/cubby-linux-amd64, dist/cubby-linux-arm64
-go build ./cmd/cubby   # just for this machine, writes ./cubby
+go build .           # just for this machine, writes ./cubby
 ```
 
 ## Code layout
 
 ```
-cmd/cubby/          main: hands the command line to internal/cli
+main.go             entry point: hands the command line to internal/cli
 internal/cli/       the cubby command: serve, admin, and the client commands
 internal/server/    HTTP API, rate limits, watches, admin socket handler
 internal/store/     SQLite storage: spaces, keys, series, visitors, cleanup

@@ -14,7 +14,7 @@ rm -rf dist && mkdir dist
 
 build() {
   echo "building $1/$2"
-  GOOS=$1 GOARCH=$2 go build -trimpath -ldflags "$LDFLAGS" -o "dist/$3" ./cmd/cubby
+  GOOS=$1 GOARCH=$2 go build -trimpath -ldflags "$LDFLAGS" -o "dist/$3" .
 }
 
 build linux amd64 cubby-linux-amd64
