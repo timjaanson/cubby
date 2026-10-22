@@ -76,4 +76,24 @@ const fixed = kv(space, { server: S, token: (await (await fetch(S + "/v1/anon", 
 assert((await fixed.id()).startsWith("u_"), "fixed id")
 assert((await fixed.shared.get("item.1")).text === "milk", "fixed read")
 
+// A stale visitor token in storage (unknown to the server) doesn't block
+// createSpace or join: the client drops it and the server makes a new visitor.
+{
+  const mem = new Map()
+  globalThis.localStorage = { getItem: k => mem.get(k) ?? null, setItem: (k, v) => mem.set(k, v), removeItem: k => mem.delete(k) }
+  const key = "cubby:" + S
+  mem.set(key, JSON.stringify({ token: "vt_" + "x".repeat(43), id: "u_aaaaaaaaaaaaaaaa" }))
+  const { space: s2 } = await createSpace({ server: S })
+  assert(JSON.parse(mem.get(key)).token !== "vt_" + "x".repeat(43), "stale token replaced")
+  const d2 = kv(s2, { server: S })
+  assert((await d2.open({ invite: null })).owner, "owner after stale token")
+  const t2 = await d2.share({ base: "https://example.com/" })
+  mem.set(key, JSON.stringify({ token: "vt_" + "y".repeat(43), id: "u_bbbbbbbbbbbbbbbb" }))
+  assert((await d2.open({ invite: t2.token })).joined, "join after stale token")
+  mem.set(key, JSON.stringify({ token: "kv_" + "z".repeat(43), id: "u_cccccccccccccccc" }))
+  await createSpace({ server: S })
+  assert(JSON.parse(mem.get(key)).token.startsWith("vt_"), "old kv_ token dropped")
+  delete globalThis.localStorage
+}
+
 console.log("kv.js OK")

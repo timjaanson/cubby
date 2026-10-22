@@ -123,7 +123,9 @@ function identity(server, tokenKey, fetchFn, fixedToken) {
     load() {
       try {
         const raw = localStorage.getItem(tokenKey)
-        return raw ? JSON.parse(raw) : memory
+        const v = raw ? JSON.parse(raw) : memory
+        // Only visitor tokens count; anything else (an older kind) is dropped.
+        return typeof v?.token === "string" && v.token.startsWith("vt_") ? v : null
       } catch {
         return memory
       }
@@ -152,6 +154,11 @@ function identity(server, tokenKey, fetchFn, fixedToken) {
     // A visitor the server created in a createSpace or join response.
     adopt(token, id) {
       if (token) store.save({ token, id })
+    },
+    // The server doesn't know the stored token. Calls that can create a
+    // visitor (createSpace, join) go on without one.
+    forget() {
+      store.save(null)
     },
     renew() {
       if (!pending) {
@@ -204,12 +211,14 @@ export function kv(space, opts = {}) {
         if (err?.name === "AbortError") throw err
         throw new KvError(0, "network_error", String(err?.message || err))
       }
-      if (auth && res.status === 401 && attempt === 0 && !ident.fixed) {
+      if (cur?.token && res.status === 401 && attempt === 0 && !ident.fixed) {
         const b = await res.clone().json().catch(() => ({}))
         if (b.error === "invalid_token") {
           // The visitor is gone, say after a year unused. The new one has no
-          // grants, so in a private space the retry gets no_space.
-          await ident.renew()
+          // grants, so in a private space the retry gets no_space. Without
+          // auth (join), go on with no token and let the server make one.
+          if (auth) await ident.renew()
+          else ident.forget()
           continue
         }
       }
@@ -650,14 +659,23 @@ export async function createSpace(o = {}) {
       throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are label, name, public, read, write.`)
     }
   }
-  const headers = {}
-  const cur = ident.current()
-  if (cur?.token) headers.Authorization = "Bearer " + cur.token
   let res
-  try {
-    res = await fetchFn(server + "/v1/spaces", { method: "POST", headers, body: JSON.stringify(fields) })
-  } catch (err) {
-    throw new KvError(0, "network_error", String(err?.message || err))
+  for (let attempt = 0; ; attempt++) {
+    const headers = {}
+    const cur = ident.current()
+    if (cur?.token) headers.Authorization = "Bearer " + cur.token
+    try {
+      res = await fetchFn(server + "/v1/spaces", { method: "POST", headers, body: JSON.stringify(fields) })
+    } catch (err) {
+      throw new KvError(0, "network_error", String(err?.message || err))
+    }
+    // A stored visitor the server no longer knows: create the space as a
+    // new visitor instead.
+    if (res.status === 401 && cur?.token && attempt === 0) {
+      const b = await res.clone().json().catch(() => ({}))
+      if (b.error === "invalid_token") { ident.forget(); continue }
+    }
+    break
   }
   if (!res.ok) throw await errorFrom(res)
   const out = await res.json()
