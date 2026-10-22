@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/timjaanson/cubby/internal/config"
 	"math"
 	"sync"
 	"time"
@@ -99,17 +100,22 @@ type limits struct {
 	misses           *missGuard
 }
 
-func newLimits() *limits {
+func newLimits(configs ...*config.Config) *limits {
+	cfg := config.Default()
+	if len(configs) > 0 {
+		cfg = configs[0]
+	}
+	c := cfg.Limits
 	day := 24 * time.Hour
 	return &limits{
-		visitorsPerIP:    newLimiter(30, time.Hour, 30),
-		writesPerVisitor: newLimiter(60, time.Minute, 30),
-		writesPerIP:      newLimiter(300, time.Minute, 300),
-		writeBytesPerIP:  newLimiter(10<<20, day, 10<<20),
-		readsPerIP:       newLimiter(600, time.Minute, 600),
-		spacesPerVisitor: newLimiter(5, day, 5),
-		spacesPerIP:      newLimiter(20, day, 20),
-		misses:           newMissGuard(),
+		visitorsPerIP:    newLimiter(float64(c.VisitorsPerIPPerHour), time.Hour, float64(c.VisitorsPerIPPerHour)),
+		writesPerVisitor: newLimiter(float64(c.WritesPerMinute), time.Minute, float64(c.WriteBurst)),
+		writesPerIP:      newLimiter(float64(c.WritesPerIPPerMinute), time.Minute, float64(c.WritesPerIPPerMinute)),
+		writeBytesPerIP:  newLimiter(float64(c.WriteBytesPerIPPerDay), day, float64(c.WriteBytesPerIPPerDay)),
+		readsPerIP:       newLimiter(float64(c.ReadsPerIPPerMinute), time.Minute, float64(c.ReadsPerIPPerMinute)),
+		spacesPerVisitor: newLimiter(float64(c.SpacesPerVisitorPerDay), day, float64(c.SpacesPerVisitorPerDay)),
+		spacesPerIP:      newLimiter(float64(c.SpacesPerIPPerDay), day, float64(c.SpacesPerIPPerDay)),
+		misses:           newMissGuard(c.MissesPerIPPerHour),
 	}
 }
 
@@ -119,20 +125,28 @@ func (l *limits) all() []*limiter {
 
 // watchCounter caps open watches per IP and in total.
 type watchCounter struct {
-	mu    sync.Mutex
-	perIP map[string]int
-	total int
+	mu                     sync.Mutex
+	perIP                  map[string]int
+	total                  int
+	perIPLimit, totalLimit int
 }
 
 const (
-	maxWatchesPerIP = 20
+	maxWatchesPerIP = 50
 	maxWatches      = 1000
 )
 
 func (w *watchCounter) acquire(ip string) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.total >= maxWatches || w.perIP[ip] >= maxWatchesPerIP {
+	perIP, total := w.perIPLimit, w.totalLimit
+	if perIP == 0 {
+		perIP = maxWatchesPerIP
+	}
+	if total == 0 {
+		total = maxWatches
+	}
+	if w.total >= total || w.perIP[ip] >= perIP {
 		return false
 	}
 	w.total++

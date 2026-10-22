@@ -179,11 +179,25 @@ func (s *Store) acquire(name string, ns *newSpace) (sp *spaceDB, created bool, e
 				s.mu.Unlock()
 				return nil, false, fmt.Errorf("open space %s: %w", name, err)
 			}
+			if err := migrateSpace(db); err != nil {
+				db.Close()
+				s.mu.Unlock()
+				return nil, false, err
+			}
 			m, err := readMeta(db)
 			if err != nil {
 				db.Close()
 				s.mu.Unlock()
 				return nil, false, fmt.Errorf("open space %s: %w", name, err)
+			}
+			var expiry int64
+			if err := db.QueryRow(`SELECT coalesce(min(expires),0) FROM kv WHERE expires > 0 AND value IS NOT NULL`).Scan(&expiry); err != nil {
+				db.Close()
+				s.mu.Unlock()
+				return nil, false, err
+			}
+			if expiry > 0 {
+				s.expiring[name] = expiry
 			}
 			sp = &spaceDB{name: name, db: db, metaActive: m.lastActive, lastUsed: time.Now()}
 			s.open[name] = sp
@@ -291,6 +305,14 @@ func (s *Store) Rescan() error {
 		if err != nil {
 			return err
 		}
+		if err := migrateSpace(db); err != nil {
+			db.Close()
+			return err
+		}
+		if err := s.setNextExpiry(name, db); err != nil {
+			db.Close()
+			return err
+		}
 		m, err := readMeta(db)
 		db.Close()
 		if err != nil {
@@ -327,6 +349,7 @@ func (s *Store) Forget(name string) {
 		delete(s.stats, name)
 	}
 	delete(s.open, name)
+	delete(s.expiring, name)
 	s.mu.Unlock()
 	if sp != nil {
 		sp.gate.Lock()

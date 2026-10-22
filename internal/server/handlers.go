@@ -70,9 +70,7 @@ func (s *Server) read(c *reqCtx, t store.Target) error {
 	h := c.header()
 	h.Set("ETag", etag(e.Version))
 	h.Set("KV-By", e.Writer)
-	if e.Series {
-		h.Set("KV-Time", strconv.FormatInt(e.T, 10))
-	}
+	writeMetadata(c, e.T, e.Expires)
 	if inm := c.r.Header.Get("If-None-Match"); inm != "" && strings.TrimPrefix(inm, "W/") == etag(e.Version) {
 		c.status = 304
 		c.w.WriteHeader(304)
@@ -132,11 +130,20 @@ func jsonDepth(b []byte) int {
 // write runs after route checked access; the visitor is known.
 func (s *Server) write(c *reqCtx, t store.Target) error {
 	id := c.visitor
+	s.writeBudget(c)
 	ifv, err := parseIfVersion(c.r)
 	if err != nil {
 		return err
 	}
-	req := store.WriteReq{Space: t.Space, Area: t.Area, Key: t.Key, Writer: id, IfVersion: ifv}
+	before, err := parseIfBefore(c.r)
+	if err != nil {
+		return err
+	}
+	ttl, err := s.parseTTL(c.r)
+	if err != nil {
+		return err
+	}
+	req := store.WriteReq{IfBefore: before, TTL: ttl, Space: t.Space, Area: t.Area, Key: t.Key, Writer: id, IfVersion: ifv}
 
 	if c.r.Method == http.MethodPut {
 		maxValue, _, _ := s.cfg.LimitsFor(t.Space)
@@ -180,6 +187,7 @@ func (s *Server) write(c *reqCtx, t store.Target) error {
 		s.notify.fire(t.Space)
 	}
 	c.header().Set("ETag", etag(res.Version))
+	writeMetadata(c, res.T, res.Expires)
 	status := 200
 	if res.Created && c.r.Method == http.MethodPut {
 		status = 201
@@ -196,11 +204,13 @@ type itemJSON struct {
 	User    string          `json:"user,omitempty"`
 	By      string          `json:"by"`
 	T       *int64          `json:"t,omitempty"`
+	Expires int64           `json:"expires,omitempty"`
+	Expired bool            `json:"expired,omitempty"`
 }
 
 func toItem(e store.Entry) itemJSON {
-	it := itemJSON{Key: e.Key, Version: e.Version, User: e.User, By: e.Writer}
-	if e.Series && e.Value != nil {
+	it := itemJSON{Key: e.Key, Version: e.Version, User: e.User, By: e.Writer, Expires: e.Expires, Expired: e.Expired}
+	if e.T != 0 {
 		t := e.T
 		it.T = &t
 	}
@@ -311,9 +321,13 @@ func (s *Server) watch(c *reqCtx, t store.Target) error {
 			return err
 		}
 		if len(changes) > 0 || from == 0 {
-			if woken && len(changes) > 0 {
+			if woken && len(changes) > 0 && s.notify.burst(t.Space) {
 				// A burst of writes goes out together.
-				time.Sleep(50 * time.Millisecond)
+				select {
+				case <-time.After(50 * time.Millisecond):
+				case <-c.r.Context().Done():
+					return nil
+				}
 				woken = false
 				continue
 			}

@@ -1,6 +1,9 @@
 package server
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 type notifier struct {
 	mu     sync.Mutex
@@ -10,6 +13,8 @@ type notifier struct {
 type spaceSignal struct {
 	ch      chan struct{}
 	waiters int
+	last    time.Time
+	pause   bool
 }
 
 // subscribe returns a channel that closes on the next write to the space.
@@ -49,7 +54,17 @@ func (n *notifier) fire(space string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if s := n.spaces[space]; s != nil {
+		now := time.Now()
+		s.pause = !s.last.IsZero() && now.Sub(s.last) < 50*time.Millisecond
+		s.last = now
 		close(s.ch)
 		s.ch = make(chan struct{})
 	}
+}
+
+func (n *notifier) burst(space string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	s := n.spaces[space]
+	return s != nil && s.pause && time.Since(s.last) < 50*time.Millisecond
 }

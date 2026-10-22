@@ -2,6 +2,7 @@ package cli
 
 import (
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -117,5 +118,71 @@ func TestCLISharing(t *testing.T) {
 	}
 	if out, _ := cli(t, owner, "whoami", "--show-token"); !strings.HasPrefix(out, "vt_") {
 		t.Fatalf("whoami --show-token: %q", out)
+	}
+}
+
+func TestCLIMetadata(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.DataDir = t.TempDir()
+	cfg.Server.RateLimits = new(bool)
+	st, err := store.Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(server.New(cfg, st, nil))
+	defer ts.Close()
+	defer st.Close()
+	t.Setenv("CUBBY_SERVER", ts.URL)
+	t.Setenv("CUBBY_TOKEN", "")
+	home := t.TempDir()
+	out, code := cli(t, home, "limits")
+	if code != 0 || !strings.Contains(out, `"writes_per_minute": 120`) {
+		t.Fatalf("limits %d %s", code, out)
+	}
+	out, code = cli(t, home, "new")
+	if code != 0 {
+		t.Fatal("new failed")
+	}
+	space := strings.Split(out, "\n")[0]
+	path := space + "/shared/lease"
+	out, code = cli(t, home, "set", path, "holder", "--ttl", "30s", "--create")
+	if code != 0 {
+		t.Fatalf("set ttl %d %s", code, out)
+	}
+	e, err := st.Get(space, "s", "lease")
+	if err != nil || e.Expires-e.T != 30000 {
+		t.Fatalf("ttl not forwarded %+v %v", e, err)
+	}
+	for _, args := range [][]string{{"set", path, "late", "--if-before", "0"}, {"del", path, "--if-before", "0"}, {"add", space + "/shared/points", "1", "--if-before", "0"}} {
+		if _, code = cli(t, home, args...); code != 2 {
+			t.Fatalf("deadline %v -> %d", args, code)
+		}
+	}
+	out, code = cli(t, home, "limits", space)
+	if code != 0 || !strings.Contains(out, `"keys": 1`) || !strings.Contains(out, `"rateLimits": false`) {
+		t.Fatalf("space limits %d %s", code, out)
+	}
+	out, code = cli(t, home, "time")
+	if code != 0 || !strings.Contains(out, "offset_ms\t") || !strings.Contains(out, "rtt_ms\t") {
+		t.Fatalf("time %d %s", code, out)
+	}
+	if _, code = cli(t, home, "set", path, "x", "--ttl", "100ms"); code != 64 {
+		t.Fatalf("fractional ttl %d", code)
+	}
+}
+
+func TestCLIWriteDoesNotRetryRateLimit(t *testing.T) {
+	count := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count++
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(429)
+		w.Write([]byte(`{"error":"rate_limited","retryAfter":0}`))
+	}))
+	defer ts.Close()
+	c := &client{server: ts.URL, envToken: "vt_test", http: ts.Client()}
+	resp, _, err := c.do("PUT", "/v1/test/shared/x", []byte("x"), reqOpts{})
+	if err != nil || resp.StatusCode != 429 || count != 1 {
+		t.Fatalf("write retried count=%d err=%v", count, err)
 	}
 }

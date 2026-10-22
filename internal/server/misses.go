@@ -34,8 +34,12 @@ const (
 	maxSeenIPs    = 100_000
 )
 
-func newMissGuard() *missGuard {
-	g := &missGuard{budget: newLimiter(missesPerHour, time.Hour, missesPerHour), now: time.Now, seen: map[string]*seenSet{}}
+func newMissGuard(limits ...int) *missGuard {
+	budget := missesPerHour
+	if len(limits) > 0 {
+		budget = limits[0]
+	}
+	g := &missGuard{budget: newLimiter(float64(budget), time.Hour, float64(budget)), now: time.Now, seen: map[string]*seenSet{}}
 	g.budget.now = g.clock
 	return g
 }

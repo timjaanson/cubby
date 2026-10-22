@@ -15,12 +15,15 @@ type WriteReq struct {
 	IsJSON           bool
 	Writer           string
 	IfVersion        *int64
+	IfBefore         *int64
+	TTL              int64 // seconds, zero makes permanent
 }
 
 type writeResult struct {
-	Version int64
-	Created bool // a new key, for 201
-	Changed bool // false for an identical rewrite
+	Version    int64
+	Created    bool // a new key, for 201
+	Changed    bool // false for an identical rewrite
+	T, Expires int64
 }
 
 func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err error) {
@@ -47,6 +50,20 @@ func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err err
 
 	sp.wmu.Lock()
 	defer sp.wmu.Unlock()
+	removed, err := s.expireLocked(sp)
+	if err != nil {
+		return res, err
+	}
+	vTotal -= removed[r.Writer]
+	nowMS := NowMs()
+	now = nowMS / 1000
+	if err := CheckBefore(r.IfBefore, nowMS); err != nil {
+		return res, err
+	}
+	expires := int64(0)
+	if r.TTL > 0 {
+		expires = nowMS + r.TTL*1000
+	}
 	tx, err := sp.db.BeginTx(ctx, nil)
 	if err != nil {
 		return res, err
@@ -65,9 +82,11 @@ func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err err
 		size    int64
 		row     bool
 		series  bool
+		t       int64
+		expires int64
 	}
-	err = tx.QueryRow(`SELECT value, version, writer, size, series FROM kv WHERE area = ? AND key = ?`,
-		r.Area, r.Key).Scan(&old.value, &old.version, &old.writer, &old.size, &old.series)
+	err = tx.QueryRow(`SELECT value, version, writer, size, series, coalesce(t,0), expires FROM kv WHERE area = ? AND key = ?`,
+		r.Area, r.Key).Scan(&old.value, &old.version, &old.writer, &old.size, &old.series, &old.t, &old.expires)
 	if err == nil {
 		old.row = true
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -78,11 +97,11 @@ func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err err
 	if live {
 		cur = old.version
 	}
-	if del && !live {
-		return res, apierr.NotFound
-	}
 	if r.IfVersion != nil && *r.IfVersion != cur {
 		return res, &apierr.Error{Status: 412, Code: "version_conflict", Message: "The key changed since that version.", Extra: map[string]any{"currentVersion": cur}}
+	}
+	if del && !live {
+		return res, apierr.NotFound
 	}
 	if live && old.series && !del {
 		return res, apierr.IsSeries(r.Key)
@@ -99,7 +118,34 @@ func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err err
 		}
 	}
 	if live && !del && bytes.Equal(old.value, r.Value) {
-		return writeResult{Version: cur}, nil
+		if expires == old.expires {
+			return writeResult{Version: cur, T: old.t, Expires: expires}, nil
+		}
+		if _, err := tx.Exec(`UPDATE kv SET expires=? WHERE area=? AND key=?`, expires, r.Area, r.Key); err != nil {
+			return res, err
+		}
+		if r.TTL > 0 {
+			if err := setMeta(tx, "last_active_at", now); err != nil {
+				return res, err
+			}
+		}
+		next, err := nextExpiry(tx)
+		if err != nil {
+			return res, err
+		}
+		if err := tx.Commit(); err != nil {
+			return res, err
+		}
+		s.rememberExpiry(r.Space, next)
+		if r.TTL > 0 {
+			sp.metaActive = now
+			s.mu.Lock()
+			if st := s.stats[r.Space]; st != nil {
+				st.lastActive = now
+			}
+			s.mu.Unlock()
+		}
+		return writeResult{Version: cur, T: old.t, Expires: expires}, nil
 	}
 
 	newSize := int64(len(r.Key))
@@ -150,12 +196,12 @@ func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err err
 	if !del {
 		val = r.Value
 	}
-	if _, err := tx.Exec(`INSERT INTO kv (area, key, value, is_json, version, writer, size, updated_at, series, t, n)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0)
+	if _, err := tx.Exec(`INSERT INTO kv (area, key, value, is_json, version, writer, size, updated_at, series, t, n, expires, expired)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, 0)
 		ON CONFLICT (area, key) DO UPDATE SET value = excluded.value, is_json = excluded.is_json,
 		version = excluded.version, writer = excluded.writer, size = excluded.size, updated_at = excluded.updated_at,
-		series = 0, t = NULL, n = 0`,
-		r.Area, r.Key, val, r.IsJSON, version, writer, newSize, now); err != nil {
+		series = 0, t = excluded.t, n = 0, expires=excluded.expires, expired=0`,
+		r.Area, r.Key, val, r.IsJSON, version, writer, newSize, now, nowMS, expires); err != nil {
 		return res, err
 	}
 	for k, v := range map[string]any{"seq": version, "bytes": m.bytes + spaceDelta, "keys": m.keys + keysDelta, "last_active_at": now} {
@@ -175,9 +221,14 @@ func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err err
 			return res, err
 		}
 	}
+	next, err := nextExpiry(tx)
+	if err != nil {
+		return res, err
+	}
 	if err := tx.Commit(); err != nil {
 		return res, err
 	}
+	s.rememberExpiry(r.Space, next)
 	sp.metaActive = now
 
 	s.mu.Lock()
@@ -195,5 +246,5 @@ func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err err
 		s.adjustVisitor(r.Writer, newSize)
 		s.noteVisitorSpace(r.Writer, r.Space)
 	}
-	return writeResult{Version: version, Created: !live, Changed: true}, nil
+	return writeResult{Version: version, Created: !live, Changed: true, T: nowMS, Expires: expires}, nil
 }

@@ -1,128 +1,14 @@
 # Plans
 
-Agreed changes that aren't built yet, plus one open question. [spec.md](spec.md) §19 "Later" keeps the wider pool of parked ideas. When an item here is built, its contract moves into spec.md and it's removed from this file.
+The agreed HTTP additions are implemented: adaptive watch pause, queryable limits and usage, write-budget headers, configurable rates, 120 visitor writes/minute, 50 watches/IP, TTL keys, value timestamps, clock helpers, write deadlines and the Fieldnotes client fixes. Their contracts now live in [spec.md](spec.md). Reads remain 600/IP/minute, and continuing HTTP watches still consume the read budget.
 
-Most of these came from building Fieldnotes (2026-10-22), a live kanban board with autosave, drag and drop and several people editing at once, using only the public docs, kv.js and share.js. Cubby held up: no contract mismatch was found. The cost was in client code around rate limits, pending writes and collisions, and in not knowing the limits it was running under.
+No live transport was introduced. The section below preserves that open design question.
 
-Every item is an addition. Nothing changes the meaning of an existing route.
+## Deferred lease helpers
 
-Order: 1 and 2 first, they're small and remove guesswork. Then 3, 4 and 5. 6 and 7 can go along with any release.
+TTL plus `ifVersion` supports acquire, renew and release over raw HTTP, the CLI and kv.js. The [spec recipe](spec.md#expiring-keys-and-leases) covers this. A `cubby lock ... -- command` runner and a JS lease helper remain deferred. They need explicit behavior for renewal failures, process termination, cancellation and release. The underlying lease cannot fence an external resource.
 
-## 1. Adaptive watch pause
-
-Today a watch that a write wakes up always sleeps 50 ms before answering, so a burst of writes goes out in one response (`internal/server/handlers.go`). That pause is about half of what a watcher waits for a single change.
-
-- Answer at once when the change comes after a quiet period. Only pause when writes keep arriving, for example when another change came in within the last 50 ms.
-- Bursts still go out together. A single change, like a light switch or a "start" signal, arrives one pause sooner.
-- No API change. The spec's "Pause before answering a watch after a change" row becomes "up to 50 ms, only during bursts".
-
-## 2. Limits a client can ask for
-
-Fieldnotes budgeted its autosave against the documented defaults without knowing the server's real values or how much of its budget was left. An app should be able to ask, and slow down before it gets a 429.
-
-**Server-wide values.** `GET /v1/limits` returns the effective limits as JSON: value and point size, storage quotas, rates, watch limits, ttl bounds once those exist. No token needed. Same names as the config keys.
-
-**This space and this caller.** The access response (`GET /v1/{space}/access`) gains:
-
-```json
-"usage": {"bytes": 183204, "keys": 412, "visitorBytes": 20480},
-"limits": {"spaceBytes": 5242880, "spaceKeys": 10000, "visitorBytes": 1048576, "writesPerMinute": 120, "writeBurst": 30}
-```
-
-Pinned spaces and future per-space or per-grant limits show up here with their own values, so a page never has to know about them.
-
-**On every write.** Response headers with the caller's remaining write budget, following the IETF RateLimit header fields draft (`RateLimit-Policy`, `RateLimit`). Added to `Access-Control-Expose-Headers`, readable with `curl -i`.
-
-**Clients.**
-
-- kv.js: `db.limits()` (the access response's `limits` and `usage`), and the last seen remaining budget after each write.
-- kv.js: `KvError.retryAfter` as a top-level property. Today it's `err.details.retryAfter`, which Fieldnotes read wrong at first.
-- CLI: `cubby limits [space]`.
-
-## 3. Higher default limits for live use, and configurable rates
-
-60 writes a minute per visitor shapes everything in a live page. Autosave, moves, colour changes and (with item 4) presence heartbeats all spend the same budget. The rate limits are also fixed in code today. Only `rate_limits = false` turns them off.
-
-New defaults (agreed 2026-10-22):
-
-| Limit | Now | New | Why |
-|---|---|---|---|
-| Writes per visitor | 60/min, burst 30 | 120/min, burst 30 | Autosave about once a second with room for moves, edits and presence heartbeats |
-| Open watches per IP | 20 | 50 | A few people with a phone and a laptop and a few tabs each |
-
-Everything else stays: writes per IP (300/min), reads per IP (600/min), write bytes per IP, new visitors, new spaces, the miss limit and the storage quotas. Writes per IP now covers 2.5 visitors writing at full rate instead of 5, which is fine since people rarely do that at the same time.
-
-- Every rate becomes a `[limits]` config key, as storage limits already are.
-- Open question: whether a watch request that continues from a version should cost a read at all, or count against a separate, larger bucket. Charging every re-poll means busier spaces cost more reads per minute even when nothing else is read.
-- Later, building on this: owners raising a space's write rate up to a cap the operator sets (extends "Per-grant quotas" in spec §19).
-
-## 4. Keys that expire: `ttl`
-
-From spec §19 "Key options", now planned. A key that deletes itself after N seconds unless it's written again.
-
-```sh
-curl -X PUT "$S/users/$ME/here?ttl=30" -d 'board-1'
-cubby set users/$ME/here board-1 --ttl 30s
-db.me.set("here", "board-1", { ttl: 30 })   # and on users/, shared
-```
-
-- The server stores an expiry time with the key. From that moment reads, lists and watches treat the key as missing.
-- A sweep deletes expired keys and leaves the usual delete marker, so watchers get `"deleted": true`, marked `"expired": true`, within about a second. The sweep only visits spaces that have expiring keys.
-- Writing the same bytes again with a `ttl` pushes the expiry forward without a new version, so heartbeats don't wake watchers. This extends the existing rule that an identical `PUT` changes nothing.
-- Each write states its own lifetime. A write without `ttl` makes the key permanent, so a key never keeps a ttl someone else set.
-- List and watch entries carry `expires` (server ms). A single read gets a `KV-Expires` header. Because renewals don't wake watchers, `expires` in a watch entry is only accurate as of the key's last change. Pages shouldn't build countdowns on it.
-- An expired key's delete marker keeps the last writer as `by` and says `"expired": true`, so nobody mistakes it for someone deleting it.
-- Bounds: 5 seconds to 30 days, configurable. Not on series keys.
-
-What it's for:
-
-- **Presence.** Each visitor keeps `users/{id}/here` alive with a heartbeat every 15 to 20 s. Watching `users/*/here` is a live roster, and someone leaving (tab closed, phone asleep, signal lost) arrives as a delete. Today that needs timestamps, client-side filtering and timers, and leaving produces no event at all.
-- **Edit indicators.** `users/{id}/editing = note.42` with a short ttl lets others see who's typing where, so pages can avoid collisions instead of resolving them.
-- **Locks (leases) between several actors.** Pages, parallel scripts, several machines running the same job. Expiry is on the server's clock, so the actors' clocks don't matter.
-  - Take: `PUT shared/lock.backup?ifVersion=0&ttl=60` with the holder's own ID as the value. The first writer gets it, everyone else gets 412 and knows who holds it.
-  - Keep: write the same value with `ttl=60` and `ifVersion` set to the version it got. Same bytes, so no new version and no watcher wakes. A 412 means the lease was lost (it expired and someone else took it) and the holder must stop.
-  - Release: `DELETE ...?ifVersion=v`, so a holder can only release its own lease.
-  - A holder that dies or loses its connection releases it on its own when the ttl runs out. Waiting actors watch the key and try again when it's deleted.
-  - A holder that stalls longer than the ttl (a sleeping laptop) can come back thinking it still holds the lock. The failed renewal tells it otherwise. Work that must never overlap should check the renewal before each step.
-  - CLI helper, like `flock`: `cubby lock <space> <key> --ttl 60s -- ./backup.sh` takes the lease, renews it while the command runs, releases it after, and exits with code 2 if someone else holds it. kv.js could get the same as `db.shared.lock(key, { ttl })` returning a release function.
-- **Device online status.** A board refreshes `status` with ttl 180 every minute. When it stops, pages see it go offline.
-- **Short-lived content.** Typing indicators, doorbell-style signals, an announcement for tonight.
-
-Not a precise timer, and not for anything that must survive a missed heartbeat.
-
-## 5. Write time and a shared clock
-
-For pages where several people must act at the same moment or be timed fairly: a Kahoot-style quiz, a countdown, a reveal, synced playback, a reaction game. These need agreement on time more than a faster connection.
-
-**Write time on every key.** Every entry gets `t`, the server's clock in ms when the write arrived, on reads (`KV-Time`), lists and watches. Series already use `t` for the newest point, so the meaning is the same: the time of the current value. Lets a quiz score answers by when the server got them, and pages show "edited 2 minutes ago".
-
-**Server time.** `GET /v1/time` returns `{"t": 1791449600042}`, nothing else. Cheap, no token, works from `curl`.
-
-**kv.js clock.**
-
-```js
-await db.clock.sync()          // several /v1/time samples, keeps the one with the shortest round trip
-db.clock.now()                 // server time estimated from the local clock and the offset
-db.clock.at(t, fn)             // run fn at server time t
-```
-
-- Offset estimate: `serverT - (sent + received) / 2` from the fastest sample. Error is bounded by half the round trip and is usually 10 to 20 ms, about one frame.
-- Re-syncs when the page becomes visible or comes back online, since phones drift and sleep.
-- CLI: `cubby time` prints the offset and round trip, for scripts that schedule against the server clock.
-
-**How a quiz uses it.** The host writes `round = {"q": 3, "opensAt": T, "closesAt": T + 20000}` with T a few seconds ahead. Every phone shows the question at `opensAt` by `db.clock.at`, so watch latency hides inside the lead time. Players write `users/{id}/a.3`, the server's `t` gives each answer's time, and `t - opensAt` scores speed. A player far from the server loses roughly half their round trip, which is fine among friends.
-
-**Closing on time: `ifBefore=T`.** A write condition next to `ifVersion`: the write succeeds only if the server's clock is still before `T` (ms) when it arrives. Otherwise 412 `too_late`, with the server time in the body. Works on `PUT`, `DELETE` and series `POST`, and combines with `ifVersion`. A quiz sets it to `closesAt`, so late answers are refused by the server, not by each page.
-
-Not planned: hiding answers until a reveal (the `sealed` area in spec §19). `users/*/` stays readable by everyone in the space, so a quiz between friends trusts players not to peek.
-
-## 6. Client helper fixes from Fieldnotes
-
-- share.js: assigning `ownerToken` opens the recovery view, and setting `open` right after hid the key in Fieldnotes' integration. Make the two orderable, or document that `ownerToken` alone is enough.
-- share.js: "One person", "A group link" and "View only" create a link immediately, but read like a mode choice. Labels that say they create something, like "Create group link".
-- kv.js: abort a waiting watch on the window's `offline` event (spec §19, Smaller additions), so a watch-only page shows offline at once.
-
-## 7. Candidates, not agreed
+## Candidates, not agreed
 
 Written down so they aren't lost. Each needs a decision first.
 
@@ -218,4 +104,4 @@ Build it when an app needs one of these. Notes for then: a message rate per conn
 
 ### Still open
 
-- Whether the socket should also do clock sync (item 5), since it's already a warm connection with known round-trip times.
+- Whether the socket should also do clock sync (the HTTP clock helpers), since it's already a warm connection with known round-trip times.

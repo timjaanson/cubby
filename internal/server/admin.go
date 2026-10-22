@@ -96,6 +96,10 @@ func (s *Server) AdminHandler() http.Handler {
 			}
 			it := toItem(e)
 			line := map[string]any{"area": area, "key": e.Key, "value": it.Value, "version": e.Version, "writer": e.Writer}
+			line["t"] = e.T
+			if e.Expires > 0 {
+				line["expires"] = e.Expires
+			}
 			if e.Series {
 				line["series"], line["t"] = true, e.T
 			}

@@ -19,7 +19,9 @@ type Entry struct {
 	Writer  string // visitor who last wrote or deleted the key
 	Area    string
 	Series  bool
-	T       int64 // newest point's time, series only
+	T       int64 // current value time in ms (newest point time for series)
+	Expires int64
+	Expired bool
 }
 
 func (s *Store) Get(space, area, key string) (*Entry, error) {
@@ -31,10 +33,13 @@ func (s *Store) Get(space, area, key string) (*Entry, error) {
 		return nil, apierr.NoSpace
 	}
 	defer s.Release(sp)
+	if err := s.expire(sp); err != nil {
+		return nil, err
+	}
 	e := &Entry{Key: key}
 	var t sql.NullInt64
-	err = sp.db.QueryRow(`SELECT value, is_json, version, writer, series, t FROM kv WHERE area = ? AND key = ? AND value IS NOT NULL`,
-		area, key).Scan(&e.Value, &e.IsJSON, &e.Version, &e.Writer, &e.Series, &t)
+	err = sp.db.QueryRow(`SELECT value, is_json, version, writer, series, t, expires, expired FROM kv WHERE area = ? AND key = ? AND value IS NOT NULL`,
+		area, key).Scan(&e.Value, &e.IsJSON, &e.Version, &e.Writer, &e.Series, &t, &e.Expires, &e.Expired)
 	e.T = t.Int64
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -83,7 +88,7 @@ func scanEntries(rows *sql.Rows, allUsers bool) ([]Entry, error) {
 	for rows.Next() {
 		var e Entry
 		var t sql.NullInt64
-		if err := rows.Scan(&e.Area, &e.Key, &e.Value, &e.IsJSON, &e.Version, &e.Writer, &e.Series, &t); err != nil {
+		if err := rows.Scan(&e.Area, &e.Key, &e.Value, &e.IsJSON, &e.Version, &e.Writer, &e.Series, &t, &e.Expires, &e.Expired); err != nil {
 			return nil, err
 		}
 		e.T = t.Int64
@@ -105,6 +110,9 @@ func (s *Store) CurrentSeq(space string) (int64, error) {
 		return 0, apierr.NoSpace
 	}
 	defer s.Release(sp)
+	if err := s.expire(sp); err != nil {
+		return 0, err
+	}
 	m, err := readMeta(sp.db)
 	return m.seq, err
 }
@@ -119,6 +127,9 @@ func (s *Store) List(t Target, after string, limit int, desc bool) (items []Entr
 		return nil, "", 0, apierr.NoSpace
 	}
 	defer s.Release(sp)
+	if err := s.expire(sp); err != nil {
+		return nil, "", 0, err
+	}
 	s.touchSpace(sp)
 	m, err := readMeta(sp.db)
 	if err != nil {
@@ -139,7 +150,7 @@ func (s *Store) List(t Target, after string, limit int, desc bool) (items []Entr
 			args = append(args, after)
 		}
 	}
-	q := fmt.Sprintf(`SELECT area, key, value, is_json, version, writer, series, t FROM kv WHERE %s ORDER BY key %s, area %s LIMIT ?`, where, ord, ord)
+	q := fmt.Sprintf(`SELECT area, key, value, is_json, version, writer, series, t, expires, expired FROM kv WHERE %s ORDER BY key %s, area %s LIMIT ?`, where, ord, ord)
 	rows, err := sp.db.Query(q, append(args, limit+1)...)
 	if err != nil {
 		return nil, "", 0, err
@@ -173,6 +184,9 @@ func (s *Store) Changes(t Target, after int64, limit int) ([]Entry, int64, error
 		return nil, 0, apierr.NoSpace
 	}
 	defer s.Release(sp)
+	if err := s.expire(sp); err != nil {
+		return nil, 0, err
+	}
 	m, err := readMeta(sp.db)
 	if err != nil {
 		return nil, 0, err
@@ -186,7 +200,7 @@ func (s *Store) Changes(t Target, after int64, limit int) ([]Entry, int64, error
 	if after == 0 {
 		where += " AND value IS NOT NULL"
 	}
-	rows, err := sp.db.Query(`SELECT area, key, value, is_json, version, writer, series, t FROM kv WHERE `+where+` ORDER BY version LIMIT ?`, append(args, limit+1)...)
+	rows, err := sp.db.Query(`SELECT area, key, value, is_json, version, writer, series, t, expires, expired FROM kv WHERE `+where+` ORDER BY version LIMIT ?`, append(args, limit+1)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -213,7 +227,10 @@ func (s *Store) Export(space string, fn func(Entry) error, pfn func(Point) error
 		return apierr.NoSpace
 	}
 	defer s.Release(sp)
-	rows, err := sp.db.Query(`SELECT area, key, value, is_json, version, writer, series, t FROM kv WHERE value IS NOT NULL ORDER BY area, key`)
+	if err := s.expire(sp); err != nil {
+		return err
+	}
+	rows, err := sp.db.Query(`SELECT area, key, value, is_json, version, writer, series, t, expires, expired FROM kv WHERE value IS NOT NULL ORDER BY area, key`)
 	if err != nil {
 		return err
 	}
@@ -221,7 +238,7 @@ func (s *Store) Export(space string, fn func(Entry) error, pfn func(Point) error
 	for rows.Next() {
 		var e Entry
 		var t sql.NullInt64
-		if err := rows.Scan(&e.Area, &e.Key, &e.Value, &e.IsJSON, &e.Version, &e.Writer, &e.Series, &t); err != nil {
+		if err := rows.Scan(&e.Area, &e.Key, &e.Value, &e.IsJSON, &e.Version, &e.Writer, &e.Series, &t, &e.Expires, &e.Expired); err != nil {
 			return err
 		}
 		e.T = t.Int64

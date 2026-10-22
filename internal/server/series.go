@@ -30,6 +30,11 @@ const maxBatchMembers = 100
 // seriesAdd handles POST {key}/series and POST {prefix}*/series.
 func (s *Server) seriesAdd(c *reqCtx, t store.Target) error {
 	id := c.visitor // route checked access
+	s.writeBudget(c)
+	before, err := parseIfBefore(c.r)
+	if err != nil {
+		return err
+	}
 	var at int64
 	if q := c.r.URL.Query(); q.Has("t") {
 		n, ok := parseUint(q.Get("t"))
@@ -76,7 +81,7 @@ func (s *Server) seriesAdd(c *reqCtx, t store.Target) error {
 		return &apierr.Error{Status: 400, Code: "json_too_deep", Message: "JSON may be nested at most 64 levels."}
 	}
 
-	req := store.PointsReq{Space: t.Space, Area: t.Area, T: at, Writer: id}
+	req := store.PointsReq{IfBefore: before, Space: t.Space, Area: t.Area, T: at, Writer: id}
 	if t.Pattern {
 		if req.Points, err = parseBatch(body, isJSON, t.Key, maxPoint, tooLarge); err != nil {
 			return err

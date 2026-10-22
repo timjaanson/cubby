@@ -102,7 +102,7 @@ func TestSeriesBasics(t *testing.T) {
 		t.Fatalf("page 2: %s", b)
 	}
 
-	// List and watch carry t for series keys only.
+	// List and watch carry t for both plain and series keys.
 	c.req("PUT", S+"/plain", "1", auth...)
 	_, _, b = c.req("GET", S+"/*", "")
 	if !strings.Contains(b, `"key":"temp","value":{"c":21.6,"ok":true}`) || !strings.Contains(b, `"t":`+h.Get("KV-Time")) {
@@ -110,7 +110,7 @@ func TestSeriesBasics(t *testing.T) {
 	}
 	items := decode[struct{ Items []map[string]any }](t, b).Items
 	for _, it := range items {
-		if _, has := it["t"]; has != (it["key"] == "temp") {
+		if _, has := it["t"]; !has {
 			t.Fatalf("t on the wrong items: %s", b)
 		}
 	}

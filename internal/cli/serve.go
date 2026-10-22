@@ -77,6 +77,23 @@ func cmdServe(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	expiryDone := make(chan struct{})
+	go func() {
+		defer close(expiryDone)
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := store.SweepExpired(ctx); err != nil && ctx.Err() == nil {
+					log.Printf("expiry: %v", err)
+				}
+			}
+		}
+	}()
+	defer func() { stop(); <-expiryDone }()
 
 	go func() {
 		t := time.NewTicker(time.Hour)

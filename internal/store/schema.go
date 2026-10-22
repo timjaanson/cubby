@@ -35,7 +35,9 @@ CREATE TABLE IF NOT EXISTS kv (
   size       INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   series     INTEGER NOT NULL DEFAULT 0, -- 1 for a series key
-  t          INTEGER,                    -- newest point's time in ms, series only
+  t          INTEGER,                    -- value time in ms; newest point time for series
+  expires    INTEGER NOT NULL DEFAULT 0,
+  expired    INTEGER NOT NULL DEFAULT 0,
   n          INTEGER NOT NULL DEFAULT 0, -- number of points, series only
   PRIMARY KEY (area, key)
 ) WITHOUT ROWID;

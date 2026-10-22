@@ -605,7 +605,7 @@ In list and watch responses, JSON values appear as themselves and text values as
 - A new space's counter starts at the current Unix time in milliseconds. Clients must treat versions as opaque increasing numbers. They stay below 2^53, so they're exact in JavaScript.
 - A new space has no keys but already has a counter. Lists and watches on it return the counter as `version`, so a client watching an empty space picks up the first write with no special case.
 - The server must never start a counter below a version it has already handed out for that name, even if the clock goes backwards.
-- A `PUT` with the same bytes as the current value doesn't create a new version and doesn't notify watchers.
+- A `PUT` with the same bytes as the current value keeps its version, writer and value timestamp, and does not notify watchers. It still applies the supplied TTL, or clears expiry when TTL is omitted.
 
 ## 9. Endpoints
 
@@ -662,7 +662,7 @@ Pizza or tacos?
 
 - `KV-By` is the visitor who last wrote the key.
 - 404 `not_found` if the key doesn't exist. 404 `no_space` if the space doesn't exist or the request can't read it.
-- For a series key, the value is its newest point, and the response also has `KV-Time: 1791449600042`, that point's time in milliseconds. Plain keys don't have this header. Versions are opaque, so they can't tell a page when a reading was taken.
+- Every key has `KV-Time`, its value time in server milliseconds. For a series it remains the newest point's time, including a caller-supplied point time. Plain keys use the server time when the write is processed under the space write mutex. Versions remain opaque counters. Expiring keys also have `KV-Expires`, their expiry in server milliseconds.
 - `HEAD` works the same without a body.
 - `If-None-Match: "1791449600041"` returns 304 if unchanged.
 
@@ -693,6 +693,64 @@ PUT /v1/poll/{area}/question?ifVersion=0
 
 - `If-Match: "N"` is accepted as an equivalent. The query parameter wins if both are given.
 
+### Expiring keys and leases
+
+`PUT {key}?ttl=N` gives a plain key a lifetime of N whole seconds. The default bounds are 5 seconds to 30 days, configured by `ttl_min_seconds` and `ttl_max_seconds`. TTL is accepted on PUT only, in every area. Series keys cannot have TTL.
+
+- Every PUT states its lifetime. Omitting `ttl` clears any previous expiry, including on an identical-value write. Zero, fractions and out-of-range values return 400 `invalid_parameter`.
+- Expiry uses the server clock. Reads and writes check for due expiry before using the key. An expired key is absent for GET, list, initial watch, series reads and `ifVersion=0` acquisition.
+- Expiry makes a normal versioned tombstone. Incremental watchers get `deleted: true`, `expired: true`, `by` naming the last writer, and `t` giving the expiry processing time. Explicit deletion has no `expired` flag. Recreating a key clears that flag.
+- A once-per-second sweep visits only spaces with due expiries and wakes waiting watchers. Delivery is normally within about a second after expiry, subject to server load. Expiry is not a precise timer.
+- Lists and watches include `expires` on expiring live entries. GET and PUT responses include `KV-Expires`. Identical-value renewals keep version, `by` and `t`; they update expiry silently. A cached watch entry's `expires` can therefore be stale. Fetch the key for current expiry; do not drive a countdown from a watch's cached expiry.
+- Expiry removes the value's bytes from the writer's usage and leaves only the key-sized tombstone in the space quota. TTL renewals spend the usual write budget and keep the space active.
+
+Presence uses `users/{id}/here` with `ttl=30`, renewed every 15 to 20 seconds. Watch `users/*/here` to see arrivals and expiry deletions. `me/` is private and is unsuitable for a shared roster.
+
+A lease works through ordinary conditional requests. Choose a unique holder value for each actor:
+
+```sh
+# Take. 201 means acquired; 412 means an existing live key holds it.
+cubby set "$SPACE/shared/lock.backup" "$HOLDER" --create --ttl 60s
+# Save the printed version as VERSION. Renew with the same value and version.
+cubby set "$SPACE/shared/lock.backup" "$HOLDER" --if-version "$VERSION" --ttl 60s
+# Release only that version.
+cubby del "$SPACE/shared/lock.backup" --if-version "$VERSION"
+```
+
+Expiry and conditional writes serialize under the same space mutex. An expired lease cannot be revived using its old version, even before the background sweep runs. Reacquisition receives a newer version, so a stale holder cannot renew or delete the replacement. A 412 during renewal means the actor must stop. A sleeping process can continue work after losing its lease until it checks again. This is a cooperative lease, without fencing of external systems. Automatic command runners and JS lock helpers are deferred.
+
+### Write deadlines
+
+`ifBefore=T` is accepted on PUT, DELETE and series POST, including batch series POST. T is a server timestamp in milliseconds. The server checks it under the space write mutex before starting the write transaction. At or after T, it returns `412 {"error":"too_late","message":"...","t":SERVER_TIME}` and performs no requested write. An expiry that was already due may still be processed.
+
+Combine it with `ifVersion` on PUT or DELETE. Series still do not accept `ifVersion`. A quiz can set `ifBefore` to the round's closing time to refuse late answers. Conditions also apply to identical-value PUTs. Clients do not automatically resend a write after a network failure, 5xx or 429; the app or script decides. The existing one-time recovery from a rejected invalid visitor token and explicit `update` conflict handling remain supported.
+
+### Limits and server time
+
+`GET /v1/limits` needs no token and returns effective server defaults as JSON. Names match `[limits]` config keys; all values are numbers in bytes, counts or the unit in the key name. The extra `rate_limits` boolean reports whether request-rate limiting is enabled. Configured watch concurrency caps still apply when rate limiting is off.
+
+`GET /v1/{space}/access` adds the effective limits for this space and the caller's usage:
+
+```json
+{
+  "limits": {"valueBytes":65536,"pointBytes":1024,"seriesPoints":50000,"spaceBytes":5242880,"spaceKeys":10000,"visitorBytes":1048576,"writesPerMinute":120,"writeBurst":30,"rateLimits":true,"ttlMinSeconds":5,"ttlMaxSeconds":2592000},
+  "usage": {"bytes":183204,"keys":412,"visitorBytes":20480}
+}
+```
+
+Existing access fields remain. Pinned overrides appear here. `usage.visitorBytes` is the caller's stored bytes across all spaces, zero for a caller without a visitor token. Space totals include tombstones and series points as described under storage accounting. These are snapshots, not reserved capacity. Inaccessible spaces return the existing `no_space` response without usage. `/access`, `/limits` and `/time` consume the read budget; continuing long-poll requests still do too.
+
+Data-write responses, including refusals after authorization, expose `RateLimit-Policy` and `RateLimit` headers using the [IETF draft 11 syntax](https://www.ietf.org/archive/id/draft-ietf-httpapi-ratelimit-headers-11.html):
+
+```text
+RateLimit-Policy: "visitor";q=30;w=15, "ip";q=300;w=60, "bytes";q=10485760;w=86400;qu="content-bytes"
+RateLimit: "visitor";r=29, "ip";r=299, "bytes";r=10485750
+```
+
+Each member describes a continuously refilling token bucket. `q` is capacity, `w` is its full-refill duration rounded up to seconds, `r` is the remaining whole tokens. The optional effective-window `t` is omitted because a continuously refilling bucket has no fixed reset. Visitor and IP buckets count requests; the bytes bucket declares `qu="content-bytes"` and counts the key plus raw write body. Use Retry-After on a refusal. Check every bucket, since any can refuse the next request. Values are advisory snapshots and never reserve the next write. With `rate_limits=false` these headers are omitted. CORS exposes them to pages, along with `KV-Time` and `KV-Expires`.
+
+`GET /v1/time` returns only `{"t":SERVER_MILLISECONDS}`, needs no token, and supports HEAD like `/limits`. Both return `Cache-Control: no-store`.
+
 ### Delete
 
 ```
@@ -704,7 +762,7 @@ DELETE /v1/poll/{area}/question?ifVersion=1791449600042
 200 {"version": 1791449600043}
 ```
 
-- 404 `not_found` if the key doesn't exist. `ifVersion` works as for `PUT`.
+- 404 `not_found` if the key does not exist. A supplied nonzero `ifVersion` on an absent or expired key returns 412 `version_conflict`, with currentVersion 0. `ifVersion` and `ifBefore` work as for PUT.
 - Deleting a series key deletes all its points too. Afterwards the name is free for either kind.
 - The response has `ETag` with the version of the delete, as for writes.
 - Watchers see a delete as a change with `"deleted": true`.
@@ -806,7 +864,7 @@ A watch asks: "what changed in this key or pattern after version N?" The server 
 ### Timing
 
 - `timeout` is 1 to 55 seconds, default 25, below the common 60-second proxy idle timeout.
-- After the first matching change, the server waits 50 ms more so a burst of writes goes out together.
+- A matching change after quiet is answered immediately. During a burst the server waits up to 50 ms once to combine changes; further writes do not extend that pause.
 
 ### Why nothing is lost
 
@@ -967,12 +1025,12 @@ A token with `uses: null` in a public page could otherwise make a grant per visi
 
 ### Rates
 
-Token buckets. A 429 includes `Retry-After` in seconds and `retryAfter` in the body.
+Every rate in this table is configurable under `[limits]`, including `write_burst`. Watch caps use `watches_per_ip` and `watches_total`. Rate and TTL bounds must be positive; TTL maximum must be at least the minimum and at most 10 years. Other bursts equal their rate-period quota. Token buckets. A 429 includes `Retry-After` in seconds and `retryAfter` in the body.
 
 | Limit | Default | Error |
 |---|---|---|
 | New visitors per IP, through `/v1/anon`, `/v1/spaces` or `join` | 30 per hour, burst 30 | 429 `rate_limited` |
-| Writes per visitor | 60 per minute, burst 30 | 429 `rate_limited` |
+| Writes per visitor | 120 per minute, burst 30 | 429 `rate_limited` |
 | Writes per IP | 300 per minute | 429 `rate_limited` |
 | Write bytes per IP | 10 MB per day | 429 `rate_limited` |
 | Reads per IP | 600 per minute | 429 `rate_limited` |
@@ -1038,7 +1096,7 @@ Not configurable, listed so they're in one place:
 | "Last seen" and "last active" granularity | 1 hour |
 | Write-ahead log size kept per space | 4 MB |
 | Watch timeout | 25 s default, 1 to 55 s allowed |
-| Pause before answering a watch after a change | 50 ms |
+| Pause before answering a watch after a change | up to 50 ms during bursts; no pause after quiet |
 | Changes per watch response | 1000 |
 | Open space files kept without watchers | 64, least recently used closed first |
 
@@ -1050,8 +1108,8 @@ TOML, passed with `--config`. Everything is optional.
 [server]
 listen = ":28229"
 data_dir = "./data"
-public_url = "https://kv.example.com"   # used by kv.js to find the API
 trusted_proxies = ["127.0.0.1/32"]      # whose X-Forwarded-For to believe
+rate_limits = true
 
 [retention]
 visitor_idle_ttl = "365d"
@@ -1067,6 +1125,20 @@ max_visitor_bytes = "1MB"
 max_space_bytes = "5MB"
 max_space_keys = 10000
 max_total_bytes = "1GB"
+max_spaces = 1000
+writes_per_minute = 120
+write_burst = 30
+writes_per_ip_per_minute = 300
+reads_per_ip_per_minute = 600
+write_bytes_per_ip_per_day = 10485760
+visitors_per_ip_per_hour = 30
+spaces_per_visitor_per_day = 5
+spaces_per_ip_per_day = 20
+misses_per_ip_per_hour = 30
+watches_per_ip = 50
+watches_total = 1000
+ttl_min_seconds = 5
+ttl_max_seconds = 2592000
 
 [spaces.poll-cedar-pilot-mango-frost]                  # pinned
 max_bytes = "100MB"
@@ -1092,7 +1164,7 @@ Through `cubby admin`, see [Admin](#admin) in the CLI section. There is no admin
 | 400 | `empty_value` | empty `PUT` or `POST` body | |
 | 400 | `json_too_deep` | JSON nested over 64 levels | |
 | 400 | `batch_needs_object` | a batch body that isn't a JSON object with 1 to 100 members | |
-| 400 | `invalid_parameter` | bad `limit`, `order`, `after`, `since`, `t`, `timeout`, `version`, `ifVersion`, `label`, `name`, `uses`, `until`, `grantFor`, or a malformed JSON body | `parameter` |
+| 400 | `invalid_parameter` | bad `limit`, `order`, `after`, `since`, `t`, `timeout`, `version`, `ifVersion`, `ttl`, `ifBefore`, `label`, `name`, `uses`, `until`, `grantFor`, or a malformed JSON body | `parameter` |
 | 400 | `invalid_settings` | unknown setting or value, `public` together with `read` or `write`, or `read: granted` with any area writable by anyone | |
 | 400 | `invalid_scope` | malformed scope or unknown preset, or more than 20 scopes | `scope` |
 | 401 | `missing_token` | visitor token needed but missing | |
@@ -1108,6 +1180,7 @@ Through `cubby admin`, see [Admin](#admin) in the CLI section. There is no admin
 | 409 | `is_series` | `PUT` on a series key | |
 | 409 | `not_series` | `/series` on a plain key | `key` in a batch |
 | 410 | `version_expired` | watch version too old or from elsewhere | |
+| 412 | `too_late` | `ifBefore` deadline reached | `t` |
 | 412 | `version_conflict` | `ifVersion` didn't match | `currentVersion` |
 | 413 | `value_too_large` | value or point over the limit | `limit`, and `key` in a batch |
 | 429 | `rate_limited` | a rate limit | `retryAfter` |
@@ -1138,7 +1211,7 @@ On every `/v1` response:
 
 ```
 Access-Control-Allow-Origin: *
-Access-Control-Expose-Headers: ETag, Retry-After, KV-Time, KV-By
+Access-Control-Expose-Headers: ETag, Retry-After, KV-Time, KV-By, KV-Expires, RateLimit, RateLimit-Policy
 ```
 
 On preflight:
@@ -1282,6 +1355,25 @@ type Invite = { link: string, token: string, id: string, allow: string[], uses: 
 - `db.join` sends the stored visitor token if there is one, as the server requires. Use it directly only for tokens that don't come from the URL, such as one typed into a form.
 - `access().can()` applies the [access rule](#the-access-rule) to the answer locally, for showing and hiding controls.
 
+### Client limits and clock
+
+```js
+const { limits, usage } = await db.limits() // same fields as db.access()
+const budget = db.writeBudget             // null until a data-write response with headers
+// budget.visitor, budget.ip, budget.bytes each have { remaining }.
+// budget.observedAt is local Date.now() when that response arrived.
+
+const { offset, rtt } = await db.clock.sync() // milliseconds, 5 samples by default
+const now = db.clock.now()                   // estimated server ms, throws before sync
+const cancel = db.clock.at(Math.ceil(now) + 2000, () => reveal())
+cancel()                                    // optional cancellation
+// db.clock.dispose() removes listeners and cancels scheduled callbacks.
+```
+
+`sync({samples: N})` accepts 1 to 20 samples and keeps the successful sample with the shortest round trip. It estimates `offset = serverT - (sent + received)/2`. Request and response delay may differ, so half the RTT is an uncertainty estimate, not an accuracy guarantee. The clock uses elapsed monotonic time after sync and re-syncs when the page becomes visible or comes online. Re-sync adjusts pending timers. Browser throttling can still delay callbacks. Neither a clock sync nor a timer writes stored data or creates a visitor.
+
+Use `opensAt` a little in the future to start a round together, and `ifBefore: closesAt` to enforce its deadline. Plain-key `t` is server processing time; series `t` remains point time and may be supplied by the caller. A quiz should use plain answer keys when server timestamps matter.
+
 ### Owner calls
 
 Every method needs the visitor to be an owner and throws `owner_only` otherwise.
@@ -1319,16 +1411,16 @@ db.id(): Promise<string>        // your visitor ID, gets a token if needed
 ```ts
 get(key): Promise<any | null>
 getEntry(key): Promise<Entry | null>                                // without key and user
-set(key, value, opts?: { ifVersion?: number }): Promise<number>
-add(target, value, opts?: { t?: number }): Promise<{ version, t, keys? }>
+set(key, value, opts?: { ifVersion?: number, ttl?: number, ifBefore?: number }): Promise<number>
+add(target, value, opts?: { t?: number, ifBefore?: number }): Promise<{ version, t, keys? }>
 series(key, opts?: { since?: number, limit?: number }): Promise<{ key, points: Point[], version, next } | null>
-delete(key, opts?: { ifVersion?: number }): Promise<boolean>
-update(key, fn: (current: any | null) => any, opts?: { retries?: number }): Promise<any>
+delete(key, opts?: { ifVersion?: number, ifBefore?: number }): Promise<boolean>
+update(key, fn: (current: any | null) => any, opts?: { retries?: number, ttl?: number, ifBefore?: number }): Promise<any>
 list(target, opts?: { limit?: number, order?: "asc" | "desc" }): Promise<List>
 watch(target, onChange: (change: Change) => void, opts?: WatchOptions): () => void
 
-type Entry  = { key, value, version, by, mine: boolean, user?, t? }
-type Change = Entry & { deleted: boolean }
+type Entry  = { key, value, version, by, mine: boolean, user?, t?, expires? }
+type Change = Entry & { deleted: boolean, expired?: boolean }
 type List   = { items: Entry[], version: number }
 type Point  = { t, value }
 type WatchOptions = {
@@ -1348,7 +1440,7 @@ type WatchOptions = {
 - **`delete`** returns `false` for a missing key.
 - **`add`** with a key, like `add("temp", 21.4)`, adds one point and sends `JSON.stringify(value)`, so an object is one point. With a pattern, like `add("env.*", { temp: 21.4, rh: 45 })`, `value` must be a plain object and each property becomes a point in its own series. The target decides, never the shape of the value.
 - **`series`** makes one request and returns the response as is, or `null` if the key doesn't exist. To read further, pass `next` back as `since`.
-- **`getEntry`** on a series key also returns `t`, from `KV-Time`.
+- **`getEntry`** returns `t` from `KV-Time` for every key, and `expires` from `KV-Expires` when present. `set` takes TTL in whole seconds. Use `set` to renew a heartbeat; `update` still skips writing an identical computed value.
 - **`update`** reads, calls `fn`, and writes with `ifVersion`. On 412 it retries after 50 to 200 ms, up to `retries` (default 10), then throws `version_conflict`. If `fn` returns `undefined`, or a value whose `JSON.stringify` equals the current one, nothing is written. `fn` may run more than once, so it must not have side effects.
 - **`list`** follows `next` until `limit` or the end. The returned `version` is from the first page.
 - **`by` and `mine`.** Every entry and change has `by`, the visitor who last wrote or deleted it, and `mine`, true when that's this visitor. A watch delivers your own writes too; `mine` tells them apart.
@@ -1357,6 +1449,7 @@ type WatchOptions = {
   - `onChange` gets one call per changed key. `onSync` follows once all changes from one answer have been delivered. At that point the page's state matches the server as of `version`, so it's the place to render. It also fires after each empty answer, so a working watch syncs at least every 25 seconds. `initial` is true on the first one: with `from: 0`, every existing key has arrived. After `onError`, the next `onSync` means the watch works again.
   - On 410 (version too old or from elsewhere, for example after a week asleep) a watch with state starts again from `0` and reports keys it knew about that are missing from the new snapshot as deleted. It knows the keys it has delivered, plus the items of a `list()` it started from. Starting from a bare number it knows none at first, so the app should reload its state when `resync` is true. A `"now"` watch skips ahead to the present instead of replaying everything. In both cases the next `onSync` has `resync: true`.
   - Errors with `retryable` true (network, 5xx, 429) go to `onError`, then the watch tries again after 1, 2, 4 ... up to 30 seconds, or after `retryAfter` for a 429. Any other error goes to `onError` once and ends the watch.
+  - The browser offline event aborts a pending watch, reports a retryable network error and pauses requests until online.
   - A request that gets no answer in 35 seconds counts as a network error. The server answers within 25.
   - When the page becomes visible, comes back online or is restored from the back/forward cache, the watch drops its current request or wait and asks again at once. A phone that slept may have a dead connection that never fails on its own.
   - After the tab has been hidden for 5 minutes it pauses, and resumes from its last version when visible.
@@ -1368,6 +1461,7 @@ type WatchOptions = {
 class KvError extends Error {
   status: number      // HTTP status, 0 for network or local checks
   code: string        // the `error` code, "network_error", or a local one like "not_yours"
+  retryAfter?: number // seconds, also retained in details.retryAfter
   details: object     // the rest of the error body
   retryable: boolean  // network error, 5xx or 429: worth trying again later
 }
@@ -1474,6 +1568,8 @@ The server URL defaults to `http://localhost:28229`. A bare port (`9000` or `:90
 | `update <path>` | read, change, write back with `ifVersion`, retry on conflict | the new version |
 | `add <path> [value]` | add a point to a series, from the argument or stdin | the point's time |
 | `add <pattern> name=value ...` | add one point to each of several series, see [Series from the CLI](#series-from-the-cli) | the points' time |
+| `limits [space]` | effective server limits, or space limits and caller usage | formatted JSON |
+| `time` | sample server time five times; choose shortest RTT | `offset_ms` and `rtt_ms`, tab-separated |
 | `series <path>` | read a series' points | one line per point, see Output |
 | `new [label or name] [--public P]` | create a space with `POST /v1/spaces`, as its owner. Private unless `--public read\|respond\|all`. A full space name is created as is, anything else is a label | the name, then the owner token on a second line. Keep it, it's shown once |
 | `name [label]` | generate a valid space name locally, no request | the name |
@@ -1526,6 +1622,8 @@ Flags:
 | Flag | Commands | Meaning |
 |---|---|---|
 | `--if-version N` | `set`, `del` | conditional write, `ifVersion=N` |
+| `--ttl D` | `set` | lifetime such as 30s, 1h or 7d, whole seconds only; omission clears expiry |
+| `--if-before MS` | `set`, `del`, `add` | server deadline in milliseconds |
 | `--create` | `set` | only if the key doesn't exist, `ifVersion=0` |
 | `-f`, `--force` | `del` | a missing key isn't an error |
 | `--json` | `get`, `ls`, `watch` | print full JSON instead of the plain format |
@@ -1575,7 +1673,7 @@ user<TAB>key<TAB>value        under users/*/
 
 - the value on stdin, raw, or empty for a delete
 - `KV_KEY`, `KV_VERSION`, `KV_DELETED` (`0` or `1`) and, under `users/*/`, `KV_USER` in the environment
-- `KV_TIME`, the point's time, when the key is a series
+- `KV_TIME`, the value time for every key, or the newest point time for a series
 
 If the command fails, the CLI prints a warning and carries on. With `--state`, the version is saved only after every command for that response has run, so a crash means repeating changes, never skipping them.
 
@@ -1593,7 +1691,7 @@ Without `--exec`, `update` opens the value in `$EDITOR`, and on a conflict reope
 |---|---|
 | 0 | success |
 | 1 | not found: `not_found`, `no_space` |
-| 2 | version conflict |
+| 2 | version conflict or passed write deadline |
 | 3 | not allowed: `no_access`, `owner_only`, `not_yours`, `invite_invalid`, token problems that a new token didn't fix |
 | 4 | a limit: rate limit or quota |
 | 5 | invalid input: a 400 from the server, a bad path, or the wrong kind of key (`is_series`, `not_series`) |
@@ -1669,12 +1767,16 @@ CREATE TABLE kv (
   writer  TEXT NOT NULL,              -- visitor ID of the last writer
   size    INTEGER NOT NULL,
   series  INTEGER NOT NULL DEFAULT 0, -- 1 for a series key
-  t       INTEGER,                    -- newest point's time, series only
+  updated_at INTEGER NOT NULL,         -- seconds, for retention
+  t       INTEGER,                    -- value time in ms; newest point time for series
+  expires INTEGER NOT NULL DEFAULT 0, -- server ms, zero is permanent
+  expired INTEGER NOT NULL DEFAULT 0, -- tombstone came from expiry
   n       INTEGER NOT NULL DEFAULT 0, -- number of points, so trimming needs no count
   PRIMARY KEY (area, key)
 ) WITHOUT ROWID;
 
 CREATE INDEX kv_by_version ON kv (area, version);
+CREATE INDEX kv_expiry ON kv (expires) WHERE expires > 0 AND value IS NOT NULL;
 CREATE INDEX kv_users ON kv (key, area) WHERE area >= 'u:' AND area < 'u;';
 
 CREATE TABLE usage (writer TEXT PRIMARY KEY, bytes INTEGER NOT NULL);
@@ -1692,7 +1794,7 @@ CREATE TABLE points (
 - A write is one transaction: check `ifVersion`, raise `seq`, upsert, adjust `usage` for the old and new writer.
 - Adding a point is one transaction too: insert into `points`, delete the oldest points beyond `max_series_points`, and if the point is the newest, raise `seq` and upsert the `kv` row with the point as value, `t` and `n`. Then check quotas on the net growth. A batch does this for every member in one transaction.
 - Point sizes go into the space's `bytes` in `meta`, next to the `kv` rows. `usage` holds the series key as a plain key of its newest value, so points never count towards a visitor.
-- Space files from before series get the new columns and table when they're opened.
+- Existing v0.10 space files receive the expiry columns and index transactionally at startup, with PRAGMA user_version recording the migration. Old plain-key timestamps are backfilled from updated_at in whole seconds converted to ms; their original millisecond write time is unavailable. Values, versions and access grants are preserved. New writes record milliseconds.
 - Reading points is `WHERE area = ? AND key = ? AND t > ? ORDER BY t LIMIT ?` with `since`, or `ORDER BY t DESC LIMIT ?` reversed without it. Both use the primary key.
 - Deleting a series key deletes its `points` rows in the same transaction.
 - Visitor totals across spaces are the sum of their `usage` rows. See [In-memory state](#in-memory-state).
@@ -1774,7 +1876,7 @@ Everything held in memory has a bound, and nothing in it has to survive a restar
 |---|---|---|---|
 | Open space files | 64 without watchers, plus every space with a waiting watch (at most 1000) | least recently used first | files reopen on demand |
 | Notifier per space | one per space with waiting watches | when the last watch on that space ends | watches reconnect and continue from their version |
-| Waiting watches | 20 per IP, 1000 total | on answer, timeout or disconnect | clients reconnect |
+| Waiting watches | 50 per IP, 1000 total | on answer, timeout or disconnect | clients reconnect |
 | Rate-limit buckets, per IP and per visitor | 100,000 entries | by the hourly job once full and untouched for an hour, or least recently used when the cap is reached | everyone starts with a full bucket again |
 | Settings and parsed grants per space | one per open space file | with the space file, or when its access changes | reloaded from the space file |
 | Storage used per visitor | 100,000 entries | least recently used | recounted from that visitor's `usage` rows on their next write |
@@ -1795,7 +1897,6 @@ Ideas from the design discussion that were left out to keep the first version sm
 
 ### Key options
 
-- **`ttl`**: a key that deletes itself after N seconds, for presence and typing indicators without client-side filtering. Planned, see [plans.md](plans.md#4-keys-that-expire-ttl).
 - **`lock=owner`** on shared keys: only the creator of a key may change it. Mostly covered by `users/`.
 - **An `add` right** in scopes, for create-only writes. Considered with grants and not needed: `users/{id}/` already gives "add your own, nobody else can touch it", and owners can delete anything. The one real gap is "anyone adds, only the owner reads", which is the `inbox` area below.
 

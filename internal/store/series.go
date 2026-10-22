@@ -24,6 +24,7 @@ type PointsReq struct {
 	Points      []PointIn // one per key, in request order
 	T           int64     // 0: the server's clock
 	Writer      string
+	IfBefore    *int64
 }
 
 type pointsResult struct {
@@ -53,6 +54,14 @@ func (s *Store) AddPoints(ctx context.Context, r PointsReq) (res pointsResult, e
 
 	sp.wmu.Lock()
 	defer sp.wmu.Unlock()
+	removed, err := s.expireLocked(sp)
+	if err != nil {
+		return res, err
+	}
+	vTotal -= removed[r.Writer]
+	if err := CheckBefore(r.IfBefore, NowMs()); err != nil {
+		return res, err
+	}
 	tx, err := sp.db.BeginTx(ctx, nil)
 	if err != nil {
 		return res, err
@@ -189,7 +198,7 @@ func (s *Store) AddPoints(ctx context.Context, r PointsReq) (res pointsResult, e
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
 			ON CONFLICT (area, key) DO UPDATE SET value = excluded.value, is_json = excluded.is_json,
 			version = excluded.version, writer = excluded.writer, size = excluded.size, updated_at = excluded.updated_at,
-			series = 1, t = excluded.t, n = excluded.n`,
+			series = 1, t = excluded.t, n = excluded.n, expires=0, expired=0`,
 			r.Area, p.Key, p.Value, p.IsJSON, seq, r.Writer, newSize, now, t, n); err != nil {
 			return res, err
 		}
@@ -258,6 +267,9 @@ func (s *Store) ReadPoints(space, area, key string, since *int64, limit int) (po
 		return nil, nil, 0, apierr.NoSpace
 	}
 	defer s.Release(sp)
+	if err := s.expire(sp); err != nil {
+		return nil, nil, 0, err
+	}
 	var series bool
 	err = sp.db.QueryRow(`SELECT series FROM kv WHERE area = ? AND key = ? AND value IS NOT NULL`, area, key).Scan(&series)
 	if errors.Is(err, sql.ErrNoRows) {

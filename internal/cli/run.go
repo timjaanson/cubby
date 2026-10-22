@@ -25,6 +25,8 @@ Client (talks to --server or $CUBBY_SERVER, default http://localhost:28229; a ba
   cubby update <path>             read, change with --exec or $EDITOR, write back safely
   cubby add <path> [value]        add a point to a series ('space/shared/env.*' a=1 b=2 for several)
   cubby series <path>             print a series' points, oldest first
+  cubby limits [space]           show effective limits and usage
+  cubby time                     estimate server clock offset and round trip
   cubby name [label]              make up a valid space name, no server needed
   cubby whoami [--show-token] | url <path>
 

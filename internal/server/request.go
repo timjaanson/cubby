@@ -123,9 +123,14 @@ func (s *Server) rate(l *limiter, key string, n float64, code string) error {
 type statusWriter struct {
 	http.ResponseWriter
 	status int
+	before func()
 }
 
 func (w *statusWriter) WriteHeader(code int) {
+	if w.before != nil {
+		w.before()
+		w.before = nil
+	}
 	w.status = code
 	w.ResponseWriter.WriteHeader(code)
 }

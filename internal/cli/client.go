@@ -65,7 +65,7 @@ func exitFor(code string, status int) int {
 	switch code {
 	case "not_found", "no_space":
 		return 1
-	case "version_conflict":
+	case "version_conflict", "too_late":
 		return 2
 	case "no_access", "owner_only", "not_yours", "invite_invalid", "missing_token", "invalid_token":
 		return 3
@@ -166,7 +166,8 @@ type reqOpts struct {
 }
 
 // do sends a request with the token, handles 401 invalid_token by getting a
-// fresh one once, and retries short rate limits.
+// fresh one once, and retries short rate limits on reads. Rejected writes
+// are returned to the caller without a rate-limit retry.
 func (c *client) do(method, path string, body []byte, o reqOpts) (*http.Response, []byte, error) {
 	if o.needToken {
 		if _, err := c.ensureToken(); err != nil {
@@ -194,7 +195,7 @@ func (c *client) do(method, path string, body []byte, o reqOpts) (*http.Response
 				continue
 			}
 		}
-		if resp.StatusCode == 429 && attempt < 3 {
+		if (method == "GET" || method == "HEAD") && resp.StatusCode == 429 && attempt < 3 {
 			if ra, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && ra <= 30 {
 				time.Sleep(time.Duration(ra) * time.Second)
 				continue

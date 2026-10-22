@@ -59,6 +59,20 @@ func (c *Config) TOML(def *Config, dataDirNote string) string {
 	w.set("max_spaces", strconv.Itoa(c.Limits.MaxSpaces), strconv.Itoa(def.Limits.MaxSpaces),
 		"Spaces on this server.")
 
+	w.set("writes_per_minute", strconv.Itoa(c.Limits.WritesPerMinute), strconv.Itoa(def.Limits.WritesPerMinute), "Writes per visitor per minute, across spaces.")
+	w.set("write_burst", strconv.Itoa(c.Limits.WriteBurst), strconv.Itoa(def.Limits.WriteBurst), "Visitor write bucket capacity.")
+	w.set("writes_per_ip_per_minute", strconv.Itoa(c.Limits.WritesPerIPPerMinute), strconv.Itoa(def.Limits.WritesPerIPPerMinute), "Writes per IP per minute. Bucket capacity equals this value.")
+	w.set("reads_per_ip_per_minute", strconv.Itoa(c.Limits.ReadsPerIPPerMinute), strconv.Itoa(def.Limits.ReadsPerIPPerMinute), "Reads per IP per minute, including continuing watches.")
+	w.set("write_bytes_per_ip_per_day", strconv.Itoa(c.Limits.WriteBytesPerIPPerDay), strconv.Itoa(def.Limits.WriteBytesPerIPPerDay), "Write bytes per IP per day. Bucket capacity equals this value.")
+	w.set("visitors_per_ip_per_hour", strconv.Itoa(c.Limits.VisitorsPerIPPerHour), strconv.Itoa(def.Limits.VisitorsPerIPPerHour), "New visitors per IP per hour.")
+	w.set("spaces_per_visitor_per_day", strconv.Itoa(c.Limits.SpacesPerVisitorPerDay), strconv.Itoa(def.Limits.SpacesPerVisitorPerDay), "New spaces per visitor per day.")
+	w.set("spaces_per_ip_per_day", strconv.Itoa(c.Limits.SpacesPerIPPerDay), strconv.Itoa(def.Limits.SpacesPerIPPerDay), "New spaces per IP per day.")
+	w.set("misses_per_ip_per_hour", strconv.Itoa(c.Limits.MissesPerIPPerHour), strconv.Itoa(def.Limits.MissesPerIPPerHour), "Distinct unavailable spaces per IP per hour.")
+	w.set("watches_per_ip", strconv.Itoa(c.Limits.WatchesPerIP), strconv.Itoa(def.Limits.WatchesPerIP), "Maximum concurrent watches per IP, even when rate_limits is false.")
+	w.set("watches_total", strconv.Itoa(c.Limits.WatchesTotal), strconv.Itoa(def.Limits.WatchesTotal), "Maximum concurrent watches on this server.")
+	w.set("ttl_min_seconds", strconv.Itoa(c.Limits.TTLMinSeconds), strconv.Itoa(def.Limits.TTLMinSeconds), "Minimum key TTL in whole seconds.")
+	w.set("ttl_max_seconds", strconv.Itoa(c.Limits.TTLMaxSeconds), strconv.Itoa(def.Limits.TTLMaxSeconds), "Maximum key TTL in whole seconds, at most 10 years.")
+
 	w.blank()
 	w.comment("Pinned spaces are never cleaned up and can have their own limits.")
 	w.comment("Leave a setting out to use the one from [limits].")

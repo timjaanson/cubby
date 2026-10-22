@@ -221,7 +221,14 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 		for _, g := range rights.Grants {
 			grants = append(grants, grantJSON(g))
 		}
-		c.json(200, map[string]any{"id": id, "owner": rights.Owner, "settings": rights.Settings, "grants": grants})
+		if err := s.rate(s.lim.readsPerIP, c.ip, 1, "rate_limited"); err != nil {
+			return err
+		}
+		usage, err := s.accessUsage(space, c.visitor)
+		if err != nil {
+			return err
+		}
+		c.json(200, map[string]any{"id": id, "owner": rights.Owner, "settings": rights.Settings, "grants": grants, "usage": usage, "limits": s.spaceLimits(space)})
 		return nil
 	}
 

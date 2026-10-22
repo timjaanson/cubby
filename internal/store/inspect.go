@@ -1,5 +1,7 @@
 package store
 
+import "github.com/timjaanson/cubby/internal/apierr"
+
 // Read-only views into the store's caches and counters, for admin stats and
 // tests. Nothing here changes stored data.
 
@@ -48,4 +50,29 @@ func (s *Store) PointCount(space string) (int, error) {
 	var n int
 	err = sp.db.QueryRow(`SELECT count(*) FROM points`).Scan(&n)
 	return n, err
+}
+
+// Usage returns space totals and the caller's stored bytes across all spaces.
+// No values or other visitors' totals are disclosed.
+func (s *Store) Usage(space, id string) (bytes int64, keys int, visitor int64, err error) {
+	sp, err := s.Acquire(space)
+	if err != nil {
+		return
+	}
+	if sp == nil {
+		return 0, 0, 0, apierr.NoSpace
+	}
+	if err = s.expire(sp); err != nil {
+		s.Release(sp)
+		return
+	}
+	m, e := readMeta(sp.db)
+	s.Release(sp)
+	if e != nil {
+		return 0, 0, 0, e
+	}
+	if id != "" {
+		visitor, err = s.VisitorTotal(id)
+	}
+	return m.bytes, m.keys, visitor, err
 }

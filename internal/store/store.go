@@ -55,14 +55,15 @@ type Store struct {
 	dir string
 	srv *sql.DB
 	// onChange is called after the server itself changes a space outside a
-	// client write (cleanup, admin), so watchers wake up.
+	// client write (expiry, cleanup, admin), so watchers wake up.
 	OnChange func(space string)
 
-	mu    sync.Mutex
-	open  map[string]*spaceDB
-	stats map[string]*spaceStat
-	pins  map[string]int // spaces with waiting watches stay open
-	total int64
+	mu       sync.Mutex
+	open     map[string]*spaceDB
+	stats    map[string]*spaceStat
+	pins     map[string]int // spaces with waiting watches stay open
+	total    int64
+	expiring map[string]int64 // space -> next expiry in ms, including closed files
 
 	cacheMu  sync.Mutex
 	vbytes   map[string]int64 // visitor ID -> bytes across spaces, recounted on a miss
@@ -95,7 +96,7 @@ func Open(cfg *config.Config) (*Store, error) {
 		return nil, fmt.Errorf("open %s: %w", filepath.Join(dir, "server.db"), err)
 	}
 	s := &Store{
-		cfg: cfg, dir: dir, srv: srv, OnChange: func(string) {},
+		cfg: cfg, dir: dir, srv: srv, expiring: map[string]int64{}, OnChange: func(string) {},
 		open: map[string]*spaceDB{}, stats: map[string]*spaceStat{}, pins: map[string]int{},
 		vbytes: map[string]int64{}, vspaces: map[string]bool{}, vtouched: map[string]int64{},
 	}

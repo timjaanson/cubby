@@ -27,12 +27,19 @@ func (c *client) add(f *flags) error {
 		return usageCli("add writes your own data. Use users/me/ instead of users/*/")
 	}
 	u := p.url() + "/series"
+	q, err := writeFlags(f)
+	if err != nil {
+		return err
+	}
 	if f.has("time") {
 		n, err := strconv.ParseInt(f.str("time"), 10, 64)
 		if err != nil || n < 1 {
 			return usageCli("--time takes a time in milliseconds since 1970")
 		}
-		u += "?t=" + strconv.FormatInt(n, 10)
+		q.Set("t", strconv.FormatInt(n, 10))
+	}
+	if len(q) > 0 {
+		u += "?" + q.Encode()
 	}
 	var body []byte
 	switch {

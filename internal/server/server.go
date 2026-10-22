@@ -31,8 +31,8 @@ type Server struct {
 
 func New(cfg *config.Config, store *store.Store, logger *log.Logger) *Server {
 	s := &Server{
-		cfg: cfg, store: store, lim: newLimits(), log: logger,
-		watches: watchCounter{perIP: map[string]int{}},
+		cfg: cfg, store: store, lim: newLimits(cfg), log: logger,
+		watches: watchCounter{perIP: map[string]int{}, perIPLimit: cfg.Limits.WatchesPerIP, totalLimit: cfg.Limits.WatchesTotal},
 		notify:  notifier{spaces: map[string]*spaceSignal{}},
 	}
 	store.OnChange = s.notify.fire
@@ -99,7 +99,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.Set("Access-Control-Allow-Origin", "*")
-	h.Set("Access-Control-Expose-Headers", "ETag, Retry-After, KV-Time, KV-By")
+	h.Set("Access-Control-Expose-Headers", "ETag, Retry-After, KV-Time, KV-By, KV-Expires, RateLimit, RateLimit-Policy")
 	h.Set("Cache-Control", "no-store")
 
 	// Token: header wins over the query parameter.
@@ -144,6 +144,22 @@ func (s *Server) route(c *reqCtx) error {
 
 	if len(seg) == 1 {
 		switch seg[0] {
+		case "limits", "time":
+			if m != http.MethodGet && m != http.MethodHead {
+				return methodErr("GET, HEAD")
+			}
+			if err := checkParams(c.r); err != nil {
+				return err
+			}
+			if err := s.rate(s.lim.readsPerIP, c.ip, 1, "rate_limited"); err != nil {
+				return err
+			}
+			if seg[0] == "time" {
+				c.json(200, map[string]any{"t": store.NowMs()})
+			} else {
+				c.json(200, s.serverLimits())
+			}
+			return nil
 		case "anon":
 			if m != http.MethodPost {
 				return methodErr("POST")
@@ -304,7 +320,7 @@ func (s *Server) route(c *reqCtx) error {
 			}
 			h = s.seriesRead
 		case m == http.MethodPost:
-			if err := checkParams(c.r, "t"); err != nil {
+			if err := checkParams(c.r, "t", "ifBefore"); err != nil {
 				return err
 			}
 			h = s.seriesAdd
@@ -336,7 +352,11 @@ func (s *Server) route(c *reqCtx) error {
 		}
 		h = s.read
 	case m == http.MethodPut || m == http.MethodDelete:
-		if err := checkParams(c.r, "ifVersion"); err != nil {
+		params := []string{"ifVersion", "ifBefore"}
+		if m == http.MethodPut {
+			params = append(params, "ttl")
+		}
+		if err := checkParams(c.r, params...); err != nil {
 			return err
 		}
 		h = s.write

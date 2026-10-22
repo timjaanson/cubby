@@ -277,7 +277,7 @@ class CubbyShare extends Base {
 
   set ownerToken(v) {
     this._ownerToken = v
-    if (v) this._load().then(() => this._access?.owner && this._show("recovery"))
+    if (v) this._load()
   }
   get ownerToken() { return this._ownerToken }
 
@@ -295,19 +295,18 @@ class CubbyShare extends Base {
   }
 
   async _load() {
+    const generation = this._generation = (this._generation || 0) + 1
     const db = this._db
     const root = this.shadowRoot
     if (!db) { root.replaceChildren(); return }
-    try {
-      this._access = await db.access()
-    } catch {
-      this._access = null
-    }
-    const a = this._access
+    let a
+    try { a = await db.access() } catch { a = null }
+    if (generation !== this._generation) return
+    this._access = a
     const style = h("style", {}, CSS)
     if (a?.owner) {
       root.replaceChildren(style, h("button", { part: "button", className: "main", onclick: () => this._show("invite") }, "Share"))
-      if (this.hasAttribute("open")) this._show("invite")
+      if (this._ownerToken || this.hasAttribute("open")) this._show(this._ownerToken ? "recovery" : "invite")
     } else if (a?.inside && a.grants.length && this.hasAttribute("members")) {
       root.replaceChildren(style, h("span", { className: "shared", part: "button" }, "Shared with you by the owner"))
     } else {
@@ -318,10 +317,15 @@ class CubbyShare extends Base {
   _changed() { this.dispatchEvent(new CustomEvent("cubby-change", { bubbles: true, composed: true })) }
 
   async _show(focus) {
+    if (this._ownerToken) focus = "recovery"
+    const recoveryToken = this._ownerToken
     const db = this._db
     this.shadowRoot.querySelector("dialog")?.remove()
     const dlg = h("dialog", { part: "panel", "aria-label": "Share" })
-    dlg.addEventListener("close", () => dlg.remove())
+    dlg.addEventListener("close", () => {
+      if (dlg.isConnected && focus === "recovery" && this._ownerToken === recoveryToken) this._ownerToken = null
+      dlg.remove()
+    })
     this.shadowRoot.append(dlg)
     const render = async () => {
       const [tokens, grants] = await Promise.all([db.owner.tokens.list(), db.owner.grants.list()])
@@ -336,7 +340,7 @@ class CubbyShare extends Base {
       )
     }
     await render()
-    dlg.showModal()
+    if (dlg.isConnected) dlg.showModal()
   }
 
   _recovery(db, now) {
@@ -351,7 +355,6 @@ class CubbyShare extends Base {
     )
     if (now && this._ownerToken) {
       showKey(this._ownerToken, "Save this in a password manager. It's the only way back in if you clear this browser or use another device, and it's shown only now.")
-      this._ownerToken = null
       return box
     }
     return box
@@ -405,9 +408,9 @@ class CubbyShare extends Base {
       h("h3", {}, "Invite"),
       h("div", { className: "row" }, name),
       h("div", { className: "row" },
-        h("button", { className: "main", onclick: () => make({ uses: 1 }) }, "One person"),
-        h("button", { onclick: () => make({}) }, "A group link"),
-        h("button", { onclick: () => make({ uses: 1, allow: "viewer" }) }, "View only"),
+        h("button", { className: "main", onclick: () => make({ uses: 1 }) }, "Create personal link"),
+        h("button", { onclick: () => make({}) }, "Create group link"),
+        h("button", { onclick: () => make({ uses: 1, allow: "viewer" }) }, "Create view-only link"),
       ),
       h("p", { className: "muted" }, "One person: one use, 7 days. A group link: 10 people, 7 days."),
       more,

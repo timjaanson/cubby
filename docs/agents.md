@@ -102,3 +102,15 @@ Store the returned `vt_...` as the device's or CI's secret (`CUBBY_TOKEN` for th
 | `owner_only` | an owner action by a non-owner | only the owner can share or change settings |
 | `not_yours` | writing another visitor's `users/{id}/` | write your own `db.user()` |
 | `invalid_token` | the stored visitor is gone, for example after a year unused | kv.js gets a new one by itself; the person needs a new invite |
+
+## Limits, presence, leases and deadlines
+
+Ask `await db.limits()` for `{limits, usage}` rather than budgeting against defaults. The latest data-write response is available through `db.writeBudget`, with visitor, IP and bytes buckets. It is only a snapshot. Handle 429 using `err.retryAfter` in seconds. kv.js does not queue or coalesce writes, coordinate tabs, or retry failed writes automatically.
+
+Presence belongs in `db.user().set("here", value, {ttl: 30})`, renewed every 15 to 20 seconds. Watch it through `db.users.watch("here", ...)`. `db.me` is private. Expiry sends a delete with `expired: true` and preserves the last writer as `by`. Identical-value renewals do not wake watchers; watch entries may hold an old `expires` value. A set without TTL clears expiry.
+
+Leases use `ifVersion: 0` to acquire, the acquired version to renew the same holder value with TTL, and that version to delete. A failed renewal means stop. No automatic lock helper is provided. This cannot prevent an actor from continuing external work after a long stall. See the [lease contract](spec.md#expiring-keys-and-leases).
+
+For a synchronized reveal, call `db.clock.sync()` and schedule with `db.clock.at(serverMilliseconds, callback)`. Set an opening time a little ahead to allow HTTP watches to deliver it. Enforce closing times with `{ifBefore: closesAt}` on set, delete or add. A late write returns `too_late`, status 412. Plain keys have a server-generated `t`; a series point's time may be caller-supplied. Clock sync does not guarantee precise browser execution.
+
+The share panel preserves the recovery view regardless of whether `ownerToken` or the `open` attribute is assigned first. Setting `ownerToken` alone opens it. Dismissing the recovery dialog clears that token from the component.

@@ -58,7 +58,7 @@ func (s *Store) dropVisitorRows(space, id string) error {
 		if strings.HasPrefix(r.area, "u:") && r.live {
 			seq++
 			bytesD += int64(len(r.key)) - r.size
-			tx.Exec(`UPDATE kv SET value = NULL, version = ?, size = ?, updated_at = ?, series = 0, t = NULL, n = 0 WHERE area = ? AND key = ?`, seq, len(r.key), now, r.area, r.key)
+			tx.Exec(`UPDATE kv SET value = NULL, version = ?, size = ?, updated_at = ?, series = 0, t = ?, n = 0, expires=0, expired=0 WHERE area = ? AND key = ?`, seq, len(r.key), now, NowMs(), r.area, r.key)
 			changed = true
 		} else {
 			bytesD -= r.size

@@ -22,12 +22,14 @@ var commandFlags = map[string]struct {
 	vals, bools []string
 	help        string
 }{
+	"limits":      {nil, nil, "limits [space]\n  Print effective server limits, or the space limits and your usage, as JSON."},
+	"time":        {nil, nil, "time\n  Print estimated server clock offset and shortest round trip in milliseconds."},
 	"get":         {nil, []string{"json"}, "get <path> [--json]\n  Print the raw value. Exit 1 if it doesn't exist."},
-	"set":         {[]string{"if-version"}, []string{"create"}, "set <path> [value|-] [--if-version N] [--create]\n  Write from the argument, or from stdin when it's missing or -. Prints the new version."},
-	"del":         {[]string{"if-version"}, []string{"f", "force"}, "del <path> [--if-version N] [-f]\n  Delete. With -f a missing key isn't an error."},
+	"set":         {[]string{"if-version", "ttl", "if-before"}, []string{"create"}, "set <path> [value|-] [--if-version N] [--create] [--ttl 30s] [--if-before MS]\n  Write from the argument, or from stdin when it's missing or -. Prints the new version."},
+	"del":         {[]string{"if-version", "if-before"}, []string{"f", "force"}, "del <path> [--if-version N] [--if-before MS] [-f]\n  Delete. With -f a missing key isn't an error."},
 	"ls":          {[]string{"limit"}, []string{"json", "desc"}, "ls <path or pattern> [--limit N] [--desc] [--json]\n  One line per item: key<TAB>value, or user<TAB>key<TAB>value under users/*/."},
 	"watch":       {[]string{"from", "state", "exec"}, []string{"json", "once", "raw"}, "watch <path or pattern> [--from N|now] [--state FILE] [--exec CMD] [--once] [--raw] [--json]\n  Print current state, then changes. --exec runs CMD per change with the value on stdin\n  and KV_KEY, KV_VERSION, KV_DELETED, KV_USER set. --state FILE resumes after restarts."},
-	"add":         {[]string{"time"}, nil, "add <path> [value|-] [--time MS]\n  Add a point to a series, from the argument or stdin. Prints the point's time.\nadd <prefix*> name=value ... [--time MS]\n  Add one point to each series prefix+name, all at one time. A value is JSON if it parses,\n  otherwise a string. Without name=value arguments, reads one JSON object from stdin."},
+	"add":         {[]string{"time", "if-before"}, nil, "add <path> [value|-] [--time MS] [--if-before MS]\n  Add a point to a series, from the argument or stdin. Prints the point's time.\nadd <prefix*> name=value ... [--time MS] [--if-before MS]\n  Add one point to each series prefix+name, all at one time. A value is JSON if it parses,\n  otherwise a string. Without name=value arguments, reads one JSON object from stdin."},
 	"series":      {[]string{"since", "limit"}, []string{"json"}, "series <path> [--since MS|24h|90m|7d] [--limit N] [--json]\n  Print a series' points oldest first, as t<TAB>value. Without --since, the newest 1000."},
 	"update":      {[]string{"exec"}, nil, "update <path> [--exec CMD]\n  Read, pipe through CMD (or open $EDITOR), write back with ifVersion, retry on conflict.\n  Example: cubby update space/shared/count --exec 'jq \"(. // 0) + 1\"'"},
 	"new":         {[]string{"label", "public", "read", "write"}, nil, "new [label | name] [--public none|read|respond|all] [--read R --write W]\n  Create a space you own. Print its name, then its owner token: keep that one, it's\n  shown once and gets you back in from another machine. Spaces are private unless\n  --public says otherwise:\n    read      anyone reads, invited people write (status pages, sensor readings)\n    respond   anyone reads and adds their own users/ entry (polls, RSVPs)\n    all       anyone with the name reads and writes\n  With nothing, the name is four random words; a label gets the words added\n  (new poll -> poll-cedar-pilot-mango-frost); a full name of 16+ characters is used\n  as is and fails if taken."},
@@ -125,6 +127,10 @@ func (c *client) onePath(f *flags, cmd string) (kvPath, error) {
 
 func (c *client) run(cmd string, f *flags) error {
 	switch cmd {
+	case "limits":
+		return c.limits(f)
+	case "time":
+		return c.serverTime(f)
 	case "get":
 		return c.get(f)
 	case "set":
@@ -190,22 +196,22 @@ func isJSONResp(resp *http.Response) bool {
 }
 
 func (c *client) fetch(p kvPath) (value []byte, isJSON bool, ver int64, err error) {
-	value, isJSON, ver, _, err = c.fetchT(p)
-	return
+	resp, b, err := c.fetchResponse(p)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	return b, isJSONResp(resp), parseETag(resp), nil
 }
 
-// fetchT also returns the newest point's time for a series key, else 0.
-func (c *client) fetchT(p kvPath) (value []byte, isJSON bool, ver, t int64, err error) {
-	o := reqOpts{needToken: p.area == "me"}
-	resp, b, err := c.do("GET", p.url(), nil, o)
+func (c *client) fetchResponse(p kvPath) (*http.Response, []byte, error) {
+	resp, b, err := c.do("GET", p.url(), nil, reqOpts{needToken: p.area == "me"})
 	if err != nil {
-		return nil, false, 0, 0, err
+		return nil, nil, err
 	}
 	if resp.StatusCode != 200 {
-		return nil, false, 0, 0, apiErrFrom(resp, b)
+		return nil, nil, apiErrFrom(resp, b)
 	}
-	t, _ = strconv.ParseInt(resp.Header.Get("KV-Time"), 10, 64)
-	return b, isJSONResp(resp), parseETag(resp), t, nil
+	return resp, b, nil
 }
 
 func (c *client) get(f *flags) error {
@@ -216,11 +222,14 @@ func (c *client) get(f *flags) error {
 	if p.isPattern() || p.area == "users/*" {
 		return usageCli("get reads one key. Use ls for patterns and users/*/")
 	}
-	v, isJSON, ver, t, err := c.fetchT(p)
+	resp, v, err := c.fetchResponse(p)
 	if err != nil {
 		return err
 	}
 	if f.bool("json") {
+		isJSON, ver := isJSONResp(resp), parseETag(resp)
+		t, _ := strconv.ParseInt(resp.Header.Get("KV-Time"), 10, 64)
+		expires, _ := strconv.ParseInt(resp.Header.Get("KV-Expires"), 10, 64)
 		val := json.RawMessage(v)
 		if !isJSON {
 			val, _ = json.Marshal(string(v))
@@ -228,6 +237,12 @@ func (c *client) get(f *flags) error {
 		m := map[string]any{"key": p.name, "value": val, "version": ver}
 		if t != 0 {
 			m["t"] = t
+		}
+		if expires > 0 {
+			m["expires"] = expires
+		}
+		if by := resp.Header.Get("KV-By"); by != "" {
+			m["by"] = by
 		}
 		out, _ := json.Marshal(m)
 		fmt.Println(string(out))
@@ -237,10 +252,17 @@ func (c *client) get(f *flags) error {
 	return nil
 }
 
-func (c *client) put(p kvPath, value []byte, ifVersion *int64) (int64, *http.Response, error) {
+func (c *client) put(p kvPath, value []byte, ifVersion *int64, extra ...url.Values) (int64, *http.Response, error) {
 	u := p.url()
+	q := url.Values{}
+	if len(extra) > 0 {
+		q = extra[0]
+	}
 	if ifVersion != nil {
-		u += "?ifVersion=" + strconv.FormatInt(*ifVersion, 10)
+		q.Set("ifVersion", strconv.FormatInt(*ifVersion, 10))
+	}
+	if len(q) > 0 {
+		u += "?" + q.Encode()
 	}
 	method := "PUT"
 	if value == nil {
@@ -296,7 +318,11 @@ func (c *client) set(f *flags) error {
 	if value == nil {
 		value = []byte{}
 	}
-	v, _, err := c.put(p, value, ifv)
+	q, err := writeFlags(f)
+	if err != nil {
+		return err
+	}
+	v, _, err := c.put(p, value, ifv, q)
 	if err != nil {
 		return err
 	}
@@ -313,7 +339,11 @@ func (c *client) del(f *flags) error {
 	if err != nil {
 		return err
 	}
-	v, _, err := c.put(p, nil, ifv)
+	q, err := writeFlags(f)
+	if err != nil {
+		return err
+	}
+	v, _, err := c.put(p, nil, ifv, q)
 	var ce *cliError
 	if errors.As(err, &ce) && ce.err == "not_found" && (f.bool("f") || f.bool("force")) {
 		return nil
@@ -332,6 +362,9 @@ type item struct {
 	Version int64           `json:"version"`
 	User    string          `json:"user,omitempty"`
 	T       int64           `json:"t,omitempty"`
+	Expires int64           `json:"expires,omitempty"`
+	Expired bool            `json:"expired,omitempty"`
+	By      string          `json:"by,omitempty"`
 }
 
 func compactJSON(v json.RawMessage) string {

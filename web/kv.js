@@ -41,6 +41,7 @@ export class KvError extends Error {
     this.status = status
     this.code = code
     this.details = details
+    this.retryAfter = details.retryAfter
   }
   // Worth trying again later: the network, the server or a rate limit failed,
   // not the request itself.
@@ -222,6 +223,11 @@ export function kv(space, opts = {}) {
           continue
         }
       }
+      const dataPath = path.startsWith("shared/") || path.startsWith("me/") || path.startsWith("users/")
+      if (dataPath && !read && (method !== "POST" || path.endsWith("/series"))) {
+        const header = res.headers.get("RateLimit")
+        db.writeBudget = header ? parseBudget(header) : null
+      }
       return res
     }
   }
@@ -254,6 +260,8 @@ export function kv(space, opts = {}) {
         const entry = { value: isJSON ? JSON.parse(text) : text, version, by: res.headers.get("KV-By") || undefined }
         const t = res.headers.get("KV-Time")
         if (t) entry.t = Number(t)
+        const expires = res.headers.get("KV-Expires")
+        if (expires) entry.expires = Number(expires)
         return withMine(entry)
       },
       async get(key) {
@@ -265,13 +273,13 @@ export function kv(space, opts = {}) {
         checkWrite()
         const body = JSON.stringify(value)
         if (body === undefined) throw new KvError(0, "invalid_value", "That value can't be stored as JSON.")
-        const res = await request("PUT", await pathOf(key), { body, auth: true, query: { ifVersion: o.ifVersion } })
+        const res = await request("PUT", await pathOf(key), { body, auth: true, query: { ifVersion: o.ifVersion, ttl: o.ttl, ifBefore: o.ifBefore } })
         if (!res.ok) throw await fail(res)
         return (await res.json()).version
       },
       async delete(key, o = {}) {
         checkKey(key)
-        const res = await request("DELETE", await pathOf(key), { auth: true, query: { ifVersion: o.ifVersion } })
+        const res = await request("DELETE", await pathOf(key), { auth: true, query: { ifVersion: o.ifVersion, ifBefore: o.ifBefore } })
         if (await missingKey(res)) return false
         if (!res.ok) throw await fail(res)
         return true
@@ -283,7 +291,7 @@ export function kv(space, opts = {}) {
           const next = fn(cur ? cur.value : null)
           if (next === undefined || (cur && JSON.stringify(next) === JSON.stringify(cur.value))) return cur ? cur.value : null
           try {
-            await a.set(key, next, { ifVersion: cur ? cur.version : 0 })
+            await a.set(key, next, { ...o, ifVersion: cur ? cur.version : 0 })
             return next
           } catch (err) {
             if (err.code !== "version_conflict" || i >= retries) throw err
@@ -303,7 +311,7 @@ export function kv(space, opts = {}) {
         }
         const body = JSON.stringify(value)
         if (body === undefined) throw new KvError(0, "invalid_value", "That value can't be stored as JSON.")
-        const res = await request("POST", (await pathOf(target)) + "/series", { body, auth: true, query: { t: o.t } })
+        const res = await request("POST", (await pathOf(target)) + "/series", { body, auth: true, query: { t: o.t, ifBefore: o.ifBefore } })
         if (!res.ok) throw await fail(res)
         return res.json()
       },
@@ -395,12 +403,14 @@ export function kv(space, opts = {}) {
     if (hasDoc) document.addEventListener("visibilitychange", onVisibility)
     if (hasWin) {
       window.addEventListener("online", wake)
+      window.addEventListener("offline", wake)
       window.addEventListener("pageshow", wake)
     }
     const cleanup = () => {
       if (hasDoc) document.removeEventListener("visibilitychange", onVisibility)
       if (hasWin) {
         window.removeEventListener("online", wake)
+        window.removeEventListener("offline", wake)
         window.removeEventListener("pageshow", wake)
       }
     }
@@ -424,10 +434,17 @@ export function kv(space, opts = {}) {
       let initial = true
       const retry = async err => {
         onError(err)
-        await pause(err.code === "rate_limited" || err.status === 429 ? (err.details.retryAfter || 5) * 1000 : backoff)
+        await pause(err.code === "rate_limited" || err.status === 429 ? (err.retryAfter || 5) * 1000 : backoff)
         backoff = Math.min(backoff * 2, 30000)
       }
+      let offlineReported = false
       while (!stopped) {
+        if (typeof navigator !== "undefined" && navigator.onLine === false) {
+          if (!offlineReported) { onError(new KvError(0, "network_error", "The browser is offline.")); offlineReported = true }
+          await pause()
+          continue
+        }
+        offlineReported = false
         if (hiddenSince && Date.now() - hiddenSince > HIDDEN_PAUSE) {
           await pause()
           continue
@@ -510,6 +527,12 @@ export function kv(space, opts = {}) {
   const accessFrom = (a, extra = {}) => makeAccess({ inside: true, joined: false, inviteFailed: false, ...a, ...extra })
 
   const db = {
+    writeBudget: null, // latest response snapshot; never a promise of future capacity
+    clock: makeClock(server, fetchFn),
+    async limits() {
+      const { limits, usage } = await db.access()
+      return { limits, usage }
+    },
     async join(token) {
       if (token === null || token === undefined || token === "") return null
       // Without a stored visitor, the server creates one and returns it.
@@ -708,4 +731,87 @@ export function inviteLink(token, base = typeof location === "undefined" ? "" : 
   p.set("t", token)
   u.hash = p.toString()
   return u.href
+}
+
+function parseBudget(header) {
+  const buckets = {}
+  for (const member of header.split(",")) {
+    const name = member.match(/^\s*"([^"]+)"/)
+    const remaining = member.match(/;\s*r=(\d+)/)
+    if (name && remaining) buckets[name[1]] = { remaining: Number(remaining[1]) }
+  }
+  return { ...buckets, observedAt: Date.now() }
+}
+
+// Clock samples do not send tokens or create a visitor. now() uses a monotonic
+// clock after sync, so changing the computer's wall clock cannot shift a timer.
+function makeClock(server, fetchFn) {
+  const mono = () => globalThis.performance?.now() ?? Date.now()
+  let anchor = null, offset = null, rtt = null, pending = null, listening = false, epoch = 0
+  const timers = new Set()
+  const hasWin = typeof window !== "undefined" && typeof window.addEventListener === "function"
+  const hasDoc = typeof document !== "undefined"
+  const refresh = () => { if (!hasDoc || !document.hidden) clock.sync().catch(() => {}) }
+  const clock = {
+    get offset() { return offset },
+    get rtt() { return rtt },
+    async sync({ samples = 5 } = {}) {
+      if (!Number.isInteger(samples) || samples < 1 || samples > 20) throw new KvError(0, "invalid_option", "samples is 1 to 20.")
+      if (pending) return pending
+      const generation = epoch
+      pending = (async () => {
+        let best = null, lastError
+        for (let i = 0; i < samples; i++) {
+          const wall = Date.now(), sent = mono()
+          try {
+            const res = await fetchFn(server + "/v1/time", { cache: "no-store" })
+            if (!res.ok) throw await errorFrom(res)
+            const body = await res.json(), received = mono(), trip = received - sent
+            if (!Number.isSafeInteger(body.t)) throw new KvError(0, "bad_response", "The server did not return a time.")
+            if (!best || trip < best.rtt) best = { rtt: trip, offset: body.t - wall - trip / 2, server: body.t + trip / 2, local: received }
+          } catch (err) { lastError = err instanceof KvError ? err : new KvError(0, "network_error", String(err?.message || err)) }
+        }
+        if (!best) throw lastError
+        if (generation !== epoch) return { offset: best.offset, rtt: best.rtt }
+        anchor = best; offset = best.offset; rtt = best.rtt
+        if (!listening) {
+          if (hasWin) window.addEventListener("online", refresh)
+          if (hasDoc) document.addEventListener("visibilitychange", refresh)
+          listening = true
+        }
+        for (const timer of timers) timer.arm()
+        return { offset, rtt }
+      })().finally(() => { pending = null })
+      return pending
+    },
+    now() {
+      if (!anchor) throw new KvError(0, "clock_not_synced", "Call db.clock.sync() first.")
+      return anchor.server + mono() - anchor.local
+    },
+    at(t, fn) {
+      if (!Number.isSafeInteger(t) || typeof fn !== "function") throw new KvError(0, "invalid_option", "at takes server milliseconds and a function.")
+      clock.now()
+      let handle
+      const timer = { arm() {
+        clearTimeout(handle)
+        const delay = t - clock.now()
+        handle = setTimeout(() => {
+          if (t > clock.now()) { timer.arm(); return }
+          timers.delete(timer); fn()
+        }, Math.min(2147483647, Math.max(0, Math.ceil(delay))))
+      } }
+      timer.cancel = () => { clearTimeout(handle); timers.delete(timer) }
+      timers.add(timer); timer.arm()
+      return timer.cancel
+    },
+    dispose() {
+      epoch++
+      if (hasWin) window.removeEventListener("online", refresh)
+      if (hasDoc) document.removeEventListener("visibilitychange", refresh)
+      listening = false
+      for (const timer of timers) timer.cancel?.()
+      timers.clear()
+    },
+  }
+  return clock
 }

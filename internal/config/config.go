@@ -83,6 +83,20 @@ type Config struct {
 		TombstoneTTL        Duration `toml:"tombstone_ttl"`
 	} `toml:"retention"`
 	Limits struct {
+		WritesPerMinute        int `toml:"writes_per_minute"`
+		WriteBurst             int `toml:"write_burst"`
+		WritesPerIPPerMinute   int `toml:"writes_per_ip_per_minute"`
+		ReadsPerIPPerMinute    int `toml:"reads_per_ip_per_minute"`
+		WriteBytesPerIPPerDay  int `toml:"write_bytes_per_ip_per_day"`
+		VisitorsPerIPPerHour   int `toml:"visitors_per_ip_per_hour"`
+		SpacesPerVisitorPerDay int `toml:"spaces_per_visitor_per_day"`
+		SpacesPerIPPerDay      int `toml:"spaces_per_ip_per_day"`
+		MissesPerIPPerHour     int `toml:"misses_per_ip_per_hour"`
+		WatchesPerIP           int `toml:"watches_per_ip"`
+		WatchesTotal           int `toml:"watches_total"`
+		TTLMinSeconds          int `toml:"ttl_min_seconds"`
+		TTLMaxSeconds          int `toml:"ttl_max_seconds"`
+
 		MaxValueSize    Size `toml:"max_value_size"`
 		MaxPointSize    Size `toml:"max_point_size"`
 		MaxSeriesPoints int  `toml:"max_series_points"`
@@ -113,6 +127,19 @@ func Default() *Config {
 	c.Limits.MaxSpaceKeys = 10000
 	c.Limits.MaxTotalBytes = 1 << 30
 	c.Limits.MaxSpaces = 1000
+	c.Limits.WritesPerMinute = 120
+	c.Limits.WriteBurst = 30
+	c.Limits.WritesPerIPPerMinute = 300
+	c.Limits.ReadsPerIPPerMinute = 600
+	c.Limits.WriteBytesPerIPPerDay = 10485760
+	c.Limits.VisitorsPerIPPerHour = 30
+	c.Limits.SpacesPerVisitorPerDay = 5
+	c.Limits.SpacesPerIPPerDay = 20
+	c.Limits.MissesPerIPPerHour = 30
+	c.Limits.WatchesPerIP = 50
+	c.Limits.WatchesTotal = 1000
+	c.Limits.TTLMinSeconds = 5
+	c.Limits.TTLMaxSeconds = 2592000
 	return c
 }
 
@@ -151,6 +178,48 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Limits.MaxPointSize < 1 || c.Limits.MaxSeriesPoints < 1 {
 		return nil, fmt.Errorf("config %s: max_point_size and max_series_points must be positive", path)
+	}
+	if c.Limits.WritesPerMinute < 1 {
+		return nil, fmt.Errorf("writes_per_minute must be positive")
+	}
+	if c.Limits.WriteBurst < 1 {
+		return nil, fmt.Errorf("write_burst must be positive")
+	}
+	if c.Limits.WritesPerIPPerMinute < 1 {
+		return nil, fmt.Errorf("writes_per_ip_per_minute must be positive")
+	}
+	if c.Limits.ReadsPerIPPerMinute < 1 {
+		return nil, fmt.Errorf("reads_per_ip_per_minute must be positive")
+	}
+	if c.Limits.WriteBytesPerIPPerDay < 1 {
+		return nil, fmt.Errorf("write_bytes_per_ip_per_day must be positive")
+	}
+	if c.Limits.VisitorsPerIPPerHour < 1 {
+		return nil, fmt.Errorf("visitors_per_ip_per_hour must be positive")
+	}
+	if c.Limits.SpacesPerVisitorPerDay < 1 {
+		return nil, fmt.Errorf("spaces_per_visitor_per_day must be positive")
+	}
+	if c.Limits.SpacesPerIPPerDay < 1 {
+		return nil, fmt.Errorf("spaces_per_ip_per_day must be positive")
+	}
+	if c.Limits.MissesPerIPPerHour < 1 {
+		return nil, fmt.Errorf("misses_per_ip_per_hour must be positive")
+	}
+	if c.Limits.WatchesPerIP < 1 {
+		return nil, fmt.Errorf("watches_per_ip must be positive")
+	}
+	if c.Limits.WatchesTotal < 1 {
+		return nil, fmt.Errorf("watches_total must be positive")
+	}
+	if c.Limits.TTLMinSeconds < 1 {
+		return nil, fmt.Errorf("ttl_min_seconds must be positive")
+	}
+	if c.Limits.TTLMaxSeconds < 1 {
+		return nil, fmt.Errorf("ttl_max_seconds must be positive")
+	}
+	if c.Limits.TTLMaxSeconds < c.Limits.TTLMinSeconds || c.Limits.TTLMaxSeconds > 315360000 {
+		return nil, fmt.Errorf("ttl bounds must be ordered and at most 10 years")
 	}
 	for name := range c.Spaces {
 		if !names.ValidSpace(name) {

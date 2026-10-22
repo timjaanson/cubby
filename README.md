@@ -41,6 +41,30 @@ Hello there
 
 `notes-cedar-pilot-mango-frost` is a space: an optional readable label plus four random words. `cubby new` created it and made you its owner. It's private, so `curl` without your visitor token can't see it. `cubby new notes --public read` would have let anyone read it.
 
+## Expiry, limits and timing
+
+```sh
+cubby limits                         # effective server limits, as JSON
+cubby limits notes-cedar-pilot-mango-frost  # this space's limits and your usage
+cubby set notes-cedar-pilot-mango-frost/users/me/here online --ttl 30s
+cubby time                           # server clock offset and round trip
+```
+
+Plain keys can expire after 5 seconds to 30 days. Renewing the same value extends TTL without a new version or waking watchers. A PUT without TTL makes the key permanent. Expiry produces a delete marked `expired: true`. Combine TTL with `--create` and `--if-version` for a cooperative lease. See the [lease recipe and expiry rules](docs/spec.md#expiring-keys-and-leases).
+
+```js
+const { limits, usage } = await db.limits()
+await db.user().set("here", "online", { ttl: 30 })
+await db.clock.sync()
+const opensAt = Math.ceil(db.clock.now()) + 2000
+const cancel = db.clock.at(opensAt, () => reveal())
+await db.user().set("answer", "B", { ifBefore: opensAt + 20000 })
+```
+
+Every key returns its value time as `t` in list/watch and `KV-Time` on reads. `/v1/time` supplies the server clock. `ifBefore` enforces a write deadline. Clock estimates and browser timers are subject to network asymmetry and browser scheduling.
+
+Defaults are 120 writes per visitor per minute, burst 30, and 50 open watches per IP. Reads remain 600/IP/minute. Every rate is configurable. `GET /v1/limits` reports the server's actual settings; `/access` includes effective space limits and usage. Data-write responses carry remaining visitor and IP budgets in `RateLimit` headers, exposed by kv.js as `db.writeBudget`. These are snapshots, so clients must still handle 429 and `err.retryAfter`. Writes are never automatically retried after 429 or an uncertain network failure. [Full contract](docs/spec.md#limits-and-server-time).
+
 ## Install
 
 Pick the binary for your machine from `dist/` (or build it, see below), put it on your `PATH` and name it `cubby`:
@@ -397,4 +421,4 @@ Dependencies point one way: `cli` uses `server`, `server` uses `store`, and ever
 - **Visitor cleanup turns their `users/` keys into tombstones**, so watchers see them go, instead of deleting rows silently.
 - **List, watch and series responses compact JSON values**, so `{"a": 1}` comes back as `{"a":1}`. A plain `GET` returns the bytes exactly as written.
 - **Space size counts the newest point twice** for a series: once as the key's value and once as a point. It's a few bytes per series and keeps the accounting simple.
-- Not built yet: everything in [docs/plans.md](docs/plans.md), proof of work on `/v1/anon`, and everything else under "Later" in the spec, including reading several series at once and `?format=text`.
+- Not built yet: the deferred helpers and candidates in [docs/plans.md](docs/plans.md), proof of work on `/v1/anon`, and everything else under "Later" in the spec, including reading several series at once and `?format=text`.

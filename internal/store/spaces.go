@@ -73,6 +73,7 @@ func (s *Store) DeleteSpace(name string) error {
 		if st := s.stats[name]; st != nil {
 			s.total -= st.bytes
 			delete(s.stats, name)
+			delete(s.expiring, name)
 		}
 		s.mu.Unlock()
 		path := s.spacePath(name)

@@ -377,12 +377,14 @@ GET /v1/home/shared/temp/series?since=T           → the points after T, then f
 | Data per visitor | 1 MB |
 | Data per space | 5 MB |
 | Total data | 1 GB |
-| Writes per visitor | 60 per minute |
+| Writes per visitor | 120 per minute, burst 30 |
 | New visitors per IP | 30 per hour |
 | New spaces per visitor | 5 per day |
-| Open watches per IP | 20 |
+| Open watches per IP | 50 |
 
 Hitting a limit makes the write fail with a clear error. Reads keep working and nothing stored is lost.
+
+Limits and storage usage are queryable through plain HTTP, `db.limits()` and `cubby limits`. Rates are configurable. TTL, value timestamps, server clock sync and `ifBefore` deadlines work over the same HTTP routes. See [the spec](spec.md#expiring-keys-and-leases) for the contracts.
 
 ## CLI at a glance
 
@@ -515,4 +517,4 @@ To show a list first and follow it after, pass the list itself: `watch("game.*",
 | One SQLite file per space | One shared database | Deleting a space frees disk at once, damage stays contained, backups are a file copy. |
 | No slashes in keys | Percent-encoded slashes | Proxies and routers handle `%2F` inconsistently. |
 | No migration or compatibility code for the access model | Converting locked spaces and keeping old routes | Nothing stored on the live server is worth it. One clean code path is easier to get right than two. |
-| Proof of work, `ttl`, key locks, device linking: later | Including them now | Each is useful, none is needed for the first version. All can be added without changing the API. |
+| TTL is a PUT option; leases combine it with ifVersion | A separate lock service | Expiry is visible as a marked deletion. Ordinary conditional writes handle acquisition and renewal. Automatic lease helpers, proof of work and device linking remain deferred. |
