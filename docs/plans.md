@@ -26,7 +26,7 @@ Fieldnotes budgeted its autosave against the documented defaults without knowing
 
 ```json
 "usage": {"bytes": 183204, "keys": 412, "visitorBytes": 20480},
-"limits": {"spaceBytes": 5242880, "spaceKeys": 10000, "visitorBytes": 1048576, "writesPerMinute": 240, "writeBurst": 60}
+"limits": {"spaceBytes": 5242880, "spaceKeys": 10000, "visitorBytes": 1048576, "writesPerMinute": 120, "writeBurst": 30}
 ```
 
 Pinned spaces and future per-space or per-grant limits show up here with their own values, so a page never has to know about them.
@@ -43,17 +43,14 @@ Pinned spaces and future per-space or per-grant limits show up here with their o
 
 60 writes a minute per visitor shapes everything in a live page. Autosave, moves, colour changes and (with item 4) presence heartbeats all spend the same budget. The rate limits are also fixed in code today. Only `rate_limits = false` turns them off.
 
-Proposed defaults (numbers to confirm before building):
+New defaults (agreed 2026-10-22):
 
-| Limit | Now | Proposed | Why |
+| Limit | Now | New | Why |
 |---|---|---|---|
-| Writes per visitor | 60/min, burst 30 | 240/min, burst 60 | Autosave about once a second plus everything else, without a client-side queue |
-| Writes per IP | 300/min | 1200/min | Keeps the same 5 visitors of headroom per household or office |
-| Reads per IP | 600/min | 3000/min | Every watch answer is followed by a new watch request, which costs a read. Several busy pages behind one router reach 10 per second quickly |
-| Open watches per IP | 20 | 100 | A few people with a phone and a laptop and a few tabs each |
-| Write bytes per IP | 10 MB/day | 50 MB/day | Whole values are rewritten on every save |
+| Writes per visitor | 60/min, burst 30 | 120/min, burst 30 | Autosave about once a second with room for moves, edits and presence heartbeats |
+| Open watches per IP | 20 | 50 | A few people with a phone and a laptop and a few tabs each |
 
-Left as they are: new visitors per IP, new spaces, the miss limit and the storage quotas. Those are what keep anonymous visitors and name guessing in check.
+Everything else stays: writes per IP (300/min), reads per IP (600/min), write bytes per IP, new visitors, new spaces, the miss limit and the storage quotas. Writes per IP now covers 2.5 visitors writing at full rate instead of 5, which is fine since people rarely do that at the same time.
 
 - Every rate becomes a `[limits]` config key, as storage limits already are.
 - Open question: whether a watch request that continues from a version should cost a read at all, or count against a separate, larger bucket. Charging every re-poll means busier spaces cost more reads per minute even when nothing else is read.
@@ -108,10 +105,9 @@ db.clock.at(t, fn)             // run fn at server time t
 
 **How a quiz uses it.** The host writes `round = {"q": 3, "opensAt": T, "closesAt": T + 20000}` with T a few seconds ahead. Every phone shows the question at `opensAt` by `db.clock.at`, so watch latency hides inside the lead time. Players write `users/{id}/a.3`, the server's `t` gives each answer's time, and `t - opensAt` scores speed. A player far from the server loses roughly half their round trip, which is fine among friends.
 
-Open questions for this item:
+**Closing on time: `ifBefore=T`.** A write condition next to `ifVersion`: the write succeeds only if the server's clock is still before `T` (ms) when it arrives. Otherwise 412 `too_late`, with the server time in the body. Works on `PUT`, `DELETE` and series `POST`, and combines with `ifVersion`. A quiz sets it to `closesAt`, so late answers are refused by the server, not by each page.
 
-- **Closing on time.** A late write can't be stopped today. A write condition `ifBefore=T` (server time) would make the server reject answers after `closesAt`. Small and generic, but it's a new condition next to `ifVersion`.
-- **Hidden answers.** `users/*/` is readable by everyone in the space, so a player could watch others' answers before answering. The `sealed` area in spec §19 (writes hidden until a reveal) is what fixes that. A quiz is the first concrete case for it.
+Not planned: hiding answers until a reveal (the `sealed` area in spec §19). `users/*/` stays readable by everyone in the space, so a quiz between friends trusts players not to peek.
 
 ## 6. Client helper fixes from Fieldnotes
 
@@ -145,3 +141,53 @@ Not decided. Notes so the thinking isn't redone.
 **Same room.** For people on the same network, browsers can connect directly with WebRTC data channels (few ms instead of a round trip to the server, and late packets can be dropped instead of waited for). Cubby would only carry the handshake, which ttl keys already cover. No server change, possibly a small optional module.
 
 **Below about 20 ms** (music together, rhythm games): out of reach for anything relayed through a server over the internet.
+
+### Signature sketch (2026-10-22, not decided)
+
+Plain HTTP, in the existing URL grammar. `listen` and `send` become action words next to `watch` and `series`, and are reserved as key names the same way.
+
+```
+GET  /v1/{space}/shared/cursor.*/listen?token=vt_...     text/event-stream, held open
+POST /v1/{space}/users/{id}/cursor/send                  body is the value, 204
+```
+
+```
+data: {"area":"users","key":"cursor","user":"u_k7m2","value":{"x":120,"y":48},"by":"u_k7m2","t":1791449600042}
+
+: ping
+```
+
+- Same targets, areas and rights as watch. `r` to listen, `w` to send. Sending to `users/{me}/cursor` and listening to `users/*/cursor` gives one cursor per person that nobody else can fake.
+- `curl -N` works for listening and `curl -X POST` for sending, from any script.
+- One target per request, so a page listening to several patterns holds several connections (a problem only over HTTP/1.1, which allows 6 per origin).
+
+One WebSocket per space, for browsers:
+
+```
+GET /v1/{space}/live?token=vt_...        Upgrade: websocket
+```
+
+A sibling of `/access` and `/join`, not tied to a key. Access is checked when the socket opens, and a space the caller can't read fails exactly like a missing one. Inside, JSON messages:
+
+```
+→ {"op":"listen","id":1,"target":"users/*/cursor"}
+→ {"op":"listen","id":2,"target":"shared/drag.*"}
+→ {"op":"send","target":"users/u_k7m2/cursor","value":{"x":120,"y":48}}
+→ {"op":"unlisten","id":2}
+← {"op":"msg","id":1,"area":"users","key":"cursor","user":"u_p1r8","value":{"x":40,"y":9},"by":"u_p1r8","t":1791449600042}
+← {"op":"error","id":2,"code":"not_allowed"}
+← {"op":"dropped","count":14}
+```
+
+- One connection per page per space, whatever the number of patterns. Per space rather than per server, because rights are per space: a per-server socket would need a space and an access check on every message, and the private-looks-missing rule gets harder to keep.
+- A grant ending while connected closes its subscriptions with an error. The rules are the same as an HTTP request at that moment.
+- `send` over the socket and `POST .../send` reach the same listeners, so a script can drive what browsers see.
+- Delivery: in order per sender, no acknowledgement. A slow receiver's oldest messages are dropped and it's told how many. Senders don't get their own messages back unless they ask.
+- Limits: own message rate per connection (for example 30 per second) and a small size limit (for example 4 KB). Not counted against write limits. Nothing touches disk.
+
+Questions still open:
+
+- **Build both, or one?** SSE plus POST keeps the "nothing but HTTP" promise. The socket gives one warm connection in both directions. Both would feed the same in-memory hub, so building both costs mostly the protocol code.
+- **Watch over the socket too?** `{"op":"watch","target":"shared/board.*","version":N}` answered with the same change entries as HTTP watch. It would deliver changes without a new request each time, and avoid the per-IP read cost of re-polling. HTTP watch stays the basic, always-available way. Writes would stay HTTP only, so `ifVersion`, errors and limits keep one code path.
+- **kv.js shape.** Something like `const live = db.live()`, `live.listen("users/*/cursor", fn)`, `live.send("cursor", value)`, opening the socket lazily and reconnecting with backoff.
+- **CLI.** `cubby listen <space> <target>` printing one line per message, `cubby send <space> <key> <value>`.
