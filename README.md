@@ -333,13 +333,14 @@ internal/apierr/    the API error type and shared errors
 internal/version/   build version, set by build.sh
 web/kv.js           the JS client, served at /kv.js with the word list filled in
 tools/wordlist/     builds internal/names/words.txt from public word lists (not in the binary)
-docs/               design.md (the model), spec.md (the contract), scenarios.md (worked examples)
+docs/               design.md (the model), spec.md (the contract), scenarios.md (worked examples), agents.md (guide for coding agents), plan-access.md (next build)
 ```
 
 Dependencies point one way: `cli` uses `server`, `server` uses `store`, and everything can use `config`, `names` and `apierr`. `store` never imports `server`.
 
 ## Differences from the design docs
 
+- **The access model in the docs isn't built yet.** The docs describe the next version: every space created explicitly with an owner and private by default, `public` to open it up, access tokens redeemed into grants, invite links and a share panel, and `vt_` visitor tokens as the only credential on a request. v0.9.0, which this README describes, still has spaces created by their first write, locked spaces with `sk_` keys and `Space-Key`, `kv_` tokens and `cubby admin rekey`. The work is planned in [docs/plan-access.md](docs/plan-access.md), and this README gets rewritten with it.
 - **Default data directory** follows the OS convention (see [Where data lives](#where-data-lives)) instead of `./data`, so `serve` and `admin` find the same data from any directory.
 - **`visitors.db` is called `server.db`.** Besides visitors, it remembers which spaces each visitor wrote to, and the last counter of deleted spaces so a recreated space never reuses versions.
 - **Admin needs the running server.** It doesn't fall back to opening files directly. That keeps one path for every change.

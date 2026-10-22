@@ -1,22 +1,30 @@
 # cubby client scenarios
 
-Four complete pages, a set of shell scripts and a microcontroller sketch. Each page is a single HTML file with all the client code it needs. The server is assumed to run at `https://kv.example.com`.
+Five complete pages, a set of shell scripts and a microcontroller sketch. Each page is a single HTML file with all the client code it needs. The server is assumed to run at `https://kv.example.com`.
 
-| Scenario | Space | Client | Shows |
+| Scenario | Settings | Client | Shows |
 |---|---|---|---|
-| [1. Shared note](#1-shared-note-raw-http) | open: a group edits one thing | raw `fetch`, plus `curl` | reads without a token, getting a token for writes, conditional writes, delete, watching one key |
-| [2. Lunch poll](#2-lunch-poll-js-client) | locked: the author publishes, visitors respond | JS client | the author's setup, votes in `users/`, reading across visitors, private `me/` |
-| [3. Chat rooms](#3-chat-rooms-js-client) | open: a space per link | JS client | messages in `users/`, names, presence from timestamps, `update` on shared settings |
-| [4. Home server status and deploys](#4-home-server-status-and-deploys-shell) | locked: scripts publish, a page reads | CLI, plus `curl` versions | publishing from cron, reacting to changes with `watch --exec`, resuming after restarts, `update` with `jq` |
-| [5. Room sensor](#5-room-sensor-raw-http-from-a-microcontroller) | locked: a board publishes, a page reads | raw HTTP from C++ and `fetch` | series, adding to several in one request, live values, a 24-hour chart |
+| [1. Shared note](#1-shared-note-raw-http) | `public: all`: a group edits one thing | raw `fetch`, plus `curl` | creating a space, reads without a token, getting a token for writes, conditional writes, delete, watching one key |
+| [2. Lunch poll](#2-lunch-poll-js-client) | `public: respond`: the author writes `shared/`, everyone votes | JS client | settings per area, votes in `users/`, reading across visitors, private `me/`, inviting a co-author |
+| [3. Chat rooms](#3-chat-rooms-js-client) | `public: all`: a space per link | JS client | `createSpace` per room, the creator as owner, messages in `users/`, names, presence, `update` on shared settings |
+| [4. Home server status and deploys](#4-home-server-status-and-deploys-shell) | `public: read`: granted machines write | CLI, plus `curl` versions | access tokens for machines, a fixed identity for CI, publishing from cron, reacting with `watch --exec` |
+| [5. Room sensor](#5-room-sensor-raw-http-from-a-microcontroller) | `public: read`: the board writes | raw HTTP from C++ and `fetch` | a device redeeming once, series, adding to several in one request, live values, a 24-hour chart |
+| [6. Family list](#6-family-list-private-space-invite-links) | private, the default | JS client | `db.open()`, invite links with `db.share()`, the share panel, revoking a person |
 
-[Other situations](#other-situations) at the end sketches more pages and which kind of space and areas each would use.
+[Other situations](#other-situations) at the end sketches more pages and which settings and areas each would use.
 
 ## 1. Shared note (raw HTTP)
 
-One text note everyone can edit, in an open space. If two people edit at once, the second save is refused instead of silently overwriting the first. Edits from others appear live.
+One text note anyone with the page can edit. Spaces are private by default, so this one is created with `public: all` on purpose: anyone who knows its name may read and write. If two people edit at once, the second save is refused instead of silently overwriting the first. Edits from others appear live.
 
-There's no setup step. The space is created by the first save.
+The only setup is creating the space once:
+
+```
+$ curl -s -X POST https://kv.example.com/v1/spaces -d '{"name": "note-hinge-cocoa-orbit-maple", "public": "all"}'
+{"space":"note-hinge-cocoa-orbit-maple","owner":"ot_Zr7c...","id":"u_d4h8k2m6p0r4t8w2","token":"vt_Xm3...","settings":{"public":"all",...}}
+```
+
+Keep `ot_Zr7c...`. It's how you'd get back in to clean up spam or lock the note down later. The `vt_` is the identity this `curl` call created, which you can throw away.
 
 ### The page
 
@@ -66,7 +74,7 @@ async function write(method, url, body) {
 }
 
 async function getToken() {
-  const res = await fetch(`${API}/anon`, { method: "POST" })
+  const res = await fetch(`${API}/anon`, { method: "POST" })   // a visitor token, vt_...
   if (!res.ok) throw new Error(`Could not get a token (${res.status})`)
   token = (await res.json()).token
   localStorage.setItem("note-token", token)
@@ -153,7 +161,7 @@ watch()
 
 ### Things this page has to get right
 
-- **Reading needs no token.** Visitors who only read never call `/anon`. The first save gets the token.
+- **Reading needs no token.** Visitors who only read never call `/anon`. The first save gets one. It's the only credential this page ever sends.
 - **Two different versions.** `noteVersion` is the note's own version and goes into `ifVersion`. `cursor` is the `version` from a watch response and is only a position for the next watch. After a timeout, `cursor` can be far ahead of `noteVersion`, because other keys in the space changed. Using it as `ifVersion` would make every save fail.
 - **No initial GET.** A watch with `version=0` answers at once with the current note, so loading and watching are one loop.
 - **An empty note is a delete.** `PUT` rejects an empty body.
@@ -169,8 +177,8 @@ $ curl -s $N
 {"error":"not_found","message":"No such key"}
 
 $ curl -s -X POST $API/anon
-{"token":"kv_4Jx9cQ2...","id":"u_k7m2x9q4p1r8t3w6"}
-$ T=kv_4Jx9cQ2...
+{"token":"vt_4Jx9cQ2...","id":"u_k7m2x9q4p1r8t3w6"}
+$ T=vt_4Jx9cQ2...
 
 $ curl -s -X PUT -H "Authorization: Bearer $T" --data-binary 'Buy milk' $N
 {"version":1791449600001}
@@ -200,24 +208,40 @@ Use `--data-binary`, not `-d`. `-d` strips newlines from the body.
 
 ## 2. Lunch poll (JS client)
 
-The poll's question and options live in `shared/` of a locked space, so only the author can change them. Each visitor's vote is in their own `users/` area, where nobody else can change it. A visitor's display preference is in private `me/`.
+The poll's question and options live in `shared/`, which only the author writes. Each visitor's vote is in their own `users/` area, where nobody else can change it. A visitor's display preference is in private `me/`.
 
 ### One-time setup by the author
 
 ```
 $ API=https://kv.example.com/v1
-$ T=$(curl -s -X POST $API/anon | jq -r .token)
+$ curl -s -X POST $API/spaces -d '{"label": "lunch-poll", "public": "respond"}'
+{"space":"lunch-poll-orbit-lilac-tango-slate","owner":"ot_Hq3...keep this private","id":"u_k7m2x9q4p1r8t3w6",
+ "token":"vt_Pw8...","settings":{"public":"respond","read":"anyone","write":{"shared":"granted","users":"anyone","me":"anyone"}}}
+$ T=vt_Pw8...
 
-$ curl -s -X POST -H "Authorization: Bearer $T" "$API/spaces?label=lunch-poll&locked"
-{"space":"lunch-poll-orbit-lilac-tango-slate","key":"sk_Hq3...keep this private"}
-
-$ curl -s -X PUT -H "Authorization: Bearer $T" -H "Space-Key: sk_Hq3..." \
+$ curl -s -X PUT -H "Authorization: Bearer $T" \
     --data-binary '{"question":"Lunch today?","options":["pizza","tacos","sushi"]}' \
     $API/lunch-poll-orbit-lilac-tango-slate/shared/poll
 {"version":1791449600001}
 ```
 
-Keep the key somewhere safe. Changing the poll later is the same `PUT`, and open pages update live because they watch the `poll` key.
+`$T` is now an owner of the space, so it can write `shared/`. Keep it to change the poll later, and keep the owner token in case you lose `$T`. Open pages update live because they watch the `poll` key.
+
+To let a colleague edit the poll too, mint an access token for her. Without options it's a full member, redeemable by 10 visitors within 7 days. One use is enough here:
+
+```
+$ curl -s -X POST -H "Authorization: Bearer $T" $API/lunch-poll-orbit-lilac-tango-slate/tokens \
+    -d '{"label": "maria", "uses": 1}'
+{"id":"t_3k9f2m7q","token":"at_Lk2...","label":"maria","allow":["*:rw"],"uses":1,"until":1792054400000,"grantFor":null}
+```
+
+She redeems it once from her own machine, and from then on her CLI identity may write `shared/`:
+
+```
+$ cubby join lunch-poll-orbit-lilac-tango-slate at_Lk2...
+*:rw
+$ cubby set lunch-poll-orbit-lilac-tango-slate/shared/poll '{"question":"Lunch Friday?","options":["pizza","ramen"]}'
+```
 
 ### The page
 
@@ -340,14 +364,15 @@ function render() {
 
 ### Notes
 
-- **Nothing a visitor does can change the poll or anyone else's vote.** The space is locked, so `shared/` needs the key, and `users/` only accepts writes from each area's owner.
+- **Nothing a visitor does can change the poll or anyone else's vote.** `shared/` is writable only by owners and grant holders, and `users/` only accepts writes from each area's own visitor.
+- **Votes need no invite.** `write.users` is `anyone`, so every visitor can vote. An embedded access token in the page would protect nothing, since anyone could read it from the source.
 - **Votes for options that don't exist are ignored.** A visitor can write anything into their own `vote`, so the page shouldn't trust it blindly.
 - **One vote per visitor, not per person.** Clearing site data creates a new visitor who can vote again. Anonymous identities can't prevent that.
 - **This page gets a token on load,** because it needs the visitor's ID to highlight their vote and reads `me/`. A page that only displayed results wouldn't need one.
 
 ## 3. Chat rooms (JS client)
 
-Each room is its own open space. Opening the page without a room creates one and puts its name in the address bar, so the URL is the invite. Messages and names live in each visitor's `users/` area, so only their author can change or delete them. The room's title is shared and safely editable by anyone. "Here now" comes from timestamps visitors refresh while the page is open.
+Each room is its own space, created with `public: all` because the page's idea is "anyone with the link can join". For a room among friends only, leave `public` out and add invite links as in [scenario 6](#6-family-list-private-space-invite-links). Opening the page without a room creates one and puts its name in the address bar, so the URL is the invite. The browser that created the room owns it and can delete anyone's messages. Messages and names live in each visitor's `users/` area, so only their author can change them. The room's title is shared and safely editable by anyone. "Here now" comes from timestamps visitors refresh while the page is open.
 
 ```html
 <!doctype html>
@@ -382,7 +407,7 @@ Each room is its own open space. Opening the page without a room creates one and
 <div id="messages"></div>
 
 <script type="module">
-import { kv, newName } from "https://kv.example.com/kv.js"
+import { kv, createSpace } from "https://kv.example.com/kv.js"
 
 const SHOW = 100
 const HERE_FOR = 30_000      // someone counts as here if seen in the last 30 s
@@ -391,15 +416,17 @@ const $ = selector => document.querySelector(selector)
 const showError = err => { $("#error").textContent = err.message }
 
 // The room is the space name in the URL fragment. No room yet: make one.
+// The creator owns it. The owner token is a recovery key this page doesn't need.
 let room = new URLSearchParams(location.hash.slice(1)).get("room")
 if (!room) {
-  room = newName("room")
+  room = (await createSpace({ label: "room", public: "all" })).space   // anyone with the link
   history.replaceState(null, "", `#room=${room}`)
 }
 $("#link").value = location.href
 
 const db = kv(room)
 const myId = await db.id()
+const isOwner = (await db.open()).owner     // the room's creator may delete any message
 
 const messages = new Map()   // "user/key" -> { user, key, text }
 const names = new Map()      // visitor ID -> display name
@@ -507,9 +534,9 @@ $("#title").addEventListener("click", async () => {
   }
 })
 
-async function remove(key) {
+async function remove(user, key) {
   try {
-    await db.user().delete(key)
+    await db.user(user).delete(key)      // another visitor's message: allowed for the owner only
   } catch (err) {
     showError(err)
   }
@@ -542,10 +569,10 @@ function render() {
     const body = document.createElement("div")
     body.textContent = text
 
-    if (user === myId) {
+    if (user === myId || isOwner) {
       const del = document.createElement("button")
       del.textContent = "delete"
-      del.onclick = () => remove(key)
+      del.onclick = () => remove(user, key)
       meta.append(del)
     }
     div.append(meta, body)
@@ -557,8 +584,9 @@ function render() {
 
 ### Notes
 
-- **The URL is the room.** `#room=room-slate-hinge-cocoa-pilot` is just this page's own convention. The store only sees a space name. Anyone with the link can read and write, since the room is an open space.
-- **Messages belong to their authors.** They live in `users/{id}/msg.*`, so authorship comes from the path and can't be faked. Only the author can delete a message, and the server enforces it.
+- **The URL is the room.** `#room=room-slate-hinge-cocoa-pilot` is just this page's own convention. The store only sees a space name. Anyone with the link can read and write, since the room was created with `public: all`.
+- **Messages belong to their authors.** They live in `users/{id}/msg.*`, so authorship comes from the path and can't be faked. Only the author can change a message. The author and the room's owner can delete it, and the server enforces both.
+- **The creator is the owner, on this browser only.** Opening the room elsewhere makes them an ordinary member. For a room that matters, the page could show the owner token from `createSpace` once, to redeem on another device.
 - **Names are looked up, not copied.** Messages store only text. Renaming yourself updates all your past messages at once.
 - **Presence costs one write every 20 seconds per open page,** and each one wakes everyone's `users/*` watch. Fine for small rooms. Server-side `ttl` is listed under "later" in the spec for when it isn't.
 - **List first, then the rest, then watch from the list's version.** Changes in between arrive through the watch. Seeing a change twice is harmless, because handlers set state instead of appending.
@@ -567,20 +595,46 @@ function render() {
 
 ## 4. Home server status and deploys (shell)
 
-A home server publishes its health every five minutes. A status page anywhere shows it. A CI job, or you from a laptop, can ask the server to deploy a new version, and a script on the server reacts. The space is locked, so only holders of the key, meaning your scripts, can write the shared data. Anyone with the space name can read it.
+A home server publishes its health every five minutes. A status page anywhere shows it. A CI job, or you from a laptop, can ask the server to deploy a new version, and a script on the server reacts. It's created with `public: read`, so anyone with the space name can read, and only visitors with a grant, meaning your machines, can write.
 
 Everything here uses the `cubby` binary as a client. A `curl` version of each script follows, for machines without the binary.
 
 ### One-time setup
 
+From your laptop, which becomes the owner:
+
 ```
 $ export CUBBY_SERVER=https://kv.example.com
-$ cubby new homelab --locked
+$ cubby new homelab --public read
 homelab-maple-quilt-tundra-cobalt
-sk_Zr7cQ2vLm8RtY6pW3nB0kZ7aD5fH1sE9uG2iX4oC6q
+ot_Zr7cQ2vLm8RtY6pW3nB0kZ7aD5fH1sE9uG2iX4oC6q
 ```
 
-The key is saved in `~/.config/cubby/credentials.toml` on this machine. On other machines, such as CI, pass it as `CUBBY_SPACE_KEY`.
+Put the owner token in your password manager. Then invite the home server, which publishes status and runs deploys:
+
+```
+$ cubby token new homelab-maple-quilt-tundra-cobalt --allow 'shared/*:w' --uses 1 --until 1h --label nas
+at_Vb6...
+```
+
+On the home server, redeem it once. Its CLI saves its own visitor token, which now holds the grant:
+
+```
+nas$ export CUBBY_SERVER=https://kv.example.com
+nas$ cubby join homelab-maple-quilt-tundra-cobalt at_Vb6...
+shared/*:w
+```
+
+CI gets an identity that may only request deploys. Redeeming without an identity returns a new visitor token, which becomes a CI secret:
+
+```
+$ cubby token new homelab-maple-quilt-tundra-cobalt --allow 'shared/deploy:w' --uses 1 --until 1h --label ci
+at_Qz7r...
+$ curl -s -X POST -d '{"token": "at_Qz7r..."}' https://kv.example.com/v1/homelab-maple-quilt-tundra-cobalt/join
+{"token":"vt_8Rn2...","id":"u_p1r8t3w6k7m2x9q4","owner":false,"allow":["shared/deploy:w"],"until":null,...}
+```
+
+Store `vt_8Rn2...` as `CUBBY_TOKEN` in CI. Both access tokens are used up, so leaving them in your shell history does no harm. `cubby grant ls homelab-maple-quilt-tundra-cobalt` shows both machines, and `cubby token rm` on either token's ID cuts that machine off.
 
 ### Publishing status from cron
 
@@ -655,10 +709,10 @@ else
 fi
 ```
 
-Asking for a deploy, from CI or a laptop:
+Asking for a deploy, from CI with its own identity, or from your laptop as the owner:
 
 ```
-$ CUBBY_SPACE_KEY=sk_Zr7... cubby set homelab-maple-quilt-tundra-cobalt/shared/deploy v1.4.2
+$ CUBBY_TOKEN=vt_8Rn2... cubby set homelab-maple-quilt-tundra-cobalt/shared/deploy v1.4.2
 1791449600213
 
 $ cubby watch homelab-maple-quilt-tundra-cobalt/shared/deploy-status --from now --raw
@@ -678,10 +732,11 @@ Things to note:
 
 For machines without the binary. These need `curl` and, for watching, `jq`.
 
-Getting a token once and keeping it:
+Redeeming an access token once and keeping the visitor token it returns:
 
 ```sh
-curl -fsS -X POST https://kv.example.com/v1/anon | jq -r .token > ~/.homelab-token
+curl -fsS -X POST -d '{"token": "at_Vb6..."}' \
+  https://kv.example.com/v1/homelab-maple-quilt-tundra-cobalt/join | jq -r .token > ~/.homelab-token
 chmod 600 ~/.homelab-token
 ```
 
@@ -693,12 +748,11 @@ set -eu
 API=https://kv.example.com/v1
 SPACE=homelab-maple-quilt-tundra-cobalt
 TOKEN=$(cat ~/.homelab-token)
-KEY=sk_Zr7...                             # better read from a file than written here
 
 printf '{"disk": %s, "at": %s}' \
   "$(df -P / | awk 'NR == 2 { print $5 }' | tr -d '%')" "$(date +%s)" |
   curl -fsS -X PUT --data-binary @- \
-    -H "Authorization: Bearer $TOKEN" -H "Space-Key: $KEY" \
+    -H "Authorization: Bearer $TOKEN" \
     "$API/$SPACE/shared/status.$(hostname)" > /dev/null
 ```
 
@@ -739,20 +793,22 @@ That's what `cubby watch --state --exec` does, written out. The loop is about 25
 
 ## 5. Room sensor (raw HTTP from a microcontroller)
 
-An ESP32 board reads temperature, humidity and CO2 every minute and sends all three in one request. A page anywhere shows the current values live and a chart of the last 24 hours. The space is locked, so only the board can write readings. Anyone with the space name can read them.
+An ESP32 board reads temperature, humidity and CO2 every minute and sends all three in one request. A page anywhere shows the current values live and a chart of the last 24 hours. The space is `public: read`: anyone with its name can read the readings, and only the board holds a grant to write them.
 
 ### One-time setup
 
 ```
 $ export CUBBY_SERVER=https://kv.example.com
-$ cubby new room --locked
+$ cubby new room --public read
 room-slate-hinge-cocoa-pilot
-sk_Qm4vT8zK1pW6nR3cY0bH5jL9dF2sA7xE4uG1iO8kZ5
-$ curl -s -X POST https://kv.example.com/v1/anon
-{"token":"kv_b8Rt2Wq...","id":"u_d4h8k2m6p0r4t8w2"}
+ot_Qm4vT8zK1pW6nR3cY0bH5jL9dF2sA7xE4uG1iO8kZ5
+$ cubby token new room-slate-hinge-cocoa-pilot --allow 'shared/env.*:w' --uses 1 --until 1h --label board
+at_Hn5...
+$ curl -s -X POST -d '{"token": "at_Hn5..."}' https://kv.example.com/v1/room-slate-hinge-cocoa-pilot/join
+{"token":"vt_b8Rt2Wq...","id":"u_d4h8k2m6p0r4t8w2","owner":false,"allow":["shared/env.*:w"],"until":null,...}
 ```
 
-The board gets its own token, so it's its own visitor. A token stays valid as long as it's used at least once a year, which a board posting every minute does.
+The board gets its own visitor token, with a grant to write `env.*` and nothing else. If the board is lost, `cubby token rm` on the board token's ID revokes it, and its readings stay. A visitor token stays valid as long as it's used at least once a year, which a board posting every minute does.
 
 ### The board
 
@@ -762,8 +818,7 @@ The board gets its own token, so it's its own visitor. A token stays valid as lo
 #include <WiFiClientSecure.h>
 
 const char* URL       = "https://kv.example.com/v1/room-slate-hinge-cocoa-pilot/shared/env.*/series";
-const char* TOKEN     = "kv_b8Rt2Wq...";
-const char* SPACE_KEY = "sk_Qm4vT8zK...";
+const char* TOKEN     = "vt_b8Rt2Wq...";
 
 bool sendReadings(float temp, float rh, int co2) {
   char body[96];
@@ -774,7 +829,6 @@ bool sendReadings(float temp, float rh, int co2) {
   HTTPClient http;
   http.begin(tls, URL);
   http.addHeader("Authorization", String("Bearer ") + TOKEN);
-  http.addHeader("Space-Key", SPACE_KEY);
   int code = http.POST(body);
   http.end();
   return code == 200;
@@ -873,7 +927,7 @@ watchNow()
 ```
 $ S=https://kv.example.com/v1/room-slate-hinge-cocoa-pilot/shared
 
-$ curl -s -X POST -H "Authorization: Bearer $T" -H "Space-Key: $K" \
+$ curl -s -X POST -H "Authorization: Bearer $T" \
     --data-binary '{"temp":21.4,"rh":45,"co2":612}' "$S/env.*/series"
 {"version":1791449600061,"t":1791449600042,"keys":["env.temp","env.rh","env.co2"]}
 
@@ -889,28 +943,150 @@ $ cubby series room-slate-hinge-cocoa-pilot/shared/env.temp --since 1h
 ...
 ```
 
+## 6. Family list (private space, invite links)
+
+A shopping list for one household. Nobody outside it can read it, or even tell that it exists. The person who starts the list invites the others with links and can remove anyone later.
+
+The space uses the default settings, so it's private. The creator owns it, and everyone else gets in by opening an invite link. The sharing UI is the ready-made `<cubby-share>` panel, so the page itself only deals with the list.
+
+### The page
+
+```html
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Family list</title>
+<style>
+  body { font: 16px system-ui, sans-serif; max-width: 30rem; margin: 2rem auto; padding: 0 1rem; }
+  li.done span { text-decoration: line-through; color: #888; }
+  #error { color: #b00020; }
+</style>
+<script type="module" src="https://kv.example.com/share.js"></script>
+
+<h1>Family list <cubby-share id="share" members></cubby-share></h1>
+<form id="add"><input id="text" placeholder="Add an item" required> <button>Add</button></form>
+<ul id="items"></ul>
+<p id="error"></p>
+
+<script type="module">
+import { kv, createSpace } from "https://kv.example.com/kv.js"
+
+const $ = selector => document.querySelector(selector)
+const showError = err => { $("#error").textContent = err.message }
+
+// The list is the space name in the fragment. No list yet: start one. Private is the default.
+let list = new URLSearchParams(location.hash.slice(1)).get("list")
+let ownerToken = null
+if (!list) {
+  ({ space: list, ownerToken } = await createSpace({ label: "family" }))
+  history.replaceState(null, "", `#list=${list}`)
+}
+
+const db = kv(list)
+const me = await db.open()      // redeems #t=... if this was opened from an invite
+
+if (!me.inside) {
+  document.body.textContent = me.inviteFailed
+    ? "This invite has expired or was already used. Ask for a new link."
+    : "This list doesn't exist, or you haven't been invited. Ask for an invite link."
+  throw new Error("not in this list")
+}
+
+// The share panel shows a Share button to owners, and "shared with you" to members.
+// Right after creating the list, it opens once at the recovery key step.
+$("#share").setAttribute("space", list)
+if (ownerToken) $("#share").ownerToken = ownerToken
+
+// ---------- the list ----------
+
+const items = new Map()   // key -> { text, done }
+
+db.shared.watch("item.*", change => {
+  if (change.deleted) items.delete(change.key)
+  else items.set(change.key, change.value)
+}, { onSync: render, onError: showError })
+
+$("#add").addEventListener("submit", async event => {
+  event.preventDefault()
+  const text = $("#text").value.trim()
+  const key = `item.${String(Date.now()).padStart(13, "0")}.${Math.random().toString(36).slice(2, 6)}`
+  try {
+    await db.shared.set(key, { text, done: false })
+    $("#text").value = ""
+  } catch (err) { showError(err) }
+})
+
+function render() {
+  $("#items").replaceChildren(...[...items].sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => {
+    const li = document.createElement("li")
+    li.className = item.done ? "done" : ""
+    const box = document.createElement("input")
+    box.type = "checkbox"
+    box.checked = item.done
+    box.onchange = () => db.shared.update(key, cur => cur && { ...cur, done: box.checked }).catch(showError)
+    const span = document.createElement("span")
+    span.textContent = ` ${item.text} `
+    const del = document.createElement("button")
+    del.textContent = "×"
+    del.onclick = () => db.shared.delete(key).catch(showError)
+    li.append(box, span, del)
+    return li
+  }))
+}
+</script>
+```
+
+### Without the panel
+
+A page with its own UI uses `db.share()` and `qrSvg()` instead. Everything the panel does is a few calls:
+
+```js
+import { qrSvg } from "https://kv.example.com/share.js"
+
+if (me.owner) {
+  const { link } = await db.share({ label: "Grandma", uses: 1 })   // member, one use, 7 days
+  linkInput.value = link                                            // this page's URL with &t=at_... added
+  qrBox.innerHTML = qrSvg(link)
+
+  for (const g of await db.owner.grants.list()) { /* show g.source's label, a Remove button: */ }
+  await db.owner.grants.revokeUser(someone)
+}
+```
+
+### Notes
+
+- **Private needed no code.** `createSpace({ label: "family" })` is private because that's the default. A stranger with the URL gets `no_space`, the same as for a name nobody created.
+- **`db.open()` is the whole entry step.** It redeems the invite in the URL, sending this browser's visitor token if it has one, so someone who already uses the list on this browser keeps one identity. It never throws for "not invited". It returns `inside: false`, and the page says so in plain words that cover both possible causes.
+- **One person, one invite.** The panel's first choice is a one-use link per person. A link forwarded by mistake is worthless once the intended person has opened it, and the member list shows names instead of "group link".
+- **Removing someone is one click** in the panel, `revokeUser` underneath. Their next request gets `no_space`, and their open watch ends on its next answer.
+- **The recovery key is shown once, right after creating.** Clearing the browser loses the owner's identity. Redeeming the owner token with `join`, from any device, makes that device an owner again. The panel can rotate it later.
+- **The token rides on reads as `?token=`,** so every read and watch in this private space works without a CORS preflight.
+
 ## Other situations
 
-Short sketches, without full code, of how other pages would use the two kinds of spaces and the three areas.
+Short sketches, without full code, of how other pages would use settings, grants and the three areas.
 
-| Page | Space | `shared/` | `users/{id}/` | `me/` |
+| Page | `public` and grants | `shared/` | `users/{id}/` | `me/` |
 |---|---|---|---|---|
-| Family shopping list | open | `items`, one list everyone ticks off, written with `update()` | | |
-| Kanban board for a small team | open | `card.{id}` per card, so moving one card doesn't conflict with editing another | `name` | `collapsed` columns |
-| Sign-up sheet for time slots | open | `slots`, the available times | `slot`, the time each person picked, so nobody can remove someone else | |
-| Turn-based game for two | open | `board` and `turn`, written with `ifVersion` so two moves can't both land | `name` | |
-| Status page | locked | `status`, written by a script with the space key | | |
-| Event schedule with RSVPs | locked | `schedule` from the organiser | `rsvp` per visitor | `reminders` |
-| Quiz | locked | `questions`, and `answers` once the author reveals them | `answer.{n}` per question | `progress` |
-| Leaderboard someone could cheat on | either | | `score`, reported by each player, read with `users/*/score` | |
-| Leaderboard that can't be faked | locked | `scores`, written only by a trusted script that checks results | | |
-| Plant watering log | locked | series `moisture` from the sensor, series `watered` with a note per watering | | |
-| Personal habit tracker | open | | | series `weight`, `sleep`, private to the visitor |
+| Kanban board for a small team | `none`, each member invited | `card.{id}` per card, so moving one card doesn't conflict with editing another | `name` | `collapsed` columns |
+| Party playlist | `all` | `queue.{time}` per song anyone adds | `name` | |
+| Sign-up sheet for time slots | `respond`, organiser owns it | `slots`, the available times | `slot`, the time each person picked, so nobody can remove someone else | |
+| Turn-based game between friends | `none`, created per game by `createSpace`, the opponent gets a one-use invite | `board` and `turn`, written with `ifVersion` so two moves can't both land | `name` | |
+| Status page | `read`, the script holds `shared/status:w` | `status` | | |
+| Event schedule with RSVPs | `respond` | `schedule` from the organiser | `rsvp` per visitor | `reminders` |
+| Quiz | `respond` | `questions`, and `answers` once the author reveals them | `answer.{n}` per question | `progress` |
+| Leaderboard someone could cheat on | `respond` | | `score`, reported by each player, read with `users/*/score` | |
+| Leaderboard that can't be faked | `read`, a trusted script holds `shared/scores:w` | `scores`, written only after the script checks results | | |
+| Plant watering log | `none`, the sensor holds `shared/moisture:w`, the household are members | series `moisture` from the sensor, series `watered` with a note per watering | | |
+| Personal habit tracker | `none`, one owner on several devices through the owner token | | | series `weight`, `sleep` |
+| Team dashboard on a wall screen | `none`, editors as members, the screen with a one-use `viewer` invite | `widget.{id}` | | |
 
 Patterns that come up repeatedly:
 
 - **Many people adding things:** a key per item in each visitor's `users/` area, read together with `users/*/`. No conflicts, and authorship comes free.
-- **One object several people edit:** one key in an open `shared/`, always written with `ifVersion` or `update()`.
-- **Many independent items everyone edits:** a key per item in an open `shared/`, like `card.{id}`, so edits to different items never conflict.
-- **Author content plus visitor responses:** a locked space, with the author's content in `shared/` and responses in `users/`.
+- **One object several people edit:** one key in `shared/`, always written with `ifVersion` or `update()`.
+- **Many independent items everyone edits:** a key per item in `shared/`, like `card.{id}`, so edits to different items never conflict.
+- **People who know each other:** the default private space, an invite link per person from `db.share()` or the share panel, `revokeUser` to remove someone.
+- **Author content plus visitor responses:** `public: respond`, the author as owner, responses in `users/`.
+- **Machines that write:** one access token per machine with a narrow scope and `uses: 1`, redeemed once into a visitor token the machine keeps. `public: read` if anyone should see the results.
 - **Readings over time:** a series key per measurement, added to with `POST {key}/series`, or several at once with `{prefix}*/series`. Read the current value like any key, and the past with `{key}/series`.
