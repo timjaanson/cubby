@@ -69,15 +69,22 @@ db.me.set("here", "board-1", { ttl: 30 })   # and on users/, shared
 - The server stores an expiry time with the key. From that moment reads, lists and watches treat the key as missing.
 - A sweep deletes expired keys and leaves the usual delete marker, so watchers get `"deleted": true`, marked `"expired": true`, within about a second. The sweep only visits spaces that have expiring keys.
 - Writing the same bytes again with a `ttl` pushes the expiry forward without a new version, so heartbeats don't wake watchers. This extends the existing rule that an identical `PUT` changes nothing.
-- A write without `ttl` makes the key permanent again.
-- List and watch entries carry `expires` (server ms). A single read gets a `KV-Expires` header.
+- Each write states its own lifetime. A write without `ttl` makes the key permanent, so a key never keeps a ttl someone else set.
+- List and watch entries carry `expires` (server ms). A single read gets a `KV-Expires` header. Because renewals don't wake watchers, `expires` in a watch entry is only accurate as of the key's last change. Pages shouldn't build countdowns on it.
+- An expired key's delete marker keeps the last writer as `by` and says `"expired": true`, so nobody mistakes it for someone deleting it.
 - Bounds: 5 seconds to 30 days, configurable. Not on series keys.
 
 What it's for:
 
 - **Presence.** Each visitor keeps `users/{id}/here` alive with a heartbeat every 15 to 20 s. Watching `users/*/here` is a live roster, and someone leaving (tab closed, phone asleep, signal lost) arrives as a delete. Today that needs timestamps, client-side filtering and timers, and leaving produces no event at all.
 - **Edit indicators.** `users/{id}/editing = note.42` with a short ttl lets others see who's typing where, so pages can avoid collisions instead of resolving them.
-- **Leases.** `PUT shared/lock.x?ifVersion=0&ttl=20`: the first writer gets it, everyone else gets 412, and a holder that dies releases it on its own. Works for scripts too, such as one of several machines running a job.
+- **Locks (leases) between several actors.** Pages, parallel scripts, several machines running the same job. Expiry is on the server's clock, so the actors' clocks don't matter.
+  - Take: `PUT shared/lock.backup?ifVersion=0&ttl=60` with the holder's own ID as the value. The first writer gets it, everyone else gets 412 and knows who holds it.
+  - Keep: write the same value with `ttl=60` and `ifVersion` set to the version it got. Same bytes, so no new version and no watcher wakes. A 412 means the lease was lost (it expired and someone else took it) and the holder must stop.
+  - Release: `DELETE ...?ifVersion=v`, so a holder can only release its own lease.
+  - A holder that dies or loses its connection releases it on its own when the ttl runs out. Waiting actors watch the key and try again when it's deleted.
+  - A holder that stalls longer than the ttl (a sleeping laptop) can come back thinking it still holds the lock. The failed renewal tells it otherwise. Work that must never overlap should check the renewal before each step.
+  - CLI helper, like `flock`: `cubby lock <space> <key> --ttl 60s -- ./backup.sh` takes the lease, renews it while the command runs, releases it after, and exits with code 2 if someone else holds it. kv.js could get the same as `db.shared.lock(key, { ttl })` returning a release function.
 - **Device online status.** A board refreshes `status` with ttl 180 every minute. When it stops, pages see it go offline.
 - **Short-lived content.** Typing indicators, doorbell-style signals, an announcement for tonight.
 
@@ -122,25 +129,30 @@ Written down so they aren't lost. Each needs a decision first.
 - **Atomic multi-key writes in one space.** One request, one version, all or nothing, counts as one write, and a watch never splits that version across responses. Plain set and delete with optional per-key `ifVersion`, nothing query-like. Cheap with one SQLite file per space, and stops other clients seeing half-created items. Conflicts with the "transactions over several keys" non-goal in design.md, which would have to be revised.
 - **kv.js versioned mirror.** `db.shared.mirror("board.*")`: a Map kept in sync from a watch, tracking per-key versions including deletes, that ignores write acknowledgements older than what the watch already delivered. Fieldnotes hit that race (a late acknowledgement brought back a deleted note). Optional sugar over watch, raw HTTP unchanged.
 
+## Rules for all of the above
+
+So that nothing changes stored data in a way that's hard to see coming:
+
+- Stored data changes only because someone wrote or deleted it. The one exception is `ttl` expiry, and that is always visible: the key carried `expires`, and the delete marker says `"expired": true` and names the writer.
+- A write means the same over HTTP and over a live connection. Same handlers, same limits, same errors.
+- Conditions (`ifVersion`, `ifBefore`) only ever refuse a write. They never change what a write does.
+- Clients never retry a write on their own. kv.js reports a retryable error and the page decides. Resuming a watch from its last version is fine, since it only reads.
+- Anything not stored never touches stored data, and stored data never arrives through a channel meant for unstored messages.
+
 ## Open: a live connection per space
 
 Not decided. Direction as of 2026-10-22, so the thinking isn't redone.
 
 **Two ways to talk to a space, nothing in between.**
 
-- **Plain HTTP**, as today. One request per read or write, long-poll watch per key or pattern. Works from `curl`, scripts, devices and any page. Stays the basic way and never loses features it has now.
-- **One WebSocket per space** for pages that need tight live interaction. Everything a page does with the space's data goes over that one connection: reads, writes, watches, plus live events that HTTP doesn't have.
+- **Plain HTTP**, as today. One request per read or write, long-poll watch per key or pattern. Works from `curl`, scripts, devices and any page. Stays the basic way and keeps every feature it has.
+- **One WebSocket per space** for pages that need tight live interaction. Reads, writes and watches over one connection. Watched changes are pushed with no new request per change, so watching costs no per-IP reads, and the connection stays warm in both directions, which matters most on mobile networks and far from the server.
 
 No SSE. With a socket available it would be a third way that adds nothing.
 
 Both are the same store. A write over HTTP wakes watchers on sockets and the other way round, versions are shared, and a script using `curl` and a browser on a socket see each other's changes as they happen.
 
-**Two kinds of data on the socket.**
-
-- **State**: keys, stored and versioned, exactly as over HTTP. Watching works the same way (current state since a version, merged, caught up after a gap) but changes are pushed with no new request per change, so watching costs no per-IP reads.
-- **Events** (`send`, `listen`): not stored, no version, no replay. Every message is delivered to whoever is listening at that moment. For cursors, drag previews, live drawing, game positions, a slider driving a lamp. Same keys, patterns and rights as state: `r` to listen, `w` to send. Sending to `users/{me}/cursor` and listening to `users/*/cursor` gives one cursor per person that nobody else can fake.
-
-**Why this transport.** Any relay costs about one round trip from sender to receiver, so a socket doesn't lower the typical delay of a single change much below a tuned long-poll (informal measurement: 42 ms round trip, about 100 ms write-to-watch, half of it the pause item 1 removes). It wins on rate and on the slow outliers: one connection that stays warm in both directions, auth once, no request per message, messages in order, and no disk write or write budget for events. That matters most on mobile networks, which drop idle connections, and far from the server.
+**State first.** The first version carries stored data only. Unstored messages come later, if an app needs them (see below).
 
 ### Signature sketch
 
@@ -154,28 +166,22 @@ A sibling of `/access` and `/join`. Access is checked when the socket opens, and
 → {"id":1,"op":"get","target":"shared/note.42"}
 → {"id":2,"op":"set","target":"shared/note.42","value":"Buy milk","ifVersion":17}
 → {"id":3,"op":"watch","target":"shared/board.*","version":0}
-→ {"id":4,"op":"listen","target":"users/*/cursor"}
-→ {"op":"send","target":"users/u_k7m2/cursor","value":{"x":120,"y":48}}
 → {"op":"stop","id":3}
 
 ← {"id":1,"ok":{"value":"Milk","version":17,"by":"u_p1r8"}}
 ← {"id":2,"error":{"status":412,"code":"version_conflict","message":"...","current":18}}
 ← {"id":3,"ok":{"changes":[...],"version":1791449600061}}          pushed again on every change
-← {"id":4,"ok":{"area":"users","key":"cursor","user":"u_p1r8","value":{"x":40,"y":9},"t":...}}
-← {"id":4,"dropped":14}
 ```
 
 - Replies and pushes use the same JSON bodies and error codes as the HTTP routes. Internally a socket message goes through the same handlers, so rules, limits and errors can't drift apart. Writes count against the same write limits as HTTP.
-- Covers data in the space: get, set, delete, list, watch, series, plus listen and send. Creating spaces, joining and managing access stay HTTP only. They happen before or beside live use and aren't time-sensitive.
-- `send` has no `id` and gets no reply. Messages from one sender arrive in order. A slow receiver's oldest events are dropped and it's told how many. A slow watcher drops nothing: it falls behind and catches up to current state, as long-poll does.
-- A grant ending while connected ends that subscription with an error. Each message is checked against access at that moment, as an HTTP request would be.
-- Limits: a message rate per connection and a small event size (for example 30 per second and 4 KB). Open sockets count with open watches per IP.
-- One socket per page per space, however many targets it follows. Per space rather than per server because rights are per space.
-- HTTP clients can also send events with `POST /v1/{space}/{area}/{key}/send` (body is the value, 204), so a script can drive what browsers see. Listening needs the socket. Open: whether this route is worth having.
+- Covers data in the space: get, set, delete, list, watch and series. Creating spaces, joining and managing access stay HTTP only. They happen before or beside live use and aren't time-sensitive.
+- A slow watcher drops nothing: it falls behind and catches up to current state, as long-poll does.
+- A grant ending while connected ends that watch with an error. Each message is checked against access at that moment, as an HTTP request would be.
+- Open sockets count with open watches per IP. One socket per page per space, however many targets it follows. Per space rather than per server because rights are per space.
 
 ### kv.js
 
-The point is that switching to live changes one option, not the code:
+Switching to live changes one option, not the code:
 
 ```js
 const db = kv(SPACE, { live: true })      // same API, over one socket
@@ -183,27 +189,33 @@ const me = await db.open()
 
 db.shared.watch("board.*", onChange, { onSync })      // as today, now pushed
 await db.shared.set("note.42", text, { ifVersion })   // as today, over the socket
-
-db.users.listen("cursor", e => drawCursor(e.user, e.value))   // events: live only
-db.me.send("cursor", { x, y })                                 // goes to users/{me}/cursor
 db.live.status   // "connecting" | "open" | "offline"
 ```
 
-- The socket opens on first use and reconnects with backoff. Watches resume from their last version, so nothing is lost across a reconnect. Events sent while disconnected are dropped, not queued.
-- A request in flight when the socket drops fails with a retryable `KvError`. Retrying a plain `set` is safe (same bytes make no new version). With `ifVersion` the retry reports a conflict if the first attempt did land, which the caller already has to handle.
-- If the socket can't connect at all (a proxy that blocks it), state falls back to HTTP and `listen`/`send` report that live events aren't available.
-- Frontend state stays the page's own. Possible later helpers if a pattern repeats: throttling a sender to the event rate, interpolating positions between events.
+- The socket opens on first use and reconnects with backoff. Watches resume from their last version, so nothing is lost across a reconnect.
+- A request in flight when the socket drops fails with a retryable `KvError`. kv.js doesn't resend it (see the rules above).
+- If the socket can't connect at all (a proxy that blocks it), kv.js falls back to HTTP.
+- Frontend state stays the page's own.
 
 ### Cost
 
-- Server: a WebSocket library (the Go standard library has none; `github.com/coder/websocket` is small and has no dependencies), a connection loop, routing envelopes into existing handlers (handlers need to accept a request that didn't come from `net/http`), a subscription set per connection, an in-memory event hub per space, keepalive pings. The watch loop already exists. Estimate a few hundred lines plus tests.
-- kv.js: the socket, request ids, reconnect and resubscribe, fallback. Roughly 250 to 350 lines, and the existing area API on top stays.
-- CLI: not needed at first. HTTP covers scripts. `cubby listen` could come later.
+- Server: a WebSocket library (the Go standard library has none; `github.com/coder/websocket` is small and has no dependencies), a connection loop, routing envelopes into existing handlers (handlers need to accept a request that didn't come from `net/http`), a set of watches per connection, keepalive pings. The watch loop already exists. A few hundred lines plus tests.
+- kv.js: the socket, request ids, reconnect and resubscribe, fallback. Roughly 250 lines, and the existing area API on top stays.
+- CLI: nothing at first. HTTP covers scripts.
 - Proxies need WebSocket upgrade headers. Documented in the deploy notes.
+
+### Later: messages that aren't stored
+
+Working names were `send` and `listen`; better names wanted. Messages that live only in the server's memory and go to whoever is connected at that moment. Nothing is stored, nothing is versioned, nothing is replayed, and nobody would miss one that got lost. Same keys, patterns and rights as stored data (`r` to receive, `w` to send), so sending to `users/{me}/cursor` and receiving `users/*/cursor` gives one cursor per person that nobody else can fake.
+
+Stored data with a socket watch already covers presence (with `ttl`), typing indicators, board edits, quiz rounds and device states. Unstored messages are only for the three cases it can't handle:
+
+1. **High rates.** A cursor or a dragged card moves 10 to 30 times a second. Every stored write hits disk, makes a version and counts against 120 writes a minute.
+2. **Every message matters.** Watch merges quick changes into the latest state, so the points of a freehand stroke or a burst of game inputs get lost.
+3. **Repeats.** Writing identical bytes wakes nobody, so a doorbell or reaction pressed twice registers once.
+
+Build it when an app needs one of these. Notes for then: a message rate per connection and a small size limit (for example 30 per second, 4 KB), dropping a slow receiver's oldest messages and telling it how many, whether a sender gets its own messages back, and whether HTTP clients can send them with a plain `POST`.
 
 ### Still open
 
-- Whether `POST .../send` exists for HTTP clients.
-- Whether events ever need delivery to the sender's other tabs (same visitor) and how a sender opts in to getting its own events back.
-- Event rate and size defaults.
-- Whether the socket should carry a clock sync too (item 5), since it already has a warm connection with known round trips.
+- Whether the socket should also do clock sync (item 5), since it's already a warm connection with known round-trip times.
