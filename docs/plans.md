@@ -122,72 +122,88 @@ Written down so they aren't lost. Each needs a decision first.
 - **Atomic multi-key writes in one space.** One request, one version, all or nothing, counts as one write, and a watch never splits that version across responses. Plain set and delete with optional per-key `ifVersion`, nothing query-like. Cheap with one SQLite file per space, and stops other clients seeing half-created items. Conflicts with the "transactions over several keys" non-goal in design.md, which would have to be revised.
 - **kv.js versioned mirror.** `db.shared.mirror("board.*")`: a Map kept in sync from a watch, tracking per-key versions including deletes, that ignores write acknowledgements older than what the watch already delivered. Fieldnotes hit that race (a late acknowledgement brought back a deleted note). Optional sugar over watch, raw HTTP unchanged.
 
-## Open: a live channel next to watch ("listen")
+## Open: a live connection per space
 
-Not decided. Notes so the thinking isn't redone.
+Not decided. Direction as of 2026-10-22, so the thinking isn't redone.
 
-**What it would be.** Watch is state: stored, versioned, merged to the latest value, caught up after a gap. A live channel would be events: not stored, no version, no replay, every message delivered while connected, best effort. Same keys and patterns, same access rights (`r` to listen, `w` to send), its own message-rate and size limits, memory only. One key could have watchers and listeners at once. Uses: cursors, drag previews, live drawing, game positions, a slider driving a lamp, reactions.
+**Two ways to talk to a space, nothing in between.**
 
-**Why not just a faster watch.** Any relay through a server costs roughly one round trip from sender to receiver, whatever the transport. One informal measurement (2026-10-22, a single client, keep-alive): 42 ms round trip, write-to-watch about 100 ms, half of it the fixed pause item 1 removes. A stream can't beat a tuned watch by much for a single change. What it adds is rate: every event delivered, no new request per event, no disk write, no per-visitor write budget spent at 30 Hz.
+- **Plain HTTP**, as today. One request per read or write, long-poll watch per key or pattern. Works from `curl`, scripts, devices and any page. Stays the basic way and never loses features it has now.
+- **One WebSocket per space** for pages that need tight live interaction. Everything a page does with the space's data goes over that one connection: reads, writes, watches, plus live events that HTTP doesn't have.
 
-**Transport, SSE plus POST or WebSocket.**
+No SSE. With a socket available it would be a third way that adds nothing.
 
-- Receiving costs the same with either: the server pushes on an open connection.
-- SSE plus POST works with `curl -N`, needs no new dependency in Go, and reconnects on its own in the browser. The design's reasons for rejecting SSE for watch mostly don't apply: tokens already go as `?token=` on reads, and there's nothing to replay. Proxy buffering still has to be switched off.
-- WebSocket gives one connection for both directions. That matters for sending: no HTTP request per message, auth once per connection, messages stay in order, and the sending side can't go cold separately from the receiving side. Over HTTP/1.1, SSE and the POSTs use different connections, and an idle POST connection that a mobile network or NAT has dropped costs a fresh TCP and TLS setup, several round trips, on the next send. Over HTTP/2 both share one connection and most of that difference goes away, but a self-hosted server can't count on HTTP/2 everywhere.
-- On mobile or far from the server, both have the same floor of about one round trip. WebSocket's gain is mostly in the slow outliers and in server cost per message, less in the typical delay.
-- Costs of WebSocket: a Go dependency (the standard library has none), shell use needs `websocat` or the CLI, its own reconnect logic in kv.js, proxy upgrade config.
+Both are the same store. A write over HTTP wakes watchers on sockets and the other way round, versions are shared, and a script using `curl` and a browser on a socket see each other's changes as they happen.
 
-**Same room.** For people on the same network, browsers can connect directly with WebRTC data channels (few ms instead of a round trip to the server, and late packets can be dropped instead of waited for). Cubby would only carry the handshake, which ttl keys already cover. No server change, possibly a small optional module.
+**Two kinds of data on the socket.**
 
-**Below about 20 ms** (music together, rhythm games): out of reach for anything relayed through a server over the internet.
+- **State**: keys, stored and versioned, exactly as over HTTP. Watching works the same way (current state since a version, merged, caught up after a gap) but changes are pushed with no new request per change, so watching costs no per-IP reads.
+- **Events** (`send`, `listen`): not stored, no version, no replay. Every message is delivered to whoever is listening at that moment. For cursors, drag previews, live drawing, game positions, a slider driving a lamp. Same keys, patterns and rights as state: `r` to listen, `w` to send. Sending to `users/{me}/cursor` and listening to `users/*/cursor` gives one cursor per person that nobody else can fake.
 
-### Signature sketch (2026-10-22, not decided)
+**Why this transport.** Any relay costs about one round trip from sender to receiver, so a socket doesn't lower the typical delay of a single change much below a tuned long-poll (informal measurement: 42 ms round trip, about 100 ms write-to-watch, half of it the pause item 1 removes). It wins on rate and on the slow outliers: one connection that stays warm in both directions, auth once, no request per message, messages in order, and no disk write or write budget for events. That matters most on mobile networks, which drop idle connections, and far from the server.
 
-Plain HTTP, in the existing URL grammar. `listen` and `send` become action words next to `watch` and `series`, and are reserved as key names the same way.
-
-```
-GET  /v1/{space}/shared/cursor.*/listen?token=vt_...     text/event-stream, held open
-POST /v1/{space}/users/{id}/cursor/send                  body is the value, 204
-```
-
-```
-data: {"area":"users","key":"cursor","user":"u_k7m2","value":{"x":120,"y":48},"by":"u_k7m2","t":1791449600042}
-
-: ping
-```
-
-- Same targets, areas and rights as watch. `r` to listen, `w` to send. Sending to `users/{me}/cursor` and listening to `users/*/cursor` gives one cursor per person that nobody else can fake.
-- `curl -N` works for listening and `curl -X POST` for sending, from any script.
-- One target per request, so a page listening to several patterns holds several connections (a problem only over HTTP/1.1, which allows 6 per origin).
-
-One WebSocket per space, for browsers:
+### Signature sketch
 
 ```
 GET /v1/{space}/live?token=vt_...        Upgrade: websocket
 ```
 
-A sibling of `/access` and `/join`, not tied to a key. Access is checked when the socket opens, and a space the caller can't read fails exactly like a missing one. Inside, JSON messages:
+A sibling of `/access` and `/join`. Access is checked when the socket opens, and a space the caller can't read fails exactly like a missing one. Messages are JSON. A request is an HTTP route in an envelope: `op` is the method, `target` is the area and key, the rest are the route's query parameters.
 
 ```
-→ {"op":"listen","id":1,"target":"users/*/cursor"}
-→ {"op":"listen","id":2,"target":"shared/drag.*"}
+→ {"id":1,"op":"get","target":"shared/note.42"}
+→ {"id":2,"op":"set","target":"shared/note.42","value":"Buy milk","ifVersion":17}
+→ {"id":3,"op":"watch","target":"shared/board.*","version":0}
+→ {"id":4,"op":"listen","target":"users/*/cursor"}
 → {"op":"send","target":"users/u_k7m2/cursor","value":{"x":120,"y":48}}
-→ {"op":"unlisten","id":2}
-← {"op":"msg","id":1,"area":"users","key":"cursor","user":"u_p1r8","value":{"x":40,"y":9},"by":"u_p1r8","t":1791449600042}
-← {"op":"error","id":2,"code":"not_allowed"}
-← {"op":"dropped","count":14}
+→ {"op":"stop","id":3}
+
+← {"id":1,"ok":{"value":"Milk","version":17,"by":"u_p1r8"}}
+← {"id":2,"error":{"status":412,"code":"version_conflict","message":"...","current":18}}
+← {"id":3,"ok":{"changes":[...],"version":1791449600061}}          pushed again on every change
+← {"id":4,"ok":{"area":"users","key":"cursor","user":"u_p1r8","value":{"x":40,"y":9},"t":...}}
+← {"id":4,"dropped":14}
 ```
 
-- One connection per page per space, whatever the number of patterns. Per space rather than per server, because rights are per space: a per-server socket would need a space and an access check on every message, and the private-looks-missing rule gets harder to keep.
-- A grant ending while connected closes its subscriptions with an error. The rules are the same as an HTTP request at that moment.
-- `send` over the socket and `POST .../send` reach the same listeners, so a script can drive what browsers see.
-- Delivery: in order per sender, no acknowledgement. A slow receiver's oldest messages are dropped and it's told how many. Senders don't get their own messages back unless they ask.
-- Limits: own message rate per connection (for example 30 per second) and a small size limit (for example 4 KB). Not counted against write limits. Nothing touches disk.
+- Replies and pushes use the same JSON bodies and error codes as the HTTP routes. Internally a socket message goes through the same handlers, so rules, limits and errors can't drift apart. Writes count against the same write limits as HTTP.
+- Covers data in the space: get, set, delete, list, watch, series, plus listen and send. Creating spaces, joining and managing access stay HTTP only. They happen before or beside live use and aren't time-sensitive.
+- `send` has no `id` and gets no reply. Messages from one sender arrive in order. A slow receiver's oldest events are dropped and it's told how many. A slow watcher drops nothing: it falls behind and catches up to current state, as long-poll does.
+- A grant ending while connected ends that subscription with an error. Each message is checked against access at that moment, as an HTTP request would be.
+- Limits: a message rate per connection and a small event size (for example 30 per second and 4 KB). Open sockets count with open watches per IP.
+- One socket per page per space, however many targets it follows. Per space rather than per server because rights are per space.
+- HTTP clients can also send events with `POST /v1/{space}/{area}/{key}/send` (body is the value, 204), so a script can drive what browsers see. Listening needs the socket. Open: whether this route is worth having.
 
-Questions still open:
+### kv.js
 
-- **Build both, or one?** SSE plus POST keeps the "nothing but HTTP" promise. The socket gives one warm connection in both directions. Both would feed the same in-memory hub, so building both costs mostly the protocol code.
-- **Watch over the socket too?** `{"op":"watch","target":"shared/board.*","version":N}` answered with the same change entries as HTTP watch. It would deliver changes without a new request each time, and avoid the per-IP read cost of re-polling. HTTP watch stays the basic, always-available way. Writes would stay HTTP only, so `ifVersion`, errors and limits keep one code path.
-- **kv.js shape.** Something like `const live = db.live()`, `live.listen("users/*/cursor", fn)`, `live.send("cursor", value)`, opening the socket lazily and reconnecting with backoff.
-- **CLI.** `cubby listen <space> <target>` printing one line per message, `cubby send <space> <key> <value>`.
+The point is that switching to live changes one option, not the code:
+
+```js
+const db = kv(SPACE, { live: true })      // same API, over one socket
+const me = await db.open()
+
+db.shared.watch("board.*", onChange, { onSync })      // as today, now pushed
+await db.shared.set("note.42", text, { ifVersion })   // as today, over the socket
+
+db.users.listen("cursor", e => drawCursor(e.user, e.value))   // events: live only
+db.me.send("cursor", { x, y })                                 // goes to users/{me}/cursor
+db.live.status   // "connecting" | "open" | "offline"
+```
+
+- The socket opens on first use and reconnects with backoff. Watches resume from their last version, so nothing is lost across a reconnect. Events sent while disconnected are dropped, not queued.
+- A request in flight when the socket drops fails with a retryable `KvError`. Retrying a plain `set` is safe (same bytes make no new version). With `ifVersion` the retry reports a conflict if the first attempt did land, which the caller already has to handle.
+- If the socket can't connect at all (a proxy that blocks it), state falls back to HTTP and `listen`/`send` report that live events aren't available.
+- Frontend state stays the page's own. Possible later helpers if a pattern repeats: throttling a sender to the event rate, interpolating positions between events.
+
+### Cost
+
+- Server: a WebSocket library (the Go standard library has none; `github.com/coder/websocket` is small and has no dependencies), a connection loop, routing envelopes into existing handlers (handlers need to accept a request that didn't come from `net/http`), a subscription set per connection, an in-memory event hub per space, keepalive pings. The watch loop already exists. Estimate a few hundred lines plus tests.
+- kv.js: the socket, request ids, reconnect and resubscribe, fallback. Roughly 250 to 350 lines, and the existing area API on top stays.
+- CLI: not needed at first. HTTP covers scripts. `cubby listen` could come later.
+- Proxies need WebSocket upgrade headers. Documented in the deploy notes.
+
+### Still open
+
+- Whether `POST .../send` exists for HTTP clients.
+- Whether events ever need delivery to the sender's other tabs (same visitor) and how a sender opts in to getting its own events back.
+- Event rate and size defaults.
+- Whether the socket should carry a clock sync too (item 5), since it already has a warm connection with known round trips.
