@@ -383,7 +383,7 @@ web/kv.js           the JS client, served at /kv.js with the word list filled in
 web/share.js        the share panel and QR encoder, served at /share.js
 tools/wordlist/     builds internal/names/words.txt from public word lists (not in the binary)
 tools/jstest/       kv.js and QR checks against a local server: ./tools/jstest/run.sh (needs Node)
-docs/               design.md (the model), spec.md (the contract), scenarios.md (worked examples), agents.md (guide for coding agents)
+docs/               design.md (the model), spec.md (the contract), scenarios.md (worked examples), agents.md (guide for coding agents), plans.md (agreed next changes)
 ```
 
 Dependencies point one way: `cli` uses `server`, `server` uses `store`, and everything can use `access`, `config`, `names` and `apierr`. `store` never imports `server`.
@@ -397,4 +397,4 @@ Dependencies point one way: `cli` uses `server`, `server` uses `store`, and ever
 - **Visitor cleanup turns their `users/` keys into tombstones**, so watchers see them go, instead of deleting rows silently.
 - **List, watch and series responses compact JSON values**, so `{"a": 1}` comes back as `{"a":1}`. A plain `GET` returns the bytes exactly as written.
 - **Space size counts the newest point twice** for a series: once as the key's value and once as a point. It's a few bytes per series and keeps the accounting simple.
-- Not built yet: proof of work on `/v1/anon`, and everything else under "Later" in the spec, including reading several series at once and `?format=text`.
+- Not built yet: everything in [docs/plans.md](docs/plans.md), proof of work on `/v1/anon`, and everything else under "Later" in the spec, including reading several series at once and `?format=text`.

@@ -1785,7 +1785,7 @@ Everything held in memory has a bound, and nothing in it has to survive a restar
 
 ## 19. Later
 
-Ideas from the design discussion that were left out to keep the first version small. Each is an addition, and none changes the API above.
+Ideas from the design discussion that were left out to keep the first version small. Each is an addition, and none changes the API above. Items that are agreed and planned, with their design, are in [plans.md](plans.md).
 
 ### Abuse protection
 
@@ -1795,7 +1795,7 @@ Ideas from the design discussion that were left out to keep the first version sm
 
 ### Key options
 
-- **`ttl`**: a key that deletes itself after N seconds, for presence and typing indicators without client-side filtering.
+- **`ttl`**: a key that deletes itself after N seconds, for presence and typing indicators without client-side filtering. Planned, see [plans.md](plans.md#4-keys-that-expire-ttl).
 - **`lock=owner`** on shared keys: only the creator of a key may change it. Mostly covered by `users/`.
 - **An `add` right** in scopes, for create-only writes. Considered with grants and not needed: `users/{id}/` already gives "add your own, nobody else can touch it", and owners can delete anything. The one real gap is "anyone adds, only the owner reads", which is the `inbox` area below.
 
@@ -1886,4 +1886,4 @@ Who it's for: machines where the binary can't run but `curl` or `wget` can, such
 - Append with a server-chosen key, so clients don't build `msg.{time}.{random}` themselves.
 - Watching several targets in one request.
 - Batch reads of several specific keys.
-- The JS client aborting a waiting watch on the window's `offline` event, so a watch-only page shows offline at once instead of after up to 35 seconds.
+- The JS client aborting a waiting watch on the window's `offline` event, so a watch-only page shows offline at once instead of after up to 35 seconds. Planned, see [plans.md](plans.md#6-client-helper-fixes-from-fieldnotes).
