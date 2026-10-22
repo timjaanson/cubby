@@ -1,6 +1,8 @@
 # cubby
 
-A key-value store you run yourself, in one binary. Pages, scripts and anything else that can make an HTTP request use it to read and write small values. There's no setup per use and no login.
+A key-value store you run yourself, in one binary. Pages, scripts and anything else that can make an HTTP request use it to read and write small values. One request creates a space, and nobody has to sign up or log in.
+
+Spaces are private by default: only their owner and people they invite get in. Opening one up is one word, `public`.
 
 The same binary is the server and a command-line client.
 
@@ -20,6 +22,10 @@ cubby serve --listen 127.0.0.1:9000          # this machine only
 Try it from another terminal:
 
 ```sh
+$ cubby new notes
+notes-cedar-pilot-mango-frost
+ot_8Hq3vT...                      # the owner token: your recovery key, shown once
+
 $ cubby set notes-cedar-pilot-mango-frost/shared/hello "Hello there"
 1792005858928
 
@@ -27,10 +33,13 @@ $ cubby get notes-cedar-pilot-mango-frost/shared/hello
 Hello there
 
 $ curl http://localhost:28229/v1/notes-cedar-pilot-mango-frost/shared/hello
+{"error":"no_space","message":"No such space, or it's private and this visitor hasn't joined it. ..."}
+
+$ curl "http://localhost:28229/v1/notes-cedar-pilot-mango-frost/shared/hello?token=$(cubby whoami --show-token)"
 Hello there
 ```
 
-`notes-cedar-pilot-mango-frost` is a space: an optional readable label plus four random words. Make one up with `cubby name notes`. Writing to a space creates it. Any name of 16 to 63 lowercase letters, digits and hyphens works, but a hand-picked one is as easy to guess as it looks.
+`notes-cedar-pilot-mango-frost` is a space: an optional readable label plus four random words. `cubby new` created it and made you its owner. It's private, so `curl` without your visitor token can't see it. `cubby new notes --public read` would have let anyone read it.
 
 ## Install
 
@@ -51,18 +60,29 @@ On a Mac, a binary downloaded through a browser is quarantined. Clear that once 
 ## How data is organised
 
 ```
-space                 notes-cedar-pilot-mango-frost
-├── shared/{key}      everyone reads; any visitor writes (or only the key holder, in a locked space)
-├── users/{id}/{key}  everyone reads; only that visitor writes
-└── me/{key}          only that visitor reads and writes
+space                 notes-cedar-pilot-mango-frost    owners, settings, invites
+├── shared/{key}      the space's common data
+├── users/{id}/{key}  each visitor's public part; only that visitor writes it
+└── me/{key}          each visitor's private data
 ```
 
-- A visitor is an anonymous identity. `POST /v1/anon` gives a token. The CLI and the JS client get one by themselves when they need it.
+- A visitor is an anonymous identity with a visitor token (`vt_...`), the only credential a request ever carries. The CLI and the JS client get one by themselves when they need it.
+- A space has an owner and two settings. `public` picks them in one word:
+
+| `public` | Who reads | Who writes |
+|---|---|---|
+| `none`, the default | owners and invited people | owners and invited people |
+| `read` | anyone with the name | owners and invited people |
+| `respond` | anyone with the name | invited people in `shared/`; everyone their own `users/` and `me/` |
+| `all` | anyone with the name | anyone with the name |
+
+- Owners invite people with access tokens (`at_...`), usually sent as a link with `#t=at_...`. Redeeming one with `join` gives that visitor a grant. By default an invite makes a full member, works for 10 people and expires after 7 days. The owner token (`ot_...`) is the owner's recovery key.
+- A private space looks exactly like a missing one to anyone without a grant: 404 `no_space`.
 - A key is up to 128 of `A-Z a-z 0-9 . _ : -`, and can't be `.`, `..`, `watch` or `series`. Group with dots (`msg.1791449600123`), because listing and watching select by prefix (`msg.*`).
 - A value is UTF-8 text up to 64 KB. Valid JSON comes back as `application/json`, anything else as `text/plain`, always byte for byte as written.
 - A series key keeps every value added to it, each with a time, for sensor readings and the like. Its value is the newest point. See [Series](#series).
 - Every write gets a version number. Pass it back with `ifVersion` to write only if nobody changed the key meanwhile.
-- Data isn't secret. Anyone who knows a space name can read its `shared/` and `users/` data.
+- Private means invited people only. The server's operator can still read everything, so it's not a password vault.
 
 ## CLI
 
@@ -77,10 +97,23 @@ cubby ls    'poll-orbit-lilac-tango-slate/users/*/vote'                 # user<T
 cubby set   poll-orbit-lilac-tango-slate/users/me/vote tacos            # users/me is your own ID
 cubby watch notes-cedar-pilot-mango-frost/shared/hello                  # current value, then each change
 cubby update homelab-maple-quilt-tundra-cobalt/shared/count --exec 'jq "(. // 0) + 1"'
-cubby new status --locked                               # status-<four words>, prints the name and a space key
-cubby new status-cedar-pilot-mango-frost                # exactly this name; fails if it's taken
+cubby new status --public read                          # status-<four words>, then the owner token
+cubby new status-cedar-pilot-mango-frost                # exactly this name, private; fails if it's taken
 cubby name poll                                         # a fresh valid name, offline
-cubby whoami | token | url <path>
+cubby whoami [--show-token] | url <path>
+```
+
+Sharing:
+
+```sh
+cubby token new family-cedar-pilot-mango-frost --label anna --link https://example.com/list/
+                                                        # https://example.com/list/#t=at_...  member, 10 uses, 7 days
+cubby token new homelab-... --allow 'shared/status.*:w' --uses 1 --until 1h   # a narrow one for a machine
+cubby join family-cedar-pilot-mango-frost 'https://example.com/list/#t=at_...'  # on the other machine
+cubby access <space>                                    # owner, member or visitor, and your grants
+cubby settings <space> [--public none|read|respond|all]
+cubby token ls|set|rm <space> ...    cubby grant ls|add|rm <space> ...
+cubby owner-token <space>            cubby drop <space>
 ```
 
 Series:
@@ -114,7 +147,7 @@ cubby get notes-cedar-pilot-mango-frost/shared/hello --server 9000      # http:/
 CUBBY_SERVER=9000 cubby ls 'notes-cedar-pilot-mango-frost/shared/*'
 ```
 
-The CLI saves its token, and keys of spaces it created, in `~/.config/cubby/credentials.toml` (mode 0600). For a fixed identity in a script, set `CUBBY_TOKEN`. To write a locked space from another machine, set `CUBBY_SPACE_KEY`.
+The CLI saves its visitor token in `~/.config/cubby/credentials.toml` (mode 0600) and sends it on every request. For a fixed identity in a script or CI, set `CUBBY_TOKEN`: redeem an invite once without one (`curl -X POST -d '{"token":"at_..."}' $S/v1/<space>/join`) and keep the `vt_` it returns.
 
 ## Plain HTTP
 
@@ -122,9 +155,10 @@ Everything the CLI does is a single request.
 
 | Do | Request |
 |---|---|
-| get a token | `POST /v1/anon` → `{"token": "kv_...", "id": "u_..."}` |
-| read | `GET /v1/{space}/shared/{key}` |
-| write | `PUT /v1/{space}/shared/{key}` with `Authorization: Bearer kv_...`, body is the value |
+| create a space | `POST /v1/spaces` with `{"label": "poll", "public": "respond"}` (all optional) → `{"space", "owner": "ot_...", "id", "settings"}`, plus `"token"` if you sent none |
+| get a visitor token | `POST /v1/anon` → `{"token": "vt_...", "id": "u_..."}` |
+| read | `GET /v1/{space}/shared/{key}`, with `?token=vt_...` unless the space is public |
+| write | `PUT /v1/{space}/shared/{key}` with `Authorization: Bearer vt_...`, body is the value |
 | write only if unchanged | `PUT ...?ifVersion=N` (`0` means "only if it doesn't exist") |
 | delete | `DELETE /v1/{space}/shared/{key}` |
 | list: matching keys with their values | `GET /v1/{space}/shared/msg.*` or `GET /v1/{space}/users/*/vote` |
@@ -132,9 +166,12 @@ Everything the CLI does is a single request.
 | add a point to a series | `POST /v1/{space}/shared/temp/series`, body is the value |
 | add to several series | `POST /v1/{space}/shared/env.*/series`, body `{"temp": 21.4, "rh": 45}` |
 | read a series | `GET /v1/{space}/shared/temp/series` (newest 1000) or `?since=MS` (after that time) |
-| create a locked space | `POST /v1/spaces?label=poll&locked` → `{"space": ..., "key": "sk_..."}`, or `?name=poll-cedar-pilot-mango-frost&locked` for an exact name |
+| invite | `POST /v1/{space}/tokens` (owners) → `{"token": "at_...", "uses": 10, "until": ...}` |
+| join | `POST /v1/{space}/join` with `{"token": "at_..."}`; without a visitor token one is created and returned |
+| what may I do | `GET /v1/{space}/access` |
+| owners | `PATCH`/`DELETE /v1/{space}`, `/tokens[/{id}]`, `/grants[/{id}]`, `POST /owner-token` |
 
-Writes to `shared/` of a locked space also need `Space-Key: sk_...`. Unknown or repeated query parameters are rejected with 400, so a typo like `ifversion=0` fails instead of overwriting. Errors are JSON with a stable `error` code and a `message`. CORS is open, so pages on any origin can call it.
+Unknown or repeated query parameters, and unknown JSON fields, are rejected with 400, so a typo like `ifversion=0` fails instead of overwriting. Errors are JSON with a stable `error` code and a `message`. CORS is open, so pages on any origin can call it.
 
 Every data URL is `/v1/{space}/{area}/{key or pattern}`, optionally followed by `/watch` or `/series`, and nothing after that.
 
@@ -146,9 +183,12 @@ The server hosts a small client at `/kv.js`:
 
 ```html
 <script type="module">
-import { kv } from "http://localhost:28229/kv.js"
+import { kv, createSpace } from "http://localhost:28229/kv.js"
 
 const db = kv("poll-orbit-lilac-tango-slate")
+const me = await db.open()                               // redeems #t=... invites; me.inside, me.owner, me.can()
+if (!me.inside) showAskForInvite()
+const { link } = await db.share({ label: "Anna" })       // owners: an invite link to send
 await db.shared.set("question", "Pizza or tacos?")
 await db.user().set("vote", "tacos")
 
@@ -161,7 +201,14 @@ const { points } = await db.shared.series("env.temp", { since: Date.now() - 864e
 </script>
 ```
 
-It keeps the visitor token in `localStorage`, sends it only on writes and `me/` so plain reads skip CORS preflights, and finds the API from the URL it was loaded from. The module exports `kv`, `newName`, `validSpace` and `KvError`. Every entry has `by`, the visitor who wrote it, and `mine`.
+It keeps the visitor token in `localStorage`, sends it as a header on writes and as `?token=` on reads (so reads skip CORS preflights), and finds the API from the URL it was loaded from. The module exports `kv`, `createSpace`, `takeInvite`, `inviteLink`, `newName`, `validSpace` and `KvError`. Every entry has `by`, the visitor who wrote it, and `mine`. Its opening comment is a short guide for coding agents; [docs/agents.md](docs/agents.md) is the long one.
+
+For sharing without writing any UI, the server also serves a panel: invite links, QR codes, the member list, who can see the space, and the recovery key.
+
+```html
+<script type="module" src="http://localhost:28229/share.js"></script>
+<cubby-share space="poll-orbit-lilac-tango-slate" members></cubby-share>
+```
 
 ## Series
 
@@ -260,10 +307,10 @@ spaces/{name}.db        one SQLite file per space, holding everything about it
 admin.sock              how `cubby admin` reaches the running server
 ```
 
-A space file is self-contained: its keys, version counter and lock key. So spaces are easy to handle one by one:
+A space file is self-contained: its keys, version counter, settings, invites and grants. So spaces are easy to handle one by one:
 
 - **Delete one** with `cubby admin delete <space>`, which also tells watchers it's gone. Removing the file by hand works too, but stop the server first.
-- **Move or copy one** to another server by copying `spaces/{name}.db`, with the source server stopped or after `sqlite3 {name}.db "PRAGMA wal_checkpoint(TRUNCATE)"`. The other server picks it up on the next request for that space. Versions continue where they were, and a locked space keeps its key. Visitor IDs don't travel, since tokens live in `server.db`: the `users/` data stays readable, but its owners can't write it on the new server.
+- **Move or copy one** to another server by copying `spaces/{name}.db`, with the source server stopped or after `sqlite3 {name}.db "PRAGMA wal_checkpoint(TRUNCATE)"`. The other server picks it up on the next request for that space. Versions continue where they were, and settings and invites come along. Visitor tokens don't travel, since they live in `server.db`: grants and `users/` data stay, but nobody holds those visitors' tokens on the new server. The owner token still works, so the owner redeems it there to get back in.
 - **Back up** by copying the whole directory with the server stopped, or with `sqlite3 file.db ".backup copy.db"` per file while it runs.
 
 ## Running it for real
@@ -300,12 +347,12 @@ WantedBy=multi-user.target
 `cubby admin` is a client of the running server. It sends each command through `admin.sock` in the data directory, and the server carries it out like any other request, so watchers learn about deleted spaces at once. Only the server's OS user can open the socket, which is the only access check. Admin has no HTTP route, so it can't be reached over the network.
 
 ```sh
-cubby admin spaces            # name, kind, size, keys, last activity
+cubby admin spaces              # name, read, write, size, keys, last activity
 cubby admin stats
-cubby admin export <space>    # JSON lines: every key, then every series point
+cubby admin export <space>      # JSON lines: every key, then every series point
 cubby admin delete <space>
-cubby admin rekey <space>     # lock a space or replace its key
-cubby admin cleanup           # run the hourly cleanup now
+cubby admin owner-token <space> # a new owner token, for an owner who lost theirs
+cubby admin cleanup             # run the hourly cleanup now
 ```
 
 Run it on the server machine, as the server's user or root. Pass `--data DIR` if the server uses a non-default data directory. `--json` prints the raw response. If no server is running, admin says so and exits with 6.
@@ -324,23 +371,25 @@ go build .           # just for this machine, writes ./cubby
 
 ```
 main.go             entry point: hands the command line to internal/cli
+internal/access/    who may do what: settings, the public shorthand, scopes, the access rule
 internal/cli/       the cubby command: serve, admin, and the client commands
 internal/server/    HTTP API, rate limits, watches, admin socket handler
-internal/store/     SQLite storage: spaces, keys, series, visitors, cleanup
+internal/store/     SQLite storage: spaces, keys, series, visitors, tokens, grants, cleanup
 internal/config/    config file, defaults, data directory lookup
 internal/names/     name and key validation, random names and tokens, words.txt
 internal/apierr/    the API error type and shared errors
 internal/version/   build version, set by build.sh
 web/kv.js           the JS client, served at /kv.js with the word list filled in
+web/share.js        the share panel and QR encoder, served at /share.js
 tools/wordlist/     builds internal/names/words.txt from public word lists (not in the binary)
-docs/               design.md (the model), spec.md (the contract), scenarios.md (worked examples), agents.md (guide for coding agents), plan-access.md (next build)
+tools/jstest/       kv.js and QR checks against a local server: ./tools/jstest/run.sh (needs Node)
+docs/               design.md (the model), spec.md (the contract), scenarios.md (worked examples), agents.md (guide for coding agents)
 ```
 
-Dependencies point one way: `cli` uses `server`, `server` uses `store`, and everything can use `config`, `names` and `apierr`. `store` never imports `server`.
+Dependencies point one way: `cli` uses `server`, `server` uses `store`, and everything can use `access`, `config`, `names` and `apierr`. `store` never imports `server`.
 
 ## Differences from the design docs
 
-- **The access model in the docs isn't built yet.** The docs describe the next version: every space created explicitly with an owner and private by default, `public` to open it up, access tokens redeemed into grants, invite links and a share panel, and `vt_` visitor tokens as the only credential on a request. v0.9.0, which this README describes, still has spaces created by their first write, locked spaces with `sk_` keys and `Space-Key`, `kv_` tokens and `cubby admin rekey`. The work is planned in [docs/plan-access.md](docs/plan-access.md), and this README gets rewritten with it.
 - **Default data directory** follows the OS convention (see [Where data lives](#where-data-lives)) instead of `./data`, so `serve` and `admin` find the same data from any directory.
 - **`visitors.db` is called `server.db`.** Besides visitors, it remembers which spaces each visitor wrote to, and the last counter of deleted spaces so a recreated space never reuses versions.
 - **Admin needs the running server.** It doesn't fall back to opening files directly. That keeps one path for every change.

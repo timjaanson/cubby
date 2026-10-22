@@ -8,7 +8,7 @@ import (
 )
 
 func (s *Store) NewVisitor() (token, id string, err error) {
-	token, id = names.RandomToken("kv_"), names.NewVisitorID()
+	token, id = names.RandomToken("vt_"), names.NewVisitorID()
 	now := nowS()
 	_, err = s.srv.Exec(`INSERT INTO visitors (id, token_hash, created_at, last_seen_at) VALUES (?, ?, ?, ?)`,
 		id, names.HashSecret(token), now, now)
@@ -59,7 +59,7 @@ func (s *Store) VisitorTotal(id string) (int64, error) {
 	rows.Close()
 	var total int64
 	for _, name := range spaces {
-		sp, _, err := s.Acquire(name, false, "")
+		sp, err := s.Acquire(name)
 		if err != nil {
 			return 0, err
 		}
@@ -105,4 +105,11 @@ func (s *Store) noteVisitorSpace(id, space string) {
 		s.srv.Exec(`INSERT OR IGNORE INTO visitor_spaces (visitor, space) VALUES (?, ?)`, id, space)
 		s.srv.Exec(`UPDATE visitors SET stored = 1 WHERE id = ? AND stored = 0`, id)
 	}
+}
+
+// DeleteVisitor removes a visitor that was just created and never used, for
+// a join that turned out to fail.
+func (s *Store) DeleteVisitor(id string) {
+	s.srv.Exec(`DELETE FROM visitor_spaces WHERE visitor = ?`, id)
+	s.srv.Exec(`DELETE FROM visitors WHERE id = ?`, id)
 }

@@ -6,93 +6,53 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/timjaanson/cubby/internal/access"
 	"github.com/timjaanson/cubby/internal/apierr"
 	"github.com/timjaanson/cubby/internal/names"
 )
 
-// createSpace makes a new empty space with a generated name. With locked it
-// also returns the space key.
-func (s *Store) CreateSpace(label string, locked bool) (name, key string, err error) {
+// CreateSpace makes a new empty space owned by the visitor. With name it
+// takes exactly that name, which the caller has validated, and fails with
+// space_exists if it's taken; otherwise it generates one from label. It
+// returns the name and the owner token, which is stored only as a hash.
+func (s *Store) CreateSpace(name, label string, settings access.Settings, owner string) (string, string, error) {
 	if s.SpaceCount() >= s.cfg.Limits.MaxSpaces {
 		return "", "", apierr.ServerFull
 	}
+	ownerToken := names.RandomToken("ot_")
+	ns := &newSpace{settings: settings, ownerHash: names.HashSecret(ownerToken), owner: owner}
+	fixed := name != ""
 	for range 10 {
-		name = names.NewSpaceName(label)
+		if !fixed {
+			name = names.NewSpaceName(label)
+		}
 		if s.SpaceExists(name) {
+			if fixed {
+				return "", "", apierr.SpaceExists(name)
+			}
 			continue
 		}
-		kh := ""
-		if locked {
-			key = names.RandomToken("sk_")
-			kh = names.HashSecret(key)
-		}
-		sp, created, err := s.Acquire(name, true, kh)
+		sp, created, err := s.acquire(name, ns)
 		if err != nil {
 			return "", "", err
 		}
 		s.Release(sp)
 		if created {
-			return name, key, nil
+			s.noteVisitorSpace(owner, name)
+			return name, ownerToken, nil
+		}
+		if fixed {
+			return "", "", apierr.SpaceExists(name) // lost a race with another request
 		}
 	}
 	return "", "", errors.New("could not generate a free name")
-}
-
-// CreateNamedSpace creates a space under the exact name given, which the
-// caller has validated. It fails with space_exists if the name is taken.
-func (s *Store) CreateNamedSpace(name string, locked bool) (key string, err error) {
-	if s.SpaceCount() >= s.cfg.Limits.MaxSpaces {
-		return "", apierr.ServerFull
-	}
-	if s.SpaceExists(name) {
-		return "", apierr.SpaceExists(name)
-	}
-	kh := ""
-	if locked {
-		key = names.RandomToken("sk_")
-		kh = names.HashSecret(key)
-	}
-	sp, created, err := s.Acquire(name, true, kh)
-	if err != nil {
-		return "", err
-	}
-	s.Release(sp)
-	if !created {
-		return "", apierr.SpaceExists(name) // lost a race with another request
-	}
-	return key, nil
-}
-
-// rekey locks a space or replaces its key.
-func (s *Store) Rekey(name string) (string, error) {
-	sp, _, err := s.Acquire(name, false, "")
-	if err != nil {
-		return "", err
-	}
-	if sp == nil {
-		return "", apierr.NoSpace
-	}
-	defer s.Release(sp)
-	key := names.RandomToken("sk_")
-	sp.wmu.Lock()
-	err = setMeta(sp.db, "key_hash", names.HashSecret(key))
-	sp.wmu.Unlock()
-	if err != nil {
-		return "", err
-	}
-	s.mu.Lock()
-	if st := s.stats[name]; st != nil {
-		st.locked = true
-	}
-	s.mu.Unlock()
-	return key, nil
 }
 
 // deleteSpace removes a space's file. Its counter is remembered, so a space
 // created later under the same name continues above it.
 func (s *Store) DeleteSpace(name string) error {
 	for {
-		sp, _, err := s.Acquire(name, false, "")
+		sp, err := s.Acquire(name)
 		if err != nil {
 			return err
 		}
@@ -137,12 +97,12 @@ func (s *Store) DeleteSpace(name string) error {
 }
 
 type SpaceRow struct {
-	Name       string `json:"name"`
-	Locked     bool   `json:"locked"`
-	Pinned     bool   `json:"pinned"`
-	Bytes      int64  `json:"bytes"`
-	Keys       int    `json:"keys"`
-	LastActive int64  `json:"lastActive"`
+	Name       string          `json:"name"`
+	Settings   access.Settings `json:"settings"`
+	Pinned     bool            `json:"pinned"`
+	Bytes      int64           `json:"bytes"`
+	Keys       int             `json:"keys"`
+	LastActive int64           `json:"lastActive"`
 }
 
 func (s *Store) Spaces() []SpaceRow {
@@ -151,7 +111,7 @@ func (s *Store) Spaces() []SpaceRow {
 	defer s.mu.Unlock()
 	out := make([]SpaceRow, 0, len(s.stats))
 	for n, st := range s.stats {
-		out = append(out, SpaceRow{Name: n, Locked: st.locked, Pinned: s.cfg.Pinned(n), Bytes: st.bytes, Keys: st.keys, LastActive: st.lastActive})
+		out = append(out, SpaceRow{Name: n, Settings: st.settings, Pinned: s.cfg.Pinned(n), Bytes: st.bytes, Keys: st.keys, LastActive: st.lastActive})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out

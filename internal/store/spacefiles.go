@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/timjaanson/cubby/internal/access"
 	"github.com/timjaanson/cubby/internal/apierr"
 	"github.com/timjaanson/cubby/internal/names"
 )
@@ -18,7 +19,8 @@ import (
 type spaceMeta struct {
 	seq, createdAt, lastActive, floor, bytes int64
 	keys                                     int
-	keyHash                                  string
+	settings                                 access.Settings
+	ownerHash                                string
 }
 
 type queryer interface {
@@ -53,10 +55,11 @@ func readMeta(q queryer) (spaceMeta, error) {
 			m.bytes = n
 		case "keys":
 			m.keys = int(n)
-		case "key_hash":
-			if str, ok := v.(string); ok {
-				m.keyHash = str
-			}
+		case "settings":
+			str, _ := v.(string)
+			m.settings = access.Decode(str)
+		case "owner_hash":
+			m.ownerHash, _ = v.(string)
 		}
 	}
 	return m, rows.Err()
@@ -94,14 +97,16 @@ func (s *Store) graveSeq(name string) int64 {
 	return g
 }
 
-// phantomSeq is the counter a space that doesn't exist pretends to have: the
-// current time, but always above anything already handed out for the name.
-func (s *Store) phantomSeq(name string) int64 {
-	return max(NowMs(), s.graveSeq(name)+1)
+// newSpace is what a space starts with: its settings and its first owner.
+type newSpace struct {
+	settings  access.Settings
+	ownerHash string // SHA-256 of the owner token
+	owner     string // visitor ID of the creator
 }
 
-// initSpace creates the tables of a new space file.
-func (s *Store) initSpace(db *sql.DB, name, keyHash string) error {
+// initSpace creates the tables of a new space file, its settings and the
+// creator's owner grant.
+func (s *Store) initSpace(db *sql.DB, name string, ns newSpace) error {
 	if _, err := db.Exec(`PRAGMA auto_vacuum = INCREMENTAL`); err != nil {
 		return err
 	}
@@ -119,23 +124,30 @@ func (s *Store) initSpace(db *sql.DB, name, keyHash string) error {
 		"seq": max(NowMs(), g+1), "created_at": now, "last_active_at": now,
 		// Watchers from a deleted space of the same name must start over.
 		"tombstone_floor": g + 1, "bytes": 0, "keys": 0,
+		"settings": ns.settings.Encode(), "owner_hash": ns.ownerHash,
 	} {
 		if err := setMeta(tx, k, v); err != nil {
 			return err
 		}
 	}
-	if keyHash != "" {
-		if err := setMeta(tx, "key_hash", keyHash); err != nil {
-			return err
-		}
+	if _, err := tx.Exec(`INSERT INTO grants (id, visitor, owner, allow, source, created_at) VALUES (?, ?, 1, '[]', 'create', ?)`,
+		names.NewGrantID(), ns.owner, NowMs()); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
 
-// acquire returns an open space with its gate held shared. It returns nil if
-// the space doesn't exist and create is false. Call release when done.
-func (s *Store) Acquire(name string, create bool, keyHash string) (sp *spaceDB, created bool, err error) {
-	if !names.SafeSpaceFile(name) {
+// Acquire returns an open space with its gate held shared, or nil if the
+// space doesn't exist. Call Release when done.
+func (s *Store) Acquire(name string) (*spaceDB, error) {
+	sp, _, err := s.acquire(name, nil)
+	return sp, err
+}
+
+// acquire opens a space, creating it when ns is given. created reports
+// whether this call made the file.
+func (s *Store) acquire(name string, ns *newSpace) (sp *spaceDB, created bool, err error) {
+	if !names.ValidSpace(name) {
 		return nil, false, &apierr.Error{Status: 400, Code: "invalid_space", Message: "Not a usable space name."}
 	}
 	for {
@@ -145,7 +157,7 @@ func (s *Store) Acquire(name string, create bool, keyHash string) (sp *spaceDB, 
 			path := s.spacePath(name)
 			_, statErr := os.Stat(path)
 			exists := statErr == nil
-			if !exists && !create {
+			if !exists && ns == nil {
 				s.mu.Unlock()
 				return nil, false, nil
 			}
@@ -155,14 +167,14 @@ func (s *Store) Acquire(name string, create bool, keyHash string) (sp *spaceDB, 
 				return nil, false, err
 			}
 			if !exists {
-				if err := s.initSpace(db, name, keyHash); err != nil {
+				if err := s.initSpace(db, name, *ns); err != nil {
 					db.Close()
 					os.Remove(path)
 					s.mu.Unlock()
 					return nil, false, fmt.Errorf("create space %s: %w", name, err)
 				}
 				created = true
-			} else if err := migrateSpace(db); err != nil {
+			} else if _, err := db.Exec(spaceSchema); err != nil {
 				db.Close()
 				s.mu.Unlock()
 				return nil, false, fmt.Errorf("open space %s: %w", name, err)
@@ -176,7 +188,7 @@ func (s *Store) Acquire(name string, create bool, keyHash string) (sp *spaceDB, 
 			sp = &spaceDB{name: name, db: db, metaActive: m.lastActive, lastUsed: time.Now()}
 			s.open[name] = sp
 			if s.stats[name] == nil {
-				s.stats[name] = &spaceStat{bytes: m.bytes, keys: m.keys, lastActive: m.lastActive, locked: m.keyHash != ""}
+				s.stats[name] = &spaceStat{bytes: m.bytes, keys: m.keys, lastActive: m.lastActive, settings: m.settings}
 				s.total += m.bytes
 			}
 			s.evictLocked(name)
@@ -264,7 +276,7 @@ func (s *Store) Rescan() error {
 		if !ok || e.IsDir() {
 			continue
 		}
-		if !names.SafeSpaceFile(name) {
+		if !names.ValidSpace(name) {
 			log.Printf("ignoring spaces/%s: not a usable space file name", e.Name())
 			continue
 		}
@@ -287,7 +299,7 @@ func (s *Store) Rescan() error {
 		}
 		s.mu.Lock()
 		if s.stats[name] == nil {
-			s.stats[name] = &spaceStat{bytes: m.bytes, keys: m.keys, lastActive: m.lastActive, locked: m.keyHash != ""}
+			s.stats[name] = &spaceStat{bytes: m.bytes, keys: m.keys, lastActive: m.lastActive, settings: m.settings}
 			s.total += m.bytes
 		}
 		s.mu.Unlock()

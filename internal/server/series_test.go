@@ -1,9 +1,7 @@
 package server
 
 import (
-	"database/sql"
 	"encoding/json"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -32,6 +30,7 @@ func decode[T any](t *testing.T, b string) T {
 func TestSeriesBasics(t *testing.T) {
 	c := newTest(t)
 	tok, _ := c.anon()
+	c.open("home-cedar-pilot-mango", tok)
 	auth := []string{"Authorization", "Bearer " + tok}
 	S := "/v1/home-cedar-pilot-mango/shared"
 
@@ -124,6 +123,7 @@ func TestSeriesBasics(t *testing.T) {
 func TestSeriesKinds(t *testing.T) {
 	c := newTest(t)
 	tok, _ := c.anon()
+	c.open("home-cedar-pilot-mango", tok)
 	auth := []string{"Authorization", "Bearer " + tok}
 	S := "/v1/home-cedar-pilot-mango/shared"
 	c.req("POST", S+"/temp/series", "21", auth...)
@@ -186,6 +186,7 @@ func TestSeriesKinds(t *testing.T) {
 func TestSeriesBatch(t *testing.T) {
 	c := newTest(t)
 	tok, _ := c.anon()
+	c.open("home-cedar-pilot-mango", tok)
 	auth := []string{"Authorization", "Bearer " + tok}
 	S := "/v1/home-cedar-pilot-mango/shared"
 
@@ -259,6 +260,7 @@ func TestSeriesBatch(t *testing.T) {
 func TestSeriesTimes(t *testing.T) {
 	c := newTest(t)
 	tok, _ := c.anon()
+	c.open("home-cedar-pilot-mango", tok)
 	auth := []string{"Authorization", "Bearer " + tok}
 	S := "/v1/home-cedar-pilot-mango/shared"
 	base := time.Now().UnixMilli() - 3_600_000
@@ -303,6 +305,7 @@ func TestSeriesRetentionAndBytes(t *testing.T) {
 	c := newTest(t)
 	c.cfg.Limits.MaxSeriesPoints = 5
 	tok, id := c.anon()
+	c.open("home-cedar-pilot-mango", tok)
 	auth := []string{"Authorization", "Bearer " + tok}
 	S := "/v1/home-cedar-pilot-mango/shared"
 	for i := range 12 {
@@ -348,6 +351,7 @@ func TestSeriesQuota(t *testing.T) {
 	c.cfg.Server.RateLimits = &off
 	c.cfg.Limits.MaxSeriesPoints = 10
 	tok, _ := c.anon()
+	c.open("home-cedar-pilot-mango", tok)
 	auth := []string{"Authorization", "Bearer " + tok}
 	S := "/v1/home-cedar-pilot-mango/shared"
 	// A full series at a steady rate never hits the quota by itself:
@@ -367,13 +371,14 @@ func TestSeriesQuota(t *testing.T) {
 func TestSeriesUsersAndMe(t *testing.T) {
 	c := newTest(t)
 	tok, id := c.anon()
+	c.open("home-cedar-pilot-mango", tok)
 	tok2, _ := c.anon()
 	auth := []string{"Authorization", "Bearer " + tok}
 	sp := "/v1/home-cedar-pilot-mango"
 	if st, _, b := c.req("POST", sp+"/users/"+id+"/weight/series", "71.2", auth...); st != 201 {
 		t.Fatalf("own users/: %d %s", st, b)
 	}
-	if st, _, b := c.req("POST", sp+"/users/"+id+"/weight/series", "71.0", "Authorization", "Bearer "+tok2); st != 403 || errCode(b) != "not_owner" {
+	if st, _, b := c.req("POST", sp+"/users/"+id+"/weight/series", "71.0", "Authorization", "Bearer "+tok2); st != 403 || errCode(b) != "not_yours" {
 		t.Fatalf("other visitor: %d %s", st, b)
 	}
 	if st, _, _ := c.req("GET", sp+"/users/"+id+"/weight/series", ""); st != 200 {
@@ -390,45 +395,27 @@ func TestSeriesUsersAndMe(t *testing.T) {
 	}
 }
 
-func TestSeriesLockedSpace(t *testing.T) {
+// A device with a write-only grant adds points to a space it can't read.
+func TestSeriesWriteOnlyGrant(t *testing.T) {
 	c := newTest(t)
-	tok, _ := c.anon()
-	auth := []string{"Authorization", "Bearer " + tok}
-	_, _, b := c.req("POST", "/v1/spaces?label=room&locked", "", auth...)
-	sp := decode[struct{ Space, Key string }](t, b)
-	S := "/v1/" + sp.Space + "/shared"
-	if st, _, b := c.req("POST", S+"/env.*/series", `{"temp":1}`, auth...); st != 403 || errCode(b) != "space_locked" {
-		t.Fatalf("without key: %d %s", st, b)
+	own := c.create(`{"label":"room","public":"read"}`, "")
+	o := []string{"Authorization", "Bearer " + own.Token}
+	_, _, b := c.req("POST", "/v1/"+own.Space+"/tokens", `{"allow":["shared/env.*:w"],"uses":1}`, o...)
+	tk := decode[struct{ Token string }](t, b)
+	_, _, b = c.req("POST", "/v1/"+own.Space+"/join", `{"token":"`+tk.Token+`"}`)
+	dev := decode[struct{ Token string }](t, b)
+	d := []string{"Authorization", "Bearer " + dev.Token}
+	S := "/v1/" + own.Space + "/shared"
+	if st, _, b := c.req("POST", S+"/env.*/series", `{"temp":1}`, d...); st != 200 {
+		t.Fatalf("device write: %d %s", st, b)
 	}
-	if st, _, b := c.req("POST", S+"/env.*/series", `{"temp":1}`, append(auth, "Space-Key", sp.Key)...); st != 200 {
-		t.Fatalf("with key: %d %s", st, b)
+	if st, _, b := c.req("POST", S+"/other/series", `1`, d...); st != 403 || errCode(b) != "no_access" {
+		t.Fatalf("outside its scope: %d %s", st, b)
 	}
-}
-
-// A space file from before series gets the new columns and table on open.
-func TestSeriesMigratesOldFiles(t *testing.T) {
-	c := newTest(t)
-	tok, _ := c.anon()
-	auth := []string{"Authorization", "Bearer " + tok}
-	S := "/v1/home-cedar-pilot-mango/shared"
-	c.req("PUT", S+"/note", "hi", auth...)
-	path := filepath.Join(c.cfg.Server.DataDir, "spaces", "home-cedar-pilot-mango.db")
-	c.store.Forget("home-cedar-pilot-mango")
-	db, err := sql.Open("sqlite", "file:"+path)
-	if err != nil {
-		t.Fatal(err)
+	if st, _, b := c.req("POST", S+"/*/series", `{"env.x":1}`, d...); st != 403 || errCode(b) != "no_access" {
+		t.Fatalf("a batch wider than its scope: %d %s", st, b)
 	}
-	for _, q := range []string{`DROP TABLE points`, `ALTER TABLE kv DROP COLUMN series`, `ALTER TABLE kv DROP COLUMN t`, `ALTER TABLE kv DROP COLUMN n`} {
-		if _, err := db.Exec(q); err != nil {
-			t.Fatal(q, err)
-		}
-	}
-	db.Close()
-	c.store.Rescan()
-	if _, _, b := c.req("GET", S+"/note", ""); b != "hi" {
-		t.Fatalf("old data: %s", b)
-	}
-	if st, _, b := c.req("POST", S+"/temp/series", "21", auth...); st != 201 {
-		t.Fatalf("series in a migrated file: %d %s", st, b)
+	if st, _, b := c.req("POST", S+"/env.*/series", `{"temp":1}`); st != 401 {
+		t.Fatalf("no token: %d %s", st, b)
 	}
 }

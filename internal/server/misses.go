@@ -67,6 +67,25 @@ func (g *missGuard) check(ip, space string, exists func() bool) (ok bool, retry 
 	return ok, retry
 }
 
+// allowed reports whether ip may try space at all without spending a miss:
+// it used the space recently, or it has budget left. join uses it, then
+// charges a miss only if the attempt fails.
+func (g *missGuard) allowed(ip, space string) (ok bool, retry time.Duration) {
+	now := g.now()
+	g.mu.Lock()
+	if set := g.seen[ip]; set != nil {
+		if t, hit := set.names[space]; hit && now.Sub(t) < seenTTL {
+			g.mu.Unlock()
+			return true, 0
+		}
+	}
+	g.mu.Unlock()
+	return g.budget.peek(ip, 1)
+}
+
+// charge spends one miss.
+func (g *missGuard) charge(ip string) { g.budget.take(ip, 1) }
+
 func (g *missGuard) remember(ip, space string, now time.Time) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

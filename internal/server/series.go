@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"strconv"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/timjaanson/cubby/internal/apierr"
@@ -30,13 +29,7 @@ const maxBatchMembers = 100
 
 // seriesAdd handles POST {key}/series and POST {prefix}*/series.
 func (s *Server) seriesAdd(c *reqCtx, t store.Target) error {
-	id, err := c.needVisitor()
-	if err != nil {
-		return err
-	}
-	if strings.HasPrefix(t.Area, "u:") && t.Area != "u:"+id {
-		return &apierr.Error{Status: 403, Code: "not_owner", Message: "Only that visitor can write under users/" + strings.TrimPrefix(t.Area, "u:") + "/."}
-	}
+	id := c.visitor // route checked access
 	var at int64
 	if q := c.r.URL.Query(); q.Has("t") {
 		n, ok := parseUint(q.Get("t"))
@@ -83,8 +76,7 @@ func (s *Server) seriesAdd(c *reqCtx, t store.Target) error {
 		return &apierr.Error{Status: 400, Code: "json_too_deep", Message: "JSON may be nested at most 64 levels."}
 	}
 
-	req := store.PointsReq{Space: t.Space, Area: t.Area, T: at, Writer: id, SpaceKey: c.r.Header.Get("Space-Key"),
-		OnCreate: func() error { return s.spaceRate(c, id) }}
+	req := store.PointsReq{Space: t.Space, Area: t.Area, T: at, Writer: id}
 	if t.Pattern {
 		if req.Points, err = parseBatch(body, isJSON, t.Key, maxPoint, tooLarge); err != nil {
 			return err

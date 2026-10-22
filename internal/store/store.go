@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/timjaanson/cubby/internal/access"
 	"github.com/timjaanson/cubby/internal/config"
 	"github.com/timjaanson/cubby/internal/names"
 	_ "modernc.org/sqlite"
@@ -22,8 +23,9 @@ import (
 //	{data}/spaces/{name}.db    one SQLite file per space, self-contained
 //	{data}/admin.sock          Unix socket for `cubby admin`
 //
-// A space file holds everything about the space, including its counter and
-// lock key, so it can be copied to another server or deleted on its own.
+// A space file holds everything about the space, including its counter,
+// settings, access tokens and grants, so it can be copied to another server
+// or deleted on its own.
 
 const MaxOpenSpaces = 64
 
@@ -36,13 +38,16 @@ type spaceDB struct {
 
 	lastUsed   time.Time // guarded by Store.mu
 	metaActive int64     // last_active_at as written to the file, guarded by wmu
+
+	accMu sync.Mutex
+	acc   *accessCache // nil until loaded, dropped on every access change
 }
 
 type spaceStat struct {
 	bytes      int64
 	keys       int
 	lastActive int64
-	locked     bool
+	settings   access.Settings
 }
 
 type Store struct {
@@ -117,7 +122,7 @@ func (s *Store) Close() error {
 
 // touch records activity on a space without reading it.
 func (s *Store) Touch(name string) {
-	if sp, _, err := s.Acquire(name, false, ""); err == nil && sp != nil {
+	if sp, err := s.Acquire(name); err == nil && sp != nil {
 		s.touchSpace(sp)
 		s.Release(sp)
 	}
@@ -126,11 +131,10 @@ func (s *Store) Touch(name string) {
 func NowMs() int64 { return time.Now().UnixMilli() }
 func nowS() int64  { return time.Now().Unix() }
 
-// spacePath maps a space to its file. It panics on a name that isn't
-// file-safe, so no caller can ever produce a path outside spaces/. Whether a
-// name is allowed over the API is the router's job, not the store's.
+// spacePath maps a space to its file. It panics on a name that isn't valid,
+// so no caller can ever produce a path outside spaces/.
 func (s *Store) spacePath(name string) string {
-	if !names.SafeSpaceFile(name) {
+	if !names.ValidSpace(name) {
 		panic("cubby: unchecked space name " + strconv.Quote(name))
 	}
 	return filepath.Join(s.dir, "spaces", name+".db")

@@ -13,9 +13,10 @@ const usage = `cubby: a key-value store over plain HTTP, server and client in on
 Server:
   cubby serve [-p PORT]           run the server, port 28229 unless told (see 'cubby help serve')
   cubby config [--defaults]       print the server config as TOML, to check it or start a file
-  cubby admin <command>           look after the server's data (spaces, export, delete, rekey, stats, cleanup)
+  cubby admin <command>           look after the server's data (spaces, export, delete, owner-token, stats, cleanup)
 
 Client (talks to --server or $CUBBY_SERVER, default http://localhost:28229; a bare port means localhost):
+  cubby new [label] [--public P]  create a space you own; private unless --public read|respond|all
   cubby get <path>                print a value
   cubby set <path> [value|-]      write a value from the argument or stdin
   cubby del <path>                delete a value
@@ -24,9 +25,13 @@ Client (talks to --server or $CUBBY_SERVER, default http://localhost:28229; a ba
   cubby update <path>             read, change with --exec or $EDITOR, write back safely
   cubby add <path> [value]        add a point to a series ('space/shared/env.*' a=1 b=2 for several)
   cubby series <path>             print a series' points, oldest first
-  cubby new [--label L] [--locked]  create a space on the server
   cubby name [label]              make up a valid space name, no server needed
-  cubby whoami | token | url <path>
+  cubby whoami [--show-token] | url <path>
+
+Sharing (owners invite, others join):
+  cubby token new <space> [--label L] [--link URL]   mint an invite: member, 10 uses, 7 days
+  cubby join <space> <token or link>                 redeem an invite on this machine
+  cubby access <space> | settings <space> | token ls|set|rm | grant ls|add|rm | owner-token | drop
 
 Paths mirror the URL after /v1/:
   poll-cedar-pilot-mango/shared/question     poll-cedar-pilot-mango/users/me/vote

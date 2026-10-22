@@ -89,7 +89,7 @@ func (l *limiter) prune() {
 }
 
 type limits struct {
-	anonPerIP        *limiter
+	visitorsPerIP    *limiter
 	writesPerVisitor *limiter
 	writesPerIP      *limiter
 	writeBytesPerIP  *limiter
@@ -102,7 +102,7 @@ type limits struct {
 func newLimits() *limits {
 	day := 24 * time.Hour
 	return &limits{
-		anonPerIP:        newLimiter(10, time.Hour, 10),
+		visitorsPerIP:    newLimiter(30, time.Hour, 30),
 		writesPerVisitor: newLimiter(60, time.Minute, 30),
 		writesPerIP:      newLimiter(300, time.Minute, 300),
 		writeBytesPerIP:  newLimiter(10<<20, day, 10<<20),
@@ -114,7 +114,7 @@ func newLimits() *limits {
 }
 
 func (l *limits) all() []*limiter {
-	return []*limiter{l.anonPerIP, l.writesPerVisitor, l.writesPerIP, l.writeBytesPerIP, l.readsPerIP, l.spacesPerVisitor, l.spacesPerIP}
+	return []*limiter{l.visitorsPerIP, l.writesPerVisitor, l.writesPerIP, l.writeBytesPerIP, l.readsPerIP, l.spacesPerVisitor, l.spacesPerIP}
 }
 
 // watchCounter caps open watches per IP and in total.

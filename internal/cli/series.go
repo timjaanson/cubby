@@ -78,7 +78,7 @@ func (c *client) add(f *flags) error {
 	if body == nil {
 		body = []byte{}
 	}
-	resp, b, err := c.do("POST", u, body, reqOpts{needToken: true, spaceKey: c.spaceKeyFor(p)})
+	resp, b, err := c.do("POST", u, body, reqOpts{needToken: true})
 	if err != nil {
 		return err
 	}

@@ -12,10 +12,11 @@ type cliConfig struct {
 	Server string `toml:"server"`
 }
 
+// serverCreds is the visitor this CLI is on one server. Access and owner
+// tokens are never stored: they're redeemed into grants on this visitor.
 type serverCreds struct {
-	Token     string            `toml:"token,omitempty"`
-	ID        string            `toml:"id,omitempty"`
-	SpaceKeys map[string]string `toml:"space_keys,omitempty"`
+	Token string `toml:"token,omitempty"`
+	ID    string `toml:"id,omitempty"`
 }
 
 type credentials struct {
@@ -45,7 +46,7 @@ func (c *credentials) save() error {
 		return err
 	}
 	var buf bytes.Buffer
-	buf.WriteString("# Written by cubby. Tokens and space keys are secrets.\n")
+	buf.WriteString("# Written by cubby. Visitor tokens are secrets.\n")
 	if err := toml.NewEncoder(&buf).Encode(c); err != nil {
 		return err
 	}

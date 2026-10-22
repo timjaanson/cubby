@@ -16,6 +16,7 @@ import (
 func TestHTTPValidation(t *testing.T) {
 	c := newTest(t)
 	tok, id := c.anon()
+	c.open("poll-cedar-pilot-mango", tok)
 	sp := "/v1/poll-cedar-pilot-mango"
 	cases := []struct {
 		method, path string
@@ -54,12 +55,14 @@ func TestHTTPValidation(t *testing.T) {
 		{"PUT", "/v1/" + strings.Repeat("a", 46) + "-cedar-pilot-mango/shared/x", 400, "invalid_space"},
 		{"PUT", "/v1//shared/x", 400, "invalid_space"},
 		{"GET", "/v1/anon/shared/x", 400, "invalid_space"},
+		{"GET", "/v1/gone-cedar-pilot-mango/shared/x", 404, "no_space"},
+		{"PUT", "/v1/gone-cedar-pilot-mango/shared/x", 404, "no_space"},
 		// visitor IDs
 		{"PUT", sp + "/users/../shared/x", 400, "invalid_key"},
 		{"PUT", sp + "/users/u_aaaaaaaaaaaaaaaa%2F..%2Fx/k", 400, "invalid_key"},
 		{"PUT", sp + "/users/U_AAAAAAAAAAAAAAAA/k", 400, "invalid_key"},
 		{"PUT", sp + "/users/" + id + "/k", 201, ""},
-		{"PUT", sp + "/users/u_aaaaaaaaaaaaaaaa/k", 403, "not_owner"},
+		{"PUT", sp + "/users/u_aaaaaaaaaaaaaaaa/k", 403, "not_yours"},
 		{"PUT", sp + "/users/*/k", 405, "method_not_allowed"},
 		// areas and routes
 		{"GET", sp + "/private/x", 404, "not_found"},
@@ -87,11 +90,8 @@ func TestHTTPValidation(t *testing.T) {
 		{"GET", sp + "/shared/x/watch?version=-1", 400, "invalid_parameter"},
 		{"GET", sp + "/shared/x/watch?since=0", 400, "invalid_parameter"},
 		{"GET", sp + "/shared/x/watch?version=1;2", 400, "invalid_parameter"},
-		{"POST", "/v1/spaces?label=Poll", 400, "invalid_parameter"},
-		{"POST", "/v1/spaces?label=a--b", 400, "invalid_parameter"},
-		{"POST", "/v1/spaces?label=../x", 400, "invalid_parameter"},
-		{"POST", "/v1/spaces?locked=yes", 400, "invalid_parameter"},
-		{"POST", "/v1/spaces?lock", 400, "invalid_parameter"},
+		{"POST", "/v1/spaces?label=poll", 400, "invalid_parameter"},
+		{"POST", "/v1/spaces?locked", 400, "invalid_parameter"},
 		{"POST", "/v1/anon?x=1", 400, "invalid_parameter"},
 	}
 	for _, tc := range cases {
@@ -113,12 +113,13 @@ func TestHTTPTokens(t *testing.T) {
 	if _, _, b := c.req("GET", "/v1/whoami?token="+tok, ""); !strings.Contains(b, id) {
 		t.Errorf("token parameter: %s", b)
 	}
-	for _, bad := range []string{"kv_short", tok + "x", "sk_" + tok[3:], "kv_" + strings.Repeat("!", 43)} {
+	for _, bad := range []string{"vt_short", tok + "x", "at_" + tok[3:], "ot_" + tok[3:], "kv_" + tok[3:], "vt_" + strings.Repeat("!", 43)} {
 		if s, _, b := c.req("GET", "/v1/whoami", "", "Authorization", "Bearer "+bad); s != 401 || errCode(b) != "invalid_token" {
 			t.Errorf("token %q: %d %s", bad, s, b)
 		}
 	}
 	// A bad token on a read that doesn't need one is ignored.
+	c.open("poll-cedar-pilot-mango", tok)
 	if s, _, _ := c.req("GET", "/v1/poll-cedar-pilot-mango/shared/x", "", "Authorization", "Bearer junk"); s != 404 {
 		t.Errorf("read with junk token: %d", s)
 	}

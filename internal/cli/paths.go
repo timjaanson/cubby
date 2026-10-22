@@ -94,14 +94,3 @@ func (c *client) visitorID() (string, error) {
 	}
 	return out.ID, nil
 }
-
-// spaceKeyFor returns the key to send for writes to shared/.
-func (c *client) spaceKeyFor(p kvPath) string {
-	if p.area != "shared" {
-		return ""
-	}
-	if c.spaceKey != "" {
-		return c.spaceKey
-	}
-	return c.sc.SpaceKeys[p.space]
-}

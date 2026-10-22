@@ -13,10 +13,11 @@ type CleanupReport struct {
 	Spaces     int `json:"spaces"`
 }
 
-// dropVisitorRows removes a visitor's data from one space. Their users/ keys
-// become tombstones so watchers see them go; me/ rows just disappear.
+// dropVisitorRows removes a visitor's data and grants from one space. Their
+// users/ keys become tombstones so watchers see them go; me/ rows just
+// disappear.
 func (s *Store) dropVisitorRows(space, id string) error {
-	sp, _, err := s.Acquire(space, false, "")
+	sp, err := s.Acquire(space)
 	if err != nil || sp == nil {
 		return err
 	}
@@ -69,12 +70,14 @@ func (s *Store) dropVisitorRows(space, id string) error {
 	tx.Exec(`DELETE FROM points WHERE area IN (?, ?)`, "u:"+id, "m:"+id)
 	bytesD -= pointBytes
 	tx.Exec(`DELETE FROM usage WHERE writer = ?`, id)
+	tx.Exec(`DELETE FROM grants WHERE visitor = ?`, id)
 	for k, v := range map[string]any{"seq": seq, "bytes": m.bytes + bytesD, "keys": m.keys + keysD} {
 		setMeta(tx, k, v)
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	sp.dropAccess()
 	s.mu.Lock()
 	if st := s.stats[space]; st != nil {
 		st.bytes += bytesD
@@ -150,7 +153,14 @@ func (s *Store) Cleanup() (rep CleanupReport, err error) {
 		}
 	}
 
-	// 3. Old tombstones, then compact. The space remembers the highest
+	// 3. Grants past their end and access tokens long dead.
+	for _, n := range all {
+		if err := s.pruneAccess(n); err != nil {
+			return rep, err
+		}
+	}
+
+	// 4. Old tombstones, then compact. The space remembers the highest
 	// removed version as its floor.
 	cut := now - secs(r.TombstoneTTL)
 	for _, n := range all {
@@ -172,7 +182,7 @@ func (s *Store) Cleanup() (rep CleanupReport, err error) {
 }
 
 func (s *Store) compactSpace(name string, cut int64) (int, error) {
-	sp, _, err := s.Acquire(name, false, "")
+	sp, err := s.Acquire(name)
 	if err != nil || sp == nil {
 		return 0, err
 	}

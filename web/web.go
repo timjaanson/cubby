@@ -15,3 +15,6 @@ var kvSource []byte
 // KVJS is the JavaScript client, served at /kv.js, with the name word list
 // filled in.
 var KVJS = bytes.Replace(kvSource, []byte("__CUBBY_WORDS__"), []byte(strings.Join(names.Words, " ")), 1)
+
+//go:embed share.js
+var ShareJS []byte

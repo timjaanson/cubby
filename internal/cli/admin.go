@@ -23,7 +23,8 @@ const adminUsage = `cubby admin <command> [--data DIR]
   spaces            list spaces with size, keys and last activity
   export <space>    dump every key, then every series point, as JSON lines
   delete <space>    delete a space and its file
-  rekey <space>     lock a space, or replace its key, and print the new key
+  owner-token <space>
+                    issue a new owner token, for an owner who lost theirs, and print it
   stats             totals, visitors and the largest spaces
   cleanup           run the hourly cleanup now
 
@@ -106,16 +107,35 @@ func cmdAdmin(args []string) int {
 				return err
 			}
 			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "SPACE\tKIND\tSIZE\tKEYS\tLAST ACTIVE")
+			fmt.Fprintln(tw, "SPACE\tREAD\tWRITE\tSIZE\tKEYS\tLAST ACTIVE")
 			for _, r := range rows {
-				kind := "open"
-				if r.Locked {
-					kind = "locked"
+				st := r.Settings
+				read, write := "granted", "granted"
+				if st.Read {
+					read = "anyone"
 				}
+				switch {
+				case st.WriteShared && st.WriteUsers && st.WriteMe:
+					write = "anyone"
+				case st.WriteShared || st.WriteUsers || st.WriteMe:
+					var parts []string
+					for _, a := range []struct {
+						n  string
+						on bool
+					}{{"shared", st.WriteShared}, {"users", st.WriteUsers}, {"me", st.WriteMe}} {
+						v := "granted"
+						if a.on {
+							v = "anyone"
+						}
+						parts = append(parts, a.n+"="+v)
+					}
+					write = strings.Join(parts, ",")
+				}
+				name := r.Name
 				if r.Pinned {
-					kind += ",pinned"
+					name += " (pinned)"
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\n", r.Name, kind, humanBytes(r.Bytes), r.Keys, time.Unix(r.LastActive, 0).Format("2006-01-02 15:04"))
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n", name, read, write, humanBytes(r.Bytes), r.Keys, time.Unix(r.LastActive, 0).Format("2006-01-02 15:04"))
 			}
 			return tw.Flush()
 		case "stats":
@@ -160,20 +180,20 @@ func cmdAdmin(args []string) int {
 			resp.Body.Close()
 			fmt.Println("deleted", name)
 			return nil
-		case "rekey":
+		case "owner-token":
 			name, err := needSpace()
 			if err != nil {
 				return err
 			}
-			resp, err := call("POST", "/spaces/"+name+"/rekey")
+			resp, err := call("POST", "/spaces/"+name+"/owner-token")
 			if err != nil {
 				return err
 			}
-			var out struct{ Key string }
+			var out struct{ Owner string }
 			if err := decode(resp, &out); err != nil {
 				return err
 			}
-			fmt.Println(out.Key)
+			fmt.Println(out.Owner)
 			return nil
 		case "cleanup":
 			resp, err := call("POST", "/cleanup")

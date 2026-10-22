@@ -3,12 +3,10 @@ package store
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"database/sql"
 	"errors"
 
 	"github.com/timjaanson/cubby/internal/apierr"
-	"github.com/timjaanson/cubby/internal/names"
 )
 
 type WriteReq struct {
@@ -17,8 +15,6 @@ type WriteReq struct {
 	IsJSON           bool
 	Writer           string
 	IfVersion        *int64
-	SpaceKey         string
-	OnCreate         func() error // called before a write creates the space
 }
 
 type writeResult struct {
@@ -37,25 +33,12 @@ func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err err
 		}
 	}
 
-	sp, _, err := s.Acquire(r.Space, false, "")
+	sp, err := s.Acquire(r.Space)
 	if err != nil {
 		return res, err
 	}
 	if sp == nil {
-		if del {
-			return res, apierr.NotFound
-		}
-		if s.SpaceCount() >= s.cfg.Limits.MaxSpaces {
-			return res, apierr.ServerFull
-		}
-		if r.OnCreate != nil {
-			if err := r.OnCreate(); err != nil {
-				return res, err
-			}
-		}
-		if sp, _, err = s.Acquire(r.Space, true, ""); err != nil {
-			return res, err
-		}
+		return res, apierr.NoSpace
 	}
 	defer s.Release(sp)
 
@@ -73,9 +56,6 @@ func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err err
 	m, err := readMeta(tx)
 	if err != nil {
 		return res, err
-	}
-	if m.keyHash != "" && r.Area == "s" && (r.SpaceKey == "" || subtle.ConstantTimeCompare([]byte(names.HashSecret(r.SpaceKey)), []byte(m.keyHash)) != 1) {
-		return res, apierr.SpaceLocked
 	}
 
 	var old struct {

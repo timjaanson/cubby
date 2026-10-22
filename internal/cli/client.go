@@ -25,7 +25,6 @@ type client struct {
 	creds    *credentials
 	sc       *serverCreds
 	envToken string // from --token or CUBBY_TOKEN, never saved
-	spaceKey string // from --space-key or CUBBY_SPACE_KEY
 	http     *http.Client
 }
 
@@ -47,7 +46,6 @@ func newClient(f *flags) (*client, error) {
 		creds:    creds,
 		sc:       sc,
 		envToken: firstNonEmpty(f.str("token"), os.Getenv("CUBBY_TOKEN")),
-		spaceKey: firstNonEmpty(f.str("space-key"), os.Getenv("CUBBY_SPACE_KEY")),
 		http:     &http.Client{Timeout: 70 * time.Second},
 	}, nil
 }
@@ -65,11 +63,11 @@ func (e *cliError) Error() string { return e.err + ": " + e.msg }
 
 func exitFor(code string, status int) int {
 	switch code {
-	case "not_found":
+	case "not_found", "no_space":
 		return 1
 	case "version_conflict":
 		return 2
-	case "space_locked", "not_owner", "missing_token", "invalid_token":
+	case "no_access", "owner_only", "not_yours", "invite_invalid", "missing_token", "invalid_token":
 		return 3
 	case "rate_limited", "space_limit", "too_many_watches", "visitor_quota_exceeded", "space_quota_exceeded", "server_full":
 		return 4
@@ -107,11 +105,21 @@ func (c *client) freshToken() (string, error) {
 	if err := json.Unmarshal(body, &out); err != nil {
 		return "", &cliError{code: 6, err: "bad_response", msg: "the server sent something that isn't a token"}
 	}
-	c.sc.Token, c.sc.ID = out.Token, out.ID
-	if err := c.creds.save(); err != nil {
-		fmt.Fprintln(os.Stderr, "cubby: warning: could not save the token:", err)
-	}
+	c.adopt(out.Token, out.ID)
 	return out.Token, nil
+}
+
+// adopt saves a visitor the server created for this CLI: from /v1/anon, or
+// from /v1/spaces and join called without a token. A token given with
+// --token or CUBBY_TOKEN is never replaced.
+func (c *client) adopt(token, id string) {
+	if token == "" || c.envToken != "" {
+		return
+	}
+	c.sc.Token, c.sc.ID = token, id
+	if err := c.creds.save(); err != nil {
+		fmt.Fprintln(os.Stderr, "cubby: warning: could not save the visitor token:", err)
+	}
 }
 
 func apiErrFrom(resp *http.Response, body []byte) *cliError {
@@ -155,7 +163,6 @@ func (c *client) raw(method, path string, body []byte, hdr http.Header) (*http.R
 
 type reqOpts struct {
 	needToken bool
-	spaceKey  string
 }
 
 // do sends a request with the token, handles 401 invalid_token by getting a
@@ -171,9 +178,6 @@ func (c *client) do(method, path string, body []byte, o reqOpts) (*http.Response
 		h := http.Header{}
 		if t := c.token(); t != "" {
 			h.Set("Authorization", "Bearer "+t)
-		}
-		if o.spaceKey != "" {
-			h.Set("Space-Key", o.spaceKey)
 		}
 		resp, b, err := c.raw(method, path, body, h)
 		if err != nil {

@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/timjaanson/cubby/internal/access"
 	"strconv"
 	"testing"
 	"time"
@@ -277,10 +278,15 @@ func TestMissLimitHTTP(t *testing.T) {
 	}
 	as := func(ip string) []string { return []string{"X-Forwarded-For", ip} }
 	ip := as("203.0.113.7")
+	ownerTok, owner := c.anon()
 	for _, n := range []string{"inuse-space-xxxxxxxx", "never-touched-xxxxxx"} {
-		if _, err := c.store.CreateNamedSpace(n, false); err != nil {
+		if _, _, err := c.store.CreateSpace(n, "", access.Settings{Read: true}, owner); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// A private space looks exactly like a missing one, and costs a miss.
+	if _, _, err := c.store.CreateSpace("private-xxxxxxxxxxx", "", access.Private, owner); err != nil {
+		t.Fatal(err)
 	}
 
 	// Missing keys in a real space never count.
@@ -289,12 +295,21 @@ func TestMissLimitHTTP(t *testing.T) {
 			t.Fatalf("missing key: %d %s", s, b)
 		}
 	}
-	// Exactly the budget of distinct missing spaces, each a plain 404.
-	for i := range missesPerHour {
-		if s, _, b := c.req("GET", "/v1/"+missing(i)+"/shared/k", "", ip...); s != 404 || errCode(b) != "not_found" {
+	// Exactly the budget of distinct missing spaces, each a plain 404. One
+	// of them is the private space, which must give the same answer.
+	_, hm, missBody := c.req("GET", "/v1/"+missing(1)+"/shared/k", "", ip...)
+	_, hp, privBody := c.req("GET", "/v1/private-xxxxxxxxxxx/shared/k", "", ip...)
+	if errCode(missBody) != "no_space" || missBody != privBody || len(hm) != len(hp) {
+		t.Fatalf("private differs from missing: %s / %s", missBody, privBody)
+	}
+	for i := range missesPerHour - 1 {
+		if s, _, b := c.req("GET", "/v1/"+missing(i)+"/shared/k", "", ip...); s != 404 || errCode(b) != "no_space" {
 			t.Fatalf("miss %d: %d %s", i+1, s, b)
 		}
 	}
+	// The private space's owner, from the same address, isn't affected:
+	// they used it.
+	_ = ownerTok
 	// Repeats of those are still plain 404s.
 	if s, _, _ := c.req("GET", "/v1/"+missing(0)+"/shared/k", "", ip...); s != 404 {
 		t.Fatalf("repeat miss: %d", s)
@@ -335,20 +350,20 @@ func TestMissLimitHTTP(t *testing.T) {
 	}
 	// A space created while blocked is usable by its creator right away.
 	tokB, _ := c.anon()
-	_, _, b = c.req("POST", "/v1/spaces?label=late", "", "Authorization", "Bearer "+tokB, "X-Forwarded-For", "203.0.113.7")
+	_, _, b = c.req("POST", "/v1/spaces", `{"label":"late"}`, "Authorization", "Bearer "+tokB, "X-Forwarded-For", "203.0.113.7")
 	var created struct{ Space string }
 	json.Unmarshal([]byte(b), &created)
 	if created.Space == "" {
 		t.Fatalf("create while blocked: %s", b)
 	}
-	if s, _, b := c.req("GET", "/v1/"+created.Space+"/shared/k", "", ip...); s != 404 || errCode(b) != "not_found" {
+	if s, _, b := c.req("GET", "/v1/"+created.Space+"/shared/k", "", append(ip, "Authorization", "Bearer "+tokB)...); s != 404 || errCode(b) != "not_found" {
 		t.Fatalf("new space refused to its creator: %d %s", s, b)
 	}
 	// Creating spaces with POST /v1/spaces isn't a miss, and using them after is free.
 	tok, _ := c.anon()
 	auth := []string{"Authorization", "Bearer " + tok, "X-Forwarded-For", "198.51.100.1"}
 	for i := range 3 {
-		if s, _, b := c.req("POST", "/v1/spaces?label=room", "", auth...); s != 201 {
+		if s, _, b := c.req("POST", "/v1/spaces", `{"label":"room"}`, auth...); s != 201 {
 			t.Fatalf("create %d: %d %s", i, s, b)
 		}
 	}

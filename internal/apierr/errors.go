@@ -19,11 +19,35 @@ func (e *Error) Error() string { return e.Code + ": " + e.Message }
 
 var (
 	NotFound     = &Error{Status: 404, Code: "not_found", Message: "No such key."}
-	SpaceLocked  = &Error{Status: 403, Code: "space_locked", Message: "This space is locked. Writing shared/ needs the right Space-Key header."}
 	ServerFull   = &Error{Status: 507, Code: "server_full", Message: "The server is full."}
-	MissingToken = &Error{Status: 401, Code: "missing_token", Message: "This request needs a token. Get one with POST /v1/anon and send it as Authorization: Bearer <token>."}
-	InvalidToken = &Error{Status: 401, Code: "invalid_token", Message: "The token is unknown or expired. Get a new one with POST /v1/anon."}
+	MissingToken = &Error{Status: 401, Code: "missing_token", Message: "This request needs a visitor token. Get one with POST /v1/anon and send it as Authorization: Bearer <token>."}
+	InvalidToken = &Error{Status: 401, Code: "invalid_token", Message: "The visitor token is unknown or expired. Get a new one with POST /v1/anon; it starts with no grants."}
+
+	// NoSpace is the answer for a space that doesn't exist and for a private
+	// space the request can't read. They must stay identical, so the
+	// message names both causes.
+	NoSpace = &Error{Status: 404, Code: "no_space",
+		Message: "No such space, or it's private and this visitor hasn't joined it. Redeem an invite with POST /v1/{space}/join, or check the name."}
+	// InviteInvalid is every failed join, whatever was wrong.
+	InviteInvalid = &Error{Status: 404, Code: "invite_invalid",
+		Message: "This invite is unknown, expired, used up or revoked, or the space doesn't exist. Ask the space's owner for a new one."}
+	NoAccess = &Error{Status: 403, Code: "no_access",
+		Message: "This visitor may not write here. The space's owner can invite them with more rights, or change who may write."}
+	OwnerOnly = &Error{Status: 403, Code: "owner_only", Message: "Only an owner of this space can do this."}
 )
+
+// NotYours is a write under another visitor's users/{id}/.
+func NotYours(id string) *Error {
+	return &Error{Status: 403, Code: "not_yours", Message: "Only that visitor can write under users/" + id + "/."}
+}
+
+func InvalidSettings(msg string) *Error {
+	return &Error{Status: 400, Code: "invalid_settings", Message: msg}
+}
+
+func InvalidScope(msg string) *Error {
+	return &Error{Status: 400, Code: "invalid_scope", Message: msg}
+}
 
 // InvalidSpace is a space name that breaks the naming rule.
 func InvalidSpace(suggestion string) *Error {
@@ -70,5 +94,3 @@ func NotSeries(key string) *Error {
 	return &Error{Status: 409, Code: "not_series", Extra: map[string]any{"key": key},
 		Message: key + " is a plain key, not a series. Read it with GET " + key + ", replace it with PUT."}
 }
-
-var NoSpace = &Error{Status: 404, Code: "not_found", Message: "No such space."}

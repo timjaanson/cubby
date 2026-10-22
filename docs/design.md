@@ -2,9 +2,7 @@
 
 A self-hosted key-value store in a single binary, for shared and per-visitor state in web pages, scripts and anything else that can make an HTTP request. One request to create a space, and no visible login.
 
-Status: v0.9.0 is built, series included. These docs describe the next version, with owners, access tokens, grants and space settings in place of open and locked spaces. The README lists what the build still does differently, see [Differences from the design docs](../README.md#differences-from-the-design-docs).
-
-The goal of the next version is a good, reliable access model, built cleanly. Nothing stored today is important enough to migrate, so it carries no compatibility code, no old routes and no conversion of existing data.
+Status: v0.10.0 is built: series, and the access model with owners, private-by-default spaces, invites and grants. Differences between the build and these docs are listed at the end of the [README](../README.md#differences-from-the-design-docs). v0.10.0 replaced open and locked spaces without any migration, so data from earlier versions doesn't carry over.
 
 - This file explains the model and how a client uses it.
 - [spec.md](spec.md) is the detailed contract, including the CLI, plus ideas kept for later.

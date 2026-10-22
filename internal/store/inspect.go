@@ -40,8 +40,8 @@ func (s *Store) OpenSpaces() int {
 
 // PointCount is how many series points a space holds across all keys.
 func (s *Store) PointCount(space string) (int, error) {
-	sp, _, err := s.Acquire(space, false, "")
-	if err != nil {
+	sp, err := s.Acquire(space)
+	if err != nil || sp == nil {
 		return 0, err
 	}
 	defer s.Release(sp)

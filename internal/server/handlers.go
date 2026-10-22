@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -17,16 +16,25 @@ import (
 )
 
 func (s *Server) anon(c *reqCtx) error {
-	if err := s.rate(s.lim.anonPerIP, c.ip, 1, "rate_limited"); err != nil {
-		return err
-	}
-	tok, id, err := s.store.NewVisitor()
+	tok, id, err := s.newVisitor(c)
 	if err != nil {
 		return err
 	}
-	c.visitor = id
 	c.json(201, map[string]any{"token": tok, "id": id})
 	return nil
+}
+
+// newVisitor creates a visitor, within the per-IP limit that covers /anon,
+// /spaces and join.
+func (s *Server) newVisitor(c *reqCtx) (token, id string, err error) {
+	if err := s.rate(s.lim.visitorsPerIP, c.ip, 1, "rate_limited"); err != nil {
+		return "", "", err
+	}
+	token, id, err = s.store.NewVisitor()
+	if err == nil {
+		c.visitor = id
+	}
+	return token, id, err
 }
 
 func (s *Server) spaceRate(c *reqCtx, visitor string) error {
@@ -34,56 +42,6 @@ func (s *Server) spaceRate(c *reqCtx, visitor string) error {
 		return err
 	}
 	return s.rate(s.lim.spacesPerIP, c.ip, 1, "space_limit")
-}
-
-func (s *Server) createSpace(c *reqCtx) error {
-	id, err := c.needVisitor()
-	if err != nil {
-		return err
-	}
-	q := c.r.URL.Query()
-	label, name := q.Get("label"), q.Get("name")
-	if label != "" && name != "" {
-		return apierr.BadParam("name", "Give a name or a label, not both.")
-	}
-	if label != "" && !names.ValidLabel(label) {
-		return apierr.BadParam("label", fmt.Sprintf("A label is lowercase letters, digits and single hyphens, at most %d characters.", names.MaxLabel))
-	}
-	if name != "" && !names.ValidSpace(name) {
-		return apierr.InvalidSpace(names.SuggestFor(name))
-	}
-	if name != "" && s.store.SpaceExists(name) {
-		return apierr.SpaceExists(name) // before the rate limit, so a taken name costs nothing
-	}
-	locked := false
-	if q.Has("locked") {
-		switch q.Get("locked") {
-		case "", "1", "true":
-			locked = true
-		case "0", "false":
-		default:
-			return apierr.BadParam("locked", "locked takes no value, or true or false.")
-		}
-	}
-	if err := s.spaceRate(c, id); err != nil {
-		return err
-	}
-	var key string
-	if name != "" {
-		key, err = s.store.CreateNamedSpace(name, locked)
-	} else {
-		name, key, err = s.store.CreateSpace(label, locked)
-	}
-	if err != nil {
-		return err
-	}
-	s.lim.misses.remember(c.ip, name, s.lim.misses.now()) // its creator can use it even while out of miss budget
-	out := map[string]any{"space": name}
-	if locked {
-		out["key"] = key
-	}
-	c.json(201, out)
-	return nil
 }
 
 func valueHeaders(h http.Header, e *store.Entry) {
@@ -171,21 +129,14 @@ func jsonDepth(b []byte) int {
 	return max
 }
 
+// write runs after route checked access; the visitor is known.
 func (s *Server) write(c *reqCtx, t store.Target) error {
-	id, err := c.needVisitor()
-	if err != nil {
-		return err
-	}
-	if strings.HasPrefix(t.Area, "u:") && t.Area != "u:"+id {
-		return &apierr.Error{Status: 403, Code: "not_owner", Message: "Only that visitor can write under users/" + strings.TrimPrefix(t.Area, "u:") + "/."}
-	}
+	id := c.visitor
 	ifv, err := parseIfVersion(c.r)
 	if err != nil {
 		return err
 	}
-	req := store.WriteReq{Space: t.Space, Area: t.Area, Key: t.Key, Writer: id, IfVersion: ifv,
-		SpaceKey: c.r.Header.Get("Space-Key"),
-		OnCreate: func() error { return s.spaceRate(c, id) }}
+	req := store.WriteReq{Space: t.Space, Area: t.Area, Key: t.Key, Writer: id, IfVersion: ifv}
 
 	if c.r.Method == http.MethodPut {
 		maxValue, _, _ := s.cfg.LimitsFor(t.Space)

@@ -1,10 +1,5 @@
 package store
 
-import (
-	"database/sql"
-	"strings"
-)
-
 const serverSchema = `
 CREATE TABLE IF NOT EXISTS visitors (
   id           TEXT PRIMARY KEY,
@@ -27,7 +22,7 @@ CREATE TABLE IF NOT EXISTS graveyard (
 
 const spaceSchema = `
 CREATE TABLE IF NOT EXISTS meta (
-  k TEXT PRIMARY KEY,   -- seq, created_at, last_active_at, tombstone_floor, bytes, keys, key_hash
+  k TEXT PRIMARY KEY,   -- seq, created_at, last_active_at, tombstone_floor, bytes, keys, settings, owner_hash
   v
 );
 CREATE TABLE IF NOT EXISTS kv (
@@ -56,30 +51,28 @@ CREATE TABLE IF NOT EXISTS points (
   is_json INTEGER NOT NULL,
   PRIMARY KEY (area, key, t)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS tokens (
+  id               TEXT PRIMARY KEY,     -- t_ + 8 base32
+  hash             TEXT NOT NULL UNIQUE, -- SHA-256 of the at_ token
+  label            TEXT NOT NULL DEFAULT '',
+  allow            TEXT NOT NULL,        -- JSON array of scopes
+  uses_left        INTEGER,              -- NULL: no limit
+  until            INTEGER,              -- ms, NULL: no end
+  grant_for        INTEGER,              -- ms, NULL: grants last until revoked
+  created_at       INTEGER NOT NULL,     -- ms
+  ended_at         INTEGER,              -- ms, when it ran out of uses
+  last_redeemed_at INTEGER
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS grants (
+  id           TEXT PRIMARY KEY,         -- g_ + 8 base32
+  visitor      TEXT NOT NULL,
+  owner        INTEGER NOT NULL DEFAULT 0,
+  allow        TEXT NOT NULL,            -- JSON array of scopes, [] for owner grants
+  source       TEXT NOT NULL,            -- 'create', 'owner-token', 'direct' or a token id
+  until        INTEGER,                  -- ms, NULL: until revoked
+  created_at   INTEGER NOT NULL,         -- ms
+  last_used_at INTEGER
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS grants_by_visitor ON grants (visitor);
+CREATE UNIQUE INDEX IF NOT EXISTS grants_once ON grants (visitor, source) WHERE source <> 'direct';
 `
-
-// migrateSpace brings a space file from before series up to date. Files
-// created since have everything already, and running it twice is harmless.
-func migrateSpace(db *sql.DB) error {
-	rows, err := db.Query(`SELECT name FROM pragma_table_info('kv')`)
-	if err != nil {
-		return err
-	}
-	has := map[string]bool{}
-	for rows.Next() {
-		var n string
-		rows.Scan(&n)
-		has[n] = true
-	}
-	rows.Close()
-	for _, col := range []string{"series INTEGER NOT NULL DEFAULT 0", "t INTEGER", "n INTEGER NOT NULL DEFAULT 0"} {
-		name, _, _ := strings.Cut(col, " ")
-		if !has[name] {
-			if _, err := db.Exec(`ALTER TABLE kv ADD COLUMN ` + col); err != nil {
-				return err
-			}
-		}
-	}
-	_, err = db.Exec(spaceSchema)
-	return err
-}

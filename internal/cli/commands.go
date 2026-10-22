@@ -16,25 +16,31 @@ import (
 	"github.com/timjaanson/cubby/internal/names"
 )
 
-var clientValueFlags = []string{"server", "token", "space-key"}
+var clientValueFlags = []string{"server", "token"}
 
 var commandFlags = map[string]struct {
 	vals, bools []string
 	help        string
 }{
-	"get":    {nil, []string{"json"}, "get <path> [--json]\n  Print the raw value. Exit 1 if it doesn't exist."},
-	"set":    {[]string{"if-version"}, []string{"create"}, "set <path> [value|-] [--if-version N] [--create]\n  Write from the argument, or from stdin when it's missing or -. Prints the new version."},
-	"del":    {[]string{"if-version"}, []string{"f", "force"}, "del <path> [--if-version N] [-f]\n  Delete. With -f a missing key isn't an error."},
-	"ls":     {[]string{"limit"}, []string{"json", "desc"}, "ls <path or pattern> [--limit N] [--desc] [--json]\n  One line per item: key<TAB>value, or user<TAB>key<TAB>value under users/*/."},
-	"watch":  {[]string{"from", "state", "exec"}, []string{"json", "once", "raw"}, "watch <path or pattern> [--from N|now] [--state FILE] [--exec CMD] [--once] [--raw] [--json]\n  Print current state, then changes. --exec runs CMD per change with the value on stdin\n  and KV_KEY, KV_VERSION, KV_DELETED, KV_USER set. --state FILE resumes after restarts."},
-	"add":    {[]string{"time"}, nil, "add <path> [value|-] [--time MS]\n  Add a point to a series, from the argument or stdin. Prints the point's time.\nadd <prefix*> name=value ... [--time MS]\n  Add one point to each series prefix+name, all at one time. A value is JSON if it parses,\n  otherwise a string. Without name=value arguments, reads one JSON object from stdin."},
-	"series": {[]string{"since", "limit"}, []string{"json"}, "series <path> [--since MS|24h|90m|7d] [--limit N] [--json]\n  Print a series' points oldest first, as t<TAB>value. Without --since, the newest 1000."},
-	"update": {[]string{"exec"}, nil, "update <path> [--exec CMD]\n  Read, pipe through CMD (or open $EDITOR), write back with ifVersion, retry on conflict.\n  Example: cubby update space/shared/count --exec 'jq \"(. // 0) + 1\"'"},
-	"new":    {[]string{"label"}, []string{"locked", "no-save"}, "new [label | name] [--locked] [--no-save]\n  Create a space and print its name. With nothing, the name is four random words\n  (cedar-pilot-mango-frost). A label gets the words added (new poll ->\n  poll-cedar-pilot-mango-frost). A full space name of 16+ characters is created as is,\n  and fails if it's taken. --label L forces label meaning. Locked spaces print the key\n  on a second line and save it."},
-	"name":   {nil, nil, "name [label]\n  Print a new space name: four random words, after the label if given. No server needed."},
-	"whoami": {nil, nil, "whoami\n  Print your visitor ID."},
-	"token":  {nil, nil, "token\n  Print your token, for curl: curl -H \"Authorization: Bearer $(cubby token)\" ..."},
-	"url":    {nil, nil, "url <path>\n  Print the full URL for a path."},
+	"get":         {nil, []string{"json"}, "get <path> [--json]\n  Print the raw value. Exit 1 if it doesn't exist."},
+	"set":         {[]string{"if-version"}, []string{"create"}, "set <path> [value|-] [--if-version N] [--create]\n  Write from the argument, or from stdin when it's missing or -. Prints the new version."},
+	"del":         {[]string{"if-version"}, []string{"f", "force"}, "del <path> [--if-version N] [-f]\n  Delete. With -f a missing key isn't an error."},
+	"ls":          {[]string{"limit"}, []string{"json", "desc"}, "ls <path or pattern> [--limit N] [--desc] [--json]\n  One line per item: key<TAB>value, or user<TAB>key<TAB>value under users/*/."},
+	"watch":       {[]string{"from", "state", "exec"}, []string{"json", "once", "raw"}, "watch <path or pattern> [--from N|now] [--state FILE] [--exec CMD] [--once] [--raw] [--json]\n  Print current state, then changes. --exec runs CMD per change with the value on stdin\n  and KV_KEY, KV_VERSION, KV_DELETED, KV_USER set. --state FILE resumes after restarts."},
+	"add":         {[]string{"time"}, nil, "add <path> [value|-] [--time MS]\n  Add a point to a series, from the argument or stdin. Prints the point's time.\nadd <prefix*> name=value ... [--time MS]\n  Add one point to each series prefix+name, all at one time. A value is JSON if it parses,\n  otherwise a string. Without name=value arguments, reads one JSON object from stdin."},
+	"series":      {[]string{"since", "limit"}, []string{"json"}, "series <path> [--since MS|24h|90m|7d] [--limit N] [--json]\n  Print a series' points oldest first, as t<TAB>value. Without --since, the newest 1000."},
+	"update":      {[]string{"exec"}, nil, "update <path> [--exec CMD]\n  Read, pipe through CMD (or open $EDITOR), write back with ifVersion, retry on conflict.\n  Example: cubby update space/shared/count --exec 'jq \"(. // 0) + 1\"'"},
+	"new":         {[]string{"label", "public", "read", "write"}, nil, "new [label | name] [--public none|read|respond|all] [--read R --write W]\n  Create a space you own. Print its name, then its owner token: keep that one, it's\n  shown once and gets you back in from another machine. Spaces are private unless\n  --public says otherwise:\n    read      anyone reads, invited people write (status pages, sensor readings)\n    respond   anyone reads and adds their own users/ entry (polls, RSVPs)\n    all       anyone with the name reads and writes\n  With nothing, the name is four random words; a label gets the words added\n  (new poll -> poll-cedar-pilot-mango-frost); a full name of 16+ characters is used\n  as is and fails if taken."},
+	"name":        {nil, nil, "name [label]\n  Print a new space name: four random words, after the label if given. No server needed."},
+	"whoami":      {nil, []string{"show-token"}, "whoami [--show-token]\n  Print your visitor ID, or with --show-token your visitor token, for curl:\n  curl -H \"Authorization: Bearer $(cubby whoami --show-token)\" ..."},
+	"url":         {nil, nil, "url <path>\n  Print the full URL for a path."},
+	"join":        {nil, nil, "join <space> <token or link>\n  Redeem an invite (at_...) or an owner token (ot_...) for this CLI's visitor. A link\n  like https://example.com/page/#t=at_... works too. Prints what you may now do."},
+	"access":      {nil, nil, "access <space>\n  What you may do in a space: owner, member or visitor, then one line per grant:\n  ID, until or -, scopes."},
+	"settings":    {[]string{"public", "read", "write"}, nil, "settings <space> [--public none|read|respond|all | --read R --write W]\n  Print a space's settings, or change them (owners). --write takes anyone, granted, or\n  a list like shared=granted,me=anyone."},
+	"drop":        {nil, []string{"yes"}, "drop <space> [--yes]\n  Delete a space and everything in it (owners). Asks for the name again unless --yes."},
+	"owner-token": {nil, nil, "owner-token <space>\n  Rotate the space's owner token and print the new one (owners). Owners who joined\n  with the old one lose ownership; you keep yours."},
+	"token":       {[]string{"allow", "uses", "until", "grant-for", "label", "link"}, nil, "token new <space> [--allow SCOPE ...] [--uses N|unlimited] [--until T|never] [--grant-for D]\n          [--label L] [--link URL]\n  Mint an access token: an invite. Defaults: a full member (--allow member), 10 uses,\n  7 days. --allow takes scopes like shared/status.*:w, or member or viewer. --until\n  takes 12h, 30d, 2027-01-31 or an RFC 3339 time. --link prints URL#t=TOKEN to send.\ntoken ls <space>\n  One line per token: ID, state, uses left, until, grants, label, scopes.\ntoken set <space> <id> [--uses N|unlimited] [--until T|never]\n  Change how often and how long it can still be redeemed. --uses 0 stops new ones.\ntoken rm <space> <id>\n  Revoke a token and every grant redeemed from it."},
+	"grant":       {[]string{"allow", "until", "user"}, []string{"owner"}, "grant ls <space> [--user ID]\n  One line per grant: ID, user, owner or member, source, until, scopes.\ngrant add <space> <user> [--allow SCOPE ...] [--until T] [--owner]\n  Give a visitor rights directly, with no token. Prints the grant ID.\ngrant rm <space> <grant-id>\ngrant rm <space> --user ID\n  Revoke one grant, or everything a visitor holds in the space."},
 }
 
 func cmdHelp(cmd string) int {
@@ -61,7 +67,7 @@ func cmdHelp(cmd string) int {
 		return usageErr(fmt.Errorf("unknown command %q", cmd))
 	}
 	fmt.Println(d.help)
-	fmt.Println("\nCommon flags: --server URL or port (CUBBY_SERVER), --token T (CUBBY_TOKEN), --space-key K (CUBBY_SPACE_KEY)")
+	fmt.Println("\nCommon flags: --server URL or port (CUBBY_SERVER), --token T (CUBBY_TOKEN, a visitor token)")
 	return 0
 }
 
@@ -138,17 +144,32 @@ func (c *client) run(cmd string, f *flags) error {
 	case "new":
 		return c.newSpace(f)
 	case "whoami":
+		if f.bool("show-token") {
+			t, err := c.ensureToken()
+			if err == nil {
+				fmt.Println(t)
+			}
+			return err
+		}
 		id, err := c.visitorID()
 		if err == nil {
 			fmt.Println(id)
 		}
 		return err
+	case "join":
+		return c.join(f)
+	case "access":
+		return c.access(f)
+	case "settings":
+		return c.settings(f)
+	case "drop":
+		return c.drop(f)
+	case "owner-token":
+		return c.ownerToken(f)
 	case "token":
-		t, err := c.ensureToken()
-		if err == nil {
-			fmt.Println(t)
-		}
-		return err
+		return c.tokenCmd(f)
+	case "grant":
+		return c.grantCmd(f)
 	case "url":
 		p, err := c.onePath(f, "url")
 		if err == nil {
@@ -225,7 +246,7 @@ func (c *client) put(p kvPath, value []byte, ifVersion *int64) (int64, *http.Res
 	if value == nil {
 		method = "DELETE"
 	}
-	resp, b, err := c.do(method, u, value, reqOpts{needToken: true, spaceKey: c.spaceKeyFor(p)})
+	resp, b, err := c.do(method, u, value, reqOpts{needToken: true})
 	if err != nil {
 		return 0, nil, err
 	}
@@ -395,50 +416,27 @@ func (c *client) newSpace(f *flags) error {
 	if len(f.args) == 1 && f.str("label") != "" {
 		return usageCli("give the label as an argument or with --label, not both")
 	}
-	q := url.Values{}
+	body := map[string]any{}
 	switch {
 	case f.str("label") != "":
-		q.Set("label", f.str("label"))
+		body["label"] = f.str("label")
 	case len(f.args) == 1 && names.ValidSpace(f.args[0]):
-		q.Set("name", f.args[0]) // already a full name: create exactly that
+		body["name"] = f.args[0] // already a full name: create exactly that
 	case len(f.args) == 1:
-		q.Set("label", f.args[0])
+		body["label"] = f.args[0]
 	}
-	if l := q.Get("label"); l != "" && !names.ValidLabel(l) {
+	if l, _ := body["label"].(string); l != "" && !names.ValidLabel(l) {
 		return &cliError{code: 5, err: "invalid_parameter", msg: fmt.Sprintf("%q isn't a label or a space name. A label is lowercase letters, digits and single hyphens, at most %d characters", l, names.MaxLabel)}
 	}
-	u := "/v1/spaces"
-	if len(q) > 0 {
-		u += "?" + q.Encode()
-	}
-	if f.bool("locked") {
-		if len(q) > 0 {
-			u += "&locked"
-		} else {
-			u += "?locked"
-		}
-	}
-	resp, b, err := c.do("POST", u, nil, reqOpts{needToken: true})
-	if err != nil {
+	if err := settingsFlags(f, body); err != nil {
 		return err
 	}
-	if resp.StatusCode != 201 {
-		return apiErrFrom(resp, b)
+	var out struct{ Space, Owner, ID, Token string }
+	if err := c.call("POST", "/v1/spaces", body, 201, &out); err != nil {
+		return err
 	}
-	var out struct{ Space, Key string }
-	json.Unmarshal(b, &out)
+	c.adopt(out.Token, out.ID)
 	fmt.Println(out.Space)
-	if out.Key != "" {
-		fmt.Println(out.Key)
-		if !f.bool("no-save") {
-			if c.sc.SpaceKeys == nil {
-				c.sc.SpaceKeys = map[string]string{}
-			}
-			c.sc.SpaceKeys[out.Space] = out.Key
-			if err := c.creds.save(); err != nil {
-				fmt.Fprintln(os.Stderr, "cubby: warning: could not save the space key:", err)
-			}
-		}
-	}
+	fmt.Println(out.Owner)
 	return nil
 }

@@ -1,10 +1,5 @@
 // Package names validates space names, keys, patterns and visitor IDs, and
 // makes the random names, tokens and hashes the rest of the code uses.
-//
-// Space names have two checks. ValidSpace is the rule for names used over
-// the API. SafeSpaceFile only makes sure a name is safe to use as a file
-// name, and is what the store and admin use, so tightening the API rule
-// never makes spaces already on disk unreadable.
 package names
 
 import (
@@ -24,7 +19,13 @@ var (
 	KeyRe     = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 	patternRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{0,127}\*$`)
 	visitorRe = regexp.MustCompile(`^u_[a-z2-7]{16}$`)
-	TokenRe   = regexp.MustCompile(`^kv_[A-Za-z0-9_-]{43}$`)
+	// The three kinds of token: a visitor's identity, an invite to a
+	// space, and a space's recovery key.
+	VisitorTokenRe = regexp.MustCompile(`^vt_[A-Za-z0-9_-]{43}$`)
+	AccessTokenRe  = regexp.MustCompile(`^at_[A-Za-z0-9_-]{43}$`)
+	OwnerTokenRe   = regexp.MustCompile(`^ot_[A-Za-z0-9_-]{43}$`)
+	tokenIDRe      = regexp.MustCompile(`^t_[a-z2-7]{8}$`)
+	grantIDRe      = regexp.MustCompile(`^g_[a-z2-7]{8}$`)
 )
 
 const (
@@ -55,16 +56,6 @@ func init() {
 // whoever picked it made it.
 func ValidSpace(name string) bool {
 	return len(name) >= MinSpace && len(name) <= MaxSpace && spaceRe.MatchString(name)
-}
-
-// SafeSpaceFile reports whether name can be used as a space's file name:
-// 1 to 63 lowercase letters, digits and single hyphens, so it can't contain
-// a path separator or "..". It has no minimum length beyond 1. Spaces whose
-// names fail ValidSpace, for example ones created under an older rule, can
-// still be opened, counted, listed, exported, deleted and cleaned up; the
-// API just can't reach them.
-func SafeSpaceFile(name string) bool {
-	return len(name) >= 1 && len(name) <= MaxSpace && spaceRe.MatchString(name)
 }
 
 // ValidLabel checks a label: the same characters as a space name, at most
@@ -155,6 +146,19 @@ func NewVisitorID() string {
 	rand.Read(b)
 	return "u_" + strings.ToLower(base32.StdEncoding.EncodeToString(b))
 }
+
+func shortID(prefix string) string {
+	b := make([]byte, 5)
+	rand.Read(b)
+	return prefix + strings.ToLower(base32.StdEncoding.EncodeToString(b))
+}
+
+// NewTokenID and NewGrantID name access tokens and grants within a space.
+func NewTokenID() string { return shortID("t_") }
+func NewGrantID() string { return shortID("g_") }
+
+func ValidTokenID(id string) bool { return tokenIDRe.MatchString(id) }
+func ValidGrantID(id string) bool { return grantIDRe.MatchString(id) }
 
 func RandomToken(prefix string) string {
 	b := make([]byte, 32)

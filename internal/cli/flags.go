@@ -9,13 +9,14 @@ import (
 // flags is a small parser that accepts flags anywhere on the line, so
 // "cubby set path value --create" works as well as the other order.
 type flags struct {
-	vals map[string]string
-	set  map[string]bool
-	args []string
+	vals  map[string]string
+	multi map[string][]string // every value of a flag given more than once, like --allow
+	set   map[string]bool
+	args  []string
 }
 
 func parseFlags(in []string, withValue, boolean []string) (*flags, error) {
-	f := &flags{vals: map[string]string{}, set: map[string]bool{}}
+	f := &flags{vals: map[string]string{}, multi: map[string][]string{}, set: map[string]bool{}}
 	isVal := map[string]bool{}
 	for _, n := range withValue {
 		isVal[n] = true
@@ -50,6 +51,7 @@ func parseFlags(in []string, withValue, boolean []string) (*flags, error) {
 				val = in[i]
 			}
 			f.vals[name] = val
+			f.multi[name] = append(f.multi[name], val)
 			f.set[name] = true
 		case isBool[name]:
 			if hasVal {
@@ -64,6 +66,8 @@ func parseFlags(in []string, withValue, boolean []string) (*flags, error) {
 }
 
 func (f *flags) str(n string) string { return f.vals[n] }
+
+func (f *flags) list(n string) []string { return f.multi[n] }
 
 func (f *flags) bool(n string) bool { return f.set[n] }
 

@@ -1,4 +1,4 @@
-// Package server is the HTTP API under /v1, the /kv.js and /health routes,
+// Package server is the HTTP API under /v1, the /kv.js, /share.js and /health routes,
 // rate limits, watches, and the admin handler on the Unix socket.
 package server
 
@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/timjaanson/cubby/internal/access"
 	"github.com/timjaanson/cubby/internal/apierr"
 	"github.com/timjaanson/cubby/internal/config"
 	"github.com/timjaanson/cubby/internal/names"
@@ -68,8 +69,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h := w.Header()
 	if r.Method == http.MethodOptions {
 		h.Set("Access-Control-Allow-Origin", "*")
-		h.Set("Access-Control-Allow-Methods", "GET, HEAD, PUT, DELETE, POST, OPTIONS")
-		h.Set("Access-Control-Allow-Headers", "Authorization, Space-Key, Content-Type, If-Match, If-None-Match")
+		h.Set("Access-Control-Allow-Methods", "GET, HEAD, PUT, PATCH, DELETE, POST, OPTIONS")
+		h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, If-Match, If-None-Match")
 		h.Set("Access-Control-Max-Age", "86400")
 		sw.WriteHeader(204)
 		return
@@ -84,6 +85,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.Set("Cache-Control", "public, max-age=3600")
 		h.Set("Access-Control-Allow-Origin", "*")
 		http.ServeContent(sw, r, "kv.js", version.BuildTime, bytes.NewReader(web.KVJS))
+		return
+	case "/share.js":
+		h.Set("Content-Type", "text/javascript; charset=utf-8")
+		h.Set("Cache-Control", "public, max-age=3600")
+		h.Set("Access-Control-Allow-Origin", "*")
+		http.ServeContent(sw, r, "share.js", version.BuildTime, bytes.NewReader(web.ShareJS))
 		return
 	}
 
@@ -102,7 +109,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else if t := r.URL.Query().Get("token"); t != "" {
 		tok = t
 	}
-	if tok != "" && !names.TokenRe.MatchString(tok) {
+	if tok != "" && !names.VisitorTokenRe.MatchString(tok) {
 		c.tokErr = apierr.InvalidToken // malformed, no need to look it up
 	} else if tok != "" {
 		id, err := s.store.VisitorByToken(tok)
@@ -120,6 +127,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.fail(err)
 	}
 }
+
+var noRoute = &apierr.Error{Status: 404, Code: "not_found", Message: "No such route."}
 
 func (s *Server) route(c *reqCtx) error {
 	raw := strings.Split(strings.TrimPrefix(c.r.URL.EscapedPath(), "/v1/"), "/")
@@ -160,41 +169,88 @@ func (s *Server) route(c *reqCtx) error {
 			if m != http.MethodPost {
 				return methodErr("POST")
 			}
-			if err := checkParams(c.r, "name", "label", "locked"); err != nil {
+			if err := checkParams(c.r); err != nil {
 				return err
 			}
 			return s.createSpace(c)
 		}
 	}
-	if len(seg) < 3 {
-		return &apierr.Error{Status: 404, Code: "not_found", Message: "No such route."}
-	}
 
+	// The shape of the path first, before anything about the space, so an
+	// unknown route is the same bare 404 whatever the name.
+	if len(seg) >= 2 {
+		switch seg[1] {
+		case "shared", "me":
+			if len(seg) < 3 {
+				return noRoute
+			}
+		case "users":
+			if len(seg) < 4 {
+				return noRoute
+			}
+		case "access", "join", "owner-token":
+			if len(seg) != 2 {
+				return noRoute
+			}
+		case "tokens", "grants":
+			if len(seg) > 3 {
+				return noRoute
+			}
+		default:
+			return noRoute
+		}
+	}
 	space := seg[0]
 	if !names.ValidSpace(space) {
+		if len(seg) == 1 {
+			return noRoute
+		}
 		return apierr.InvalidSpace(names.SuggestFor(space))
 	}
+	rights, err := s.store.Rights(space, c.visitor)
+	if err != nil {
+		return err
+	}
+
+	// join decides about misses itself: it only costs one when it fails.
+	if len(seg) == 2 && seg[1] == "join" {
+		if m != http.MethodPost {
+			return methodErr("POST")
+		}
+		if err := checkParams(c.r); err != nil {
+			return err
+		}
+		return s.join(c, space, rights)
+	}
+
+	// A space this request can't see, missing or private, answers the same
+	// way and costs the same miss.
+	visible := rights != nil && rights.Visible()
 	if s.cfg.RateLimitsOn() {
-		if ok, retry := s.lim.misses.check(c.ip, space, func() bool { return s.store.SpaceExists(space) }); !ok {
+		if ok, retry := s.lim.misses.check(c.ip, space, func() bool { return visible }); !ok {
 			return apierr.RateLimited("miss_limit", retry)
 		}
 	}
+	if !visible {
+		return apierr.NoSpace
+	}
 
+	if len(seg) == 1 || seg[1] == "access" || seg[1] == "tokens" || seg[1] == "grants" || seg[1] == "owner-token" {
+		return s.spaceRoute(c, space, rights, seg[1:])
+	}
 	t := store.Target{Space: space}
+	op := access.Op{}
 	var rest []string
 	switch seg[1] {
 	case "shared":
-		t.Area, rest = "s", seg[2:]
+		t.Area, op.Area, rest = "s", "shared", seg[2:]
 	case "me":
 		id, err := c.needVisitor()
 		if err != nil {
 			return err
 		}
-		t.Area, rest = "m:"+id, seg[2:]
+		t.Area, op.Area, rest = "m:"+id, "me", seg[2:]
 	case "users":
-		if len(seg) < 4 {
-			return &apierr.Error{Status: 404, Code: "not_found", Message: "No such route."}
-		}
 		if seg[2] == "*" {
 			t.AllUsers = true
 		} else if names.ValidVisitor(seg[2]) {
@@ -202,9 +258,9 @@ func (s *Server) route(c *reqCtx) error {
 		} else {
 			return &apierr.Error{Status: 400, Code: "invalid_key", Message: "Not a visitor ID. IDs look like u_k7m2x9q4p1r8t3w6."}
 		}
-		rest = seg[3:]
+		op.Area, rest = "users", seg[3:]
 	default:
-		return &apierr.Error{Status: 404, Code: "not_found", Message: "No such route."}
+		return noRoute
 	}
 
 	// /{target} or /{target}/{action}, nothing after the action.
@@ -227,39 +283,43 @@ func (s *Server) route(c *reqCtx) error {
 		return &apierr.Error{Status: 400, Code: "invalid_key",
 			Message: "A key is 1 to 128 of A-Z a-z 0-9 . _ : - and can't be \".\", \"..\", \"watch\" or \"series\". A pattern is a prefix followed by *."}
 	}
+	op.Key, op.Pattern = t.Key, t.Pattern
 
-	if action == "series" {
+	// What the method does, then whether this visitor may.
+	type handler func(*reqCtx, store.Target) error
+	var h handler
+	isRead := m == http.MethodGet || m == http.MethodHead
+	switch {
+	case action == "series":
 		if t.AllUsers {
 			return &apierr.Error{Status: 400, Code: "invalid_key", Message: "Series can't be read or added across users/*/ yet. Use users/{id}/{key}/series."}
 		}
-		switch m {
-		case http.MethodGet, http.MethodHead:
+		switch {
+		case isRead:
 			if t.Pattern {
 				return &apierr.Error{Status: 400, Code: "invalid_key", Message: "Series are read one key at a time. To see the newest point of each, GET the pattern without /series."}
 			}
 			if err := checkParams(c.r, "since", "limit"); err != nil {
 				return err
 			}
-			return s.seriesRead(c, t)
-		case http.MethodPost:
+			h = s.seriesRead
+		case m == http.MethodPost:
 			if err := checkParams(c.r, "t"); err != nil {
 				return err
 			}
-			return s.seriesAdd(c, t)
+			h = s.seriesAdd
+		default:
+			return methodErrMsg("GET, HEAD, POST", "A series takes POST to add points and GET to read them. To replace or delete the key, use the path without /series.")
 		}
-		return methodErrMsg("GET, HEAD, POST", "A series takes POST to add points and GET to read them. To replace or delete the key, use the path without /series.")
-	}
-	if action == "watch" {
+	case action == "watch":
 		if m != http.MethodGet {
 			return methodErr("GET")
 		}
 		if err := checkParams(c.r, "version", "timeout"); err != nil {
 			return err
 		}
-		return s.watch(c, t)
-	}
-	isRead := m == http.MethodGet || m == http.MethodHead
-	if t.AllUsers || t.Pattern {
+		h = s.watch
+	case t.AllUsers || t.Pattern:
 		if !isRead {
 			if m == http.MethodPost && t.Pattern && !t.AllUsers {
 				return methodErrMsg("GET, HEAD", "To add a point to each of several series, POST to "+name+"/series.")
@@ -269,21 +329,40 @@ func (s *Server) route(c *reqCtx) error {
 		if err := checkParams(c.r, "limit", "order", "after"); err != nil {
 			return err
 		}
-		return s.list(c, t)
-	}
-	switch m {
-	case http.MethodGet, http.MethodHead:
+		h = s.list
+	case isRead:
 		if err := checkParams(c.r); err != nil {
 			return err
 		}
-		return s.read(c, t)
-	case http.MethodPut, http.MethodDelete:
+		h = s.read
+	case m == http.MethodPut || m == http.MethodDelete:
 		if err := checkParams(c.r, "ifVersion"); err != nil {
 			return err
 		}
-		return s.write(c, t)
-	case http.MethodPost:
+		h = s.write
+	case m == http.MethodPost:
 		return methodErrMsg("GET, HEAD, PUT, DELETE", "To add a point use "+t.Key+"/series. To replace the value use PUT.")
+	default:
+		return methodErr("GET, HEAD, PUT, DELETE")
 	}
-	return methodErr("GET, HEAD, PUT, DELETE")
+
+	op.Write = !isRead
+	if op.Write {
+		id, err := c.needVisitor()
+		if err != nil {
+			return err
+		}
+		if strings.HasPrefix(t.Area, "u:") && t.Area != "u:"+id {
+			// Owners may delete anyone's entries, as moderation. Nobody
+			// writes them.
+			if !(rights.Owner && m == http.MethodDelete) {
+				return apierr.NotYours(strings.TrimPrefix(t.Area, "u:"))
+			}
+		} else if !rights.Allows(op) {
+			return apierr.NoAccess
+		}
+	} else if !rights.Allows(op) {
+		return apierr.NoSpace // visible through a write-only grant, but not readable
+	}
+	return h(c, t)
 }

@@ -1144,7 +1144,7 @@ Access-Control-Expose-Headers: ETag, Retry-After, KV-Time, KV-By
 On preflight:
 
 ```
-Access-Control-Allow-Methods: GET, HEAD, PUT, DELETE, POST, OPTIONS
+Access-Control-Allow-Methods: GET, HEAD, PUT, PATCH, DELETE, POST, OPTIONS
 Access-Control-Allow-Headers: Authorization, Content-Type, If-Match, If-None-Match
 Access-Control-Max-Age: 86400
 ```
@@ -1479,7 +1479,7 @@ The server URL defaults to `http://localhost:28229`. A bare port (`9000` or `:90
 | `name [label]` | generate a valid space name locally, no request | the name |
 | `join <space> <token or link>` | redeem an access or owner token. A link is searched for `t=` in its fragment | your scopes from this grant, one per line |
 | `access <space>` | what you may do here | `owner` or `member`, then one line per grant: ID, `until` or `-`, scopes |
-| `whoami [--token]` | your visitor ID, or with `--token` your visitor token, for use with `curl` | the ID or the token |
+| `whoami [--show-token]` | your visitor ID, or with `--show-token` your visitor token, for use with `curl` | the ID or the token |
 | `url <path>` | the full URL for a path, for `curl` or a browser | the URL |
 
 Owner commands, each for one space:

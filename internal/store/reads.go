@@ -23,9 +23,12 @@ type Entry struct {
 }
 
 func (s *Store) Get(space, area, key string) (*Entry, error) {
-	sp, _, err := s.Acquire(space, false, "")
-	if err != nil || sp == nil {
+	sp, err := s.Acquire(space)
+	if err != nil {
 		return nil, err
+	}
+	if sp == nil {
+		return nil, apierr.NoSpace
 	}
 	defer s.Release(sp)
 	e := &Entry{Key: key}
@@ -92,14 +95,14 @@ func scanEntries(rows *sql.Rows, allUsers bool) ([]Entry, error) {
 	return out, rows.Err()
 }
 
-// currentSeq is the space's counter, or the phantom counter if it doesn't exist.
+// CurrentSeq is the space's counter.
 func (s *Store) CurrentSeq(space string) (int64, error) {
-	sp, _, err := s.Acquire(space, false, "")
+	sp, err := s.Acquire(space)
 	if err != nil {
 		return 0, err
 	}
 	if sp == nil {
-		return s.phantomSeq(space), nil
+		return 0, apierr.NoSpace
 	}
 	defer s.Release(sp)
 	m, err := readMeta(sp.db)
@@ -108,12 +111,12 @@ func (s *Store) CurrentSeq(space string) (int64, error) {
 
 // list returns live entries in key order, plus a cursor if there are more.
 func (s *Store) List(t Target, after string, limit int, desc bool) (items []Entry, next string, version int64, err error) {
-	sp, _, err := s.Acquire(t.Space, false, "")
+	sp, err := s.Acquire(t.Space)
 	if err != nil {
 		return nil, "", 0, err
 	}
 	if sp == nil {
-		return nil, "", s.phantomSeq(t.Space), nil
+		return nil, "", 0, apierr.NoSpace
 	}
 	defer s.Release(sp)
 	s.touchSpace(sp)
@@ -162,18 +165,12 @@ var ErrVersionExpired = errors.New("version expired")
 // max+1 so the caller can tell whether there are more. It also returns the
 // space's current counter.
 func (s *Store) Changes(t Target, after int64, limit int) ([]Entry, int64, error) {
-	sp, _, err := s.Acquire(t.Space, false, "")
+	sp, err := s.Acquire(t.Space)
 	if err != nil {
 		return nil, 0, err
 	}
 	if sp == nil {
-		g := s.graveSeq(t.Space)
-		seq := max(NowMs(), g+1)
-		// A version from before the space was deleted, or from the future.
-		if after > 0 && ((g > 0 && after <= g) || after > seq) {
-			return nil, seq, ErrVersionExpired
-		}
-		return nil, seq, nil
+		return nil, 0, apierr.NoSpace
 	}
 	defer s.Release(sp)
 	m, err := readMeta(sp.db)
@@ -208,7 +205,7 @@ type Point struct {
 // export returns every live entry with its area and writer, then every
 // series point.
 func (s *Store) Export(space string, fn func(Entry) error, pfn func(Point) error) error {
-	sp, _, err := s.Acquire(space, false, "")
+	sp, err := s.Acquire(space)
 	if err != nil {
 		return err
 	}

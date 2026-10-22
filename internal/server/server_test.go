@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -68,6 +67,36 @@ func (c *tc) anon() (token, id string) {
 	return out.Token, out.ID
 }
 
+// open creates a space under name with public "all", owned by the visitor
+// with tok, and returns tok. With tok "" it creates the visitor too.
+func (c *tc) open(name, tok string) string {
+	c.t.Helper()
+	return c.create(`{"name":"`+name+`","public":"all"}`, tok).Token
+}
+
+type created struct {
+	Space, Owner, ID, Token string
+}
+
+// create posts body to /v1/spaces as tok, or as a new visitor.
+func (c *tc) create(body, tok string) created {
+	c.t.Helper()
+	var hdr []string
+	if tok != "" {
+		hdr = []string{"Authorization", "Bearer " + tok}
+	}
+	s, _, b := c.req("POST", "/v1/spaces", body, hdr...)
+	var out created
+	json.Unmarshal([]byte(b), &out)
+	if s != 201 {
+		c.t.Fatalf("create %s: %d %s", body, s, b)
+	}
+	if out.Token == "" {
+		out.Token = tok
+	}
+	return out
+}
+
 func errCode(b string) string {
 	var e struct{ Error string }
 	json.Unmarshal([]byte(b), &e)
@@ -96,7 +125,7 @@ func TestNames(t *testing.T) {
 
 func TestReadWriteDelete(t *testing.T) {
 	c := newTest(t)
-	tok, _ := c.anon()
+	tok := c.open("poll-cedar-pilot-mango", "")
 	auth := []string{"Authorization", "Bearer " + tok}
 	sp := "/v1/poll-cedar-pilot-mango"
 
@@ -173,14 +202,19 @@ func TestAreas(t *testing.T) {
 	c := newTest(t)
 	tokA, idA := c.anon()
 	tokB, idB := c.anon()
+	c.open("poll-cedar-pilot-mango", tokA)
 	a := []string{"Authorization", "Bearer " + tokA}
 	b := []string{"Authorization", "Bearer " + tokB}
 	sp := "/v1/poll-cedar-pilot-mango"
 
 	c.req("PUT", sp+"/users/"+idA+"/vote", `"tacos"`, a...)
 	c.req("PUT", sp+"/users/"+idB+"/vote", `"pizza"`, b...)
-	if s, _, body := c.req("PUT", sp+"/users/"+idA+"/vote", `"x"`, b...); s != 403 || errCode(body) != "not_owner" {
-		t.Fatalf("not_owner: %d %s", s, body)
+	if s, _, body := c.req("PUT", sp+"/users/"+idA+"/vote", `"x"`, b...); s != 403 || errCode(body) != "not_yours" {
+		t.Fatalf("not_yours: %d %s", s, body)
+	}
+	// The owner (A) may delete B's entry, as moderation, but not write it.
+	if s, _, body := c.req("PUT", sp+"/users/"+idB+"/vote", `"x"`, a...); s != 403 || errCode(body) != "not_yours" {
+		t.Fatalf("owner writing someone's entry: %d %s", s, body)
 	}
 	_, _, body := c.req("GET", sp+"/users/*/vote", "")
 	var l struct {
@@ -218,39 +252,21 @@ func TestAreas(t *testing.T) {
 	if s, _, _ := c.req("GET", sp+"/me/draft", ""); s != 401 {
 		t.Fatalf("me/ without token: %d", s)
 	}
-	if s, _, body := c.req("GET", sp+"/me/draft", "", "Authorization", "Bearer kv_nope"); s != 401 || errCode(body) != "invalid_token" {
+	if s, _, body := c.req("GET", sp+"/me/draft", "", "Authorization", "Bearer vt_nope"); s != 401 || errCode(body) != "invalid_token" {
 		t.Fatalf("bad token: %d %s", s, body)
 	}
 	if _, _, body := c.req("GET", "/v1/whoami", "", a...); !strings.Contains(body, idA) {
 		t.Fatalf("whoami: %s", body)
 	}
-}
-
-func TestLockedSpace(t *testing.T) {
-	c := newTest(t)
-	tok, id := c.anon()
-	a := []string{"Authorization", "Bearer " + tok}
-	s, _, body := c.req("POST", "/v1/spaces?label=poll&locked", "", a...)
-	var out struct{ Space, Key string }
-	json.Unmarshal([]byte(body), &out)
-	if s != 201 || !strings.HasPrefix(out.Space, "poll-") || !strings.HasPrefix(out.Key, "sk_") {
-		t.Fatalf("create locked: %d %s", s, body)
-	}
-	sp := "/v1/" + out.Space
-	if s, _, body := c.req("PUT", sp+"/shared/q", "x", a...); s != 403 || errCode(body) != "space_locked" {
-		t.Fatalf("locked write: %d %s", s, body)
-	}
-	if s, _, _ := c.req("PUT", sp+"/shared/q", "x", append(a, "Space-Key", out.Key)...); s != 201 {
-		t.Fatalf("keyed write: %d", s)
-	}
-	if s, _, _ := c.req("PUT", sp+"/users/"+id+"/vote", "x", a...); s != 201 {
-		t.Fatalf("users/ in locked space: %d", s)
+	// Moderation delete, last, since it changes B's vote.
+	if s, _, body := c.req("DELETE", sp+"/users/"+idB+"/vote", "", a...); s != 200 {
+		t.Fatalf("owner delete: %d %s", s, body)
 	}
 }
 
 func TestListAndWatch(t *testing.T) {
 	c := newTest(t)
-	tok, _ := c.anon()
+	tok := c.open("chat-cedar-pilot-mango", "")
 	a := []string{"Authorization", "Bearer " + tok}
 	sp := "/v1/chat-cedar-pilot-mango"
 
@@ -305,10 +321,15 @@ func TestListAndWatch(t *testing.T) {
 	}
 
 	// A snapshot of nothing returns at once.
+	c.open("none-cedar-pilot-mango", tok)
 	start := time.Now()
 	_, _, body = c.req("GET", "/v1/none-cedar-pilot-mango/shared/*/watch?version=0", "")
 	if time.Since(start) > time.Second || !strings.Contains(body, `"changes":[]`) {
 		t.Fatalf("empty snapshot: %s after %s", body, time.Since(start))
+	}
+	// Watching a space that doesn't exist is no_space.
+	if s, _, body := c.req("GET", "/v1/gone-cedar-pilot-mango/shared/*/watch?version=0", ""); s != 404 || errCode(body) != "no_space" {
+		t.Fatalf("missing space watch: %d %s", s, body)
 	}
 
 	// Timeout returns empty changes.
@@ -334,20 +355,24 @@ func TestSpaceFiles(t *testing.T) {
 	sp := "chat-cedar-pilot-mango"
 	file := filepath.Join(c.cfg.Server.DataDir, "spaces", sp+".db")
 
-	// Reads don't create a file, writes do.
+	// Neither reads nor writes create a space. Only POST /v1/spaces does.
 	c.req("GET", "/v1/"+sp+"/shared/x", "")
+	if s, _, body := c.req("PUT", "/v1/"+sp+"/shared/x", "1", a...); s != 404 || errCode(body) != "no_space" {
+		t.Fatalf("write to a missing space: %d %s", s, body)
+	}
 	if _, err := os.Stat(file); err == nil {
-		t.Fatal("read created a space file")
+		t.Fatal("a read or write created a space file")
+	}
+	c.open(sp, tok)
+	if _, err := os.Stat(file); err != nil {
+		t.Fatal("creating didn't make the space file")
 	}
 	c.req("PUT", "/v1/"+sp+"/shared/x", "1", a...)
-	if _, err := os.Stat(file); err != nil {
-		t.Fatal("write didn't create the space file")
-	}
 	_, _, body := c.req("GET", "/v1/"+sp+"/shared/*/watch?version=0", "")
 	var w struct{ Version int64 }
 	json.Unmarshal([]byte(body), &w)
 
-	// Deleting the space wakes watchers with 410, and removes the file.
+	// Deleting the space wakes watchers with no_space, and removes the file.
 	done := make(chan int)
 	go func() {
 		s, _, _ := c.req("GET", fmt.Sprintf("/v1/%s/shared/*/watch?timeout=5&version=%d", sp, w.Version), "")
@@ -359,7 +384,7 @@ func TestSpaceFiles(t *testing.T) {
 	}
 	select {
 	case s := <-done:
-		if s != 410 {
+		if s != 404 {
 			t.Fatalf("watch after delete: %d", s)
 		}
 	case <-time.After(3 * time.Second):
@@ -370,6 +395,7 @@ func TestSpaceFiles(t *testing.T) {
 	}
 
 	// A recreated space continues above the old counter, and old watchers start over.
+	c.open(sp, tok)
 	_, h, _ := c.req("PUT", "/v1/"+sp+"/shared/x", "2", a...)
 	if v := parseInt(h.Get("ETag")); v <= w.Version {
 		t.Fatalf("recreated version %d not above %d", v, w.Version)
@@ -381,8 +407,8 @@ func TestSpaceFiles(t *testing.T) {
 
 func TestCopiedSpaceFile(t *testing.T) {
 	src := newTest(t)
-	tok, _ := src.anon()
 	sp := "moved-cedar-pilot-mango"
+	tok := src.open(sp, "")
 	src.req("PUT", "/v1/"+sp+"/shared/greeting", "hello", "Authorization", "Bearer "+tok)
 	src.store.Close()
 
@@ -410,6 +436,9 @@ func TestVisitorQuotaAcrossSpaces(t *testing.T) {
 	tok, _ := c.anon()
 	a := []string{"Authorization", "Bearer " + tok}
 	v := strings.Repeat("x", 40)
+	for _, n := range []string{"one", "two", "three"} {
+		c.open(n+"-cedar-pilot-mango", tok)
+	}
 	c.req("PUT", "/v1/one-cedar-pilot-mango/shared/k", v, a...)
 	c.store.ForgetVisitorBytes("") // force a recount from the space files
 	c.req("PUT", "/v1/two-cedar-pilot-mango/shared/k", v, a...)
@@ -424,6 +453,7 @@ func TestManySpacesEvict(t *testing.T) {
 	tok, _ := c.anon()
 	a := []string{"Authorization", "Bearer " + tok}
 	for i := range store.MaxOpenSpaces + 20 {
+		c.open(fmt.Sprintf("s%03d-cedar-pilot-mango", i), tok)
 		c.req("PUT", fmt.Sprintf("/v1/s%03d-cedar-pilot-mango/shared/k", i), "v", a...)
 	}
 	open := c.store.OpenSpaces()
@@ -441,36 +471,56 @@ func parseInt(s string) int64 {
 	return n
 }
 
-func TestCreateNamedSpace(t *testing.T) {
+func TestCreateSpace(t *testing.T) {
 	c := newTest(t)
 	tok, _ := c.anon()
 	a := []string{"Authorization", "Bearer " + tok}
 
-	if st, _, body := c.req("POST", "/v1/spaces?name=throws-amber-otter-tundra", "", a...); st != 201 || !strings.Contains(body, `"space":"throws-amber-otter-tundra"`) {
+	if st, _, body := c.req("POST", "/v1/spaces", `{"name":"throws-amber-otter-tundra"}`, a...); st != 201 || !strings.Contains(body, `"space":"throws-amber-otter-tundra"`) || !strings.Contains(body, `"owner":"ot_`) {
 		t.Fatalf("create by name: %d %s", st, body)
 	}
-	if st, _, body := c.req("POST", "/v1/spaces?name=throws-amber-otter-tundra", "", a...); st != 409 || errCode(body) != "space_exists" {
+	if st, _, body := c.req("POST", "/v1/spaces", `{"name":"throws-amber-otter-tundra"}`, a...); st != 409 || errCode(body) != "space_exists" {
 		t.Fatalf("taken name: %d %s", st, body)
 	}
-	// A space that exists only because someone wrote to it is taken too.
-	c.req("PUT", "/v1/notes-cedar-pilot-mango/shared/k", "v", a...)
-	if st, _, body := c.req("POST", "/v1/spaces?name=notes-cedar-pilot-mango", "", a...); st != 409 || errCode(body) != "space_exists" {
-		t.Fatalf("written space: %d %s", st, body)
-	}
-	if st, _, body := c.req("POST", "/v1/spaces?name=throws", "", a...); st != 400 || errCode(body) != "invalid_space" {
+	if st, _, body := c.req("POST", "/v1/spaces", `{"name":"throws"}`, a...); st != 400 || errCode(body) != "invalid_space" {
 		t.Fatalf("bad name: %d %s", st, body)
 	}
-	if st, _, body := c.req("POST", "/v1/spaces?name=throws-amber-otter-tundra&label=x", "", a...); st != 400 || errCode(body) != "invalid_parameter" {
+	if st, _, body := c.req("POST", "/v1/spaces", `{"name":"throws-amber-otter-tundra","label":"x"}`, a...); st != 400 || errCode(body) != "invalid_parameter" {
 		t.Fatalf("name and label: %d %s", st, body)
 	}
-
-	// Locked by name: the key comes back and writing without it fails.
-	st, _, body := c.req("POST", "/v1/spaces?name=status-board-4m8q2xk7&locked", "", a...)
-	if st != 201 || !strings.Contains(body, `"key":"sk_`) {
-		t.Fatalf("locked by name: %d %s", st, body)
+	if st, _, body := c.req("POST", "/v1/spaces", `{"lable":"x"}`, a...); st != 400 || errCode(body) != "invalid_parameter" || !strings.Contains(body, `"parameter":"lable"`) {
+		t.Fatalf("unknown field: %d %s", st, body)
 	}
-	if st, _, body := c.req("PUT", "/v1/status-board-4m8q2xk7/shared/k", "v", a...); st != 403 || errCode(body) != "space_locked" {
-		t.Fatalf("locked write without key: %d %s", st, body)
+	if st, _, body := c.req("POST", "/v1/spaces", `{"public":"read","read":"anyone"}`, a...); st != 400 || errCode(body) != "invalid_settings" {
+		t.Fatalf("public and read: %d %s", st, body)
+	}
+	if st, _, body := c.req("POST", "/v1/spaces", `{"write":"anyone"}`, a...); st != 400 || errCode(body) != "invalid_settings" {
+		t.Fatalf("open writes into a private space: %d %s", st, body)
+	}
+	if st, _, body := c.req("POST", "/v1/spaces?label=x", ``, a...); st != 400 || errCode(body) != "invalid_parameter" {
+		t.Fatalf("query parameter: %d %s", st, body)
+	}
+
+	// An empty body: a generated name, private, owned by the caller.
+	st, _, body := c.req("POST", "/v1/spaces", ``, a...)
+	var out struct {
+		Space, Owner, ID, Token string
+		Settings                struct{ Public string }
+	}
+	json.Unmarshal([]byte(body), &out)
+	if st != 201 || !names.ValidSpace(out.Space) || out.Settings.Public != "none" || out.Token != "" {
+		t.Fatalf("empty body: %d %s", st, body)
+	}
+
+	// Without a token, the creator is a new visitor and gets its token.
+	st, _, body = c.req("POST", "/v1/spaces", `{"label":"poll","public":"respond"}`)
+	json.Unmarshal([]byte(body), &out)
+	if st != 201 || !strings.HasPrefix(out.Space, "poll-") || !strings.HasPrefix(out.Token, "vt_") || out.Settings.Public != "respond" {
+		t.Fatalf("create without a token: %d %s", st, body)
+	}
+	// That token works, and its visitor owns the space.
+	if _, _, body := c.req("GET", "/v1/"+out.Space+"/access", "", "Authorization", "Bearer "+out.Token); !strings.Contains(body, `"owner":true`) {
+		t.Fatalf("creator isn't owner: %s", body)
 	}
 }
 
@@ -507,49 +557,12 @@ func TestQuietRoutes(t *testing.T) {
 	}
 }
 
-// A space on disk whose name fails the API rule (here, too short) must not
-// break anything for the visitors who wrote to it, and admin must still
-// manage it.
-func TestSpaceNameTheAPIRefuses(t *testing.T) {
-	c := newTest(t)
-	tok, id := c.anon()
-	a := []string{"Authorization", "Bearer " + tok}
-	const old = "test-k7m2x9q4" // 13 characters, under the API minimum
-	if _, err := c.store.Write(context.Background(), store.WriteReq{Space: old, Area: "s", Key: "a", Value: []byte("hi"), Writer: id}); err != nil {
-		t.Fatal(err)
-	}
-	// The visitor's usage is summed over every space it wrote to, the old one included.
-	if s, _, b := c.req("PUT", "/v1/crop-turkey-salie-toxic/shared/lul", "ayyy", a...); s != 201 {
-		t.Fatalf("write by a visitor with a short-name space: %d %s", s, b)
-	}
-	// The API refuses the old name itself.
-	if s, _, b := c.req("GET", "/v1/"+old+"/shared/a", ""); s != 400 || errCode(b) != "invalid_space" {
-		t.Fatalf("short name over the API: %d %s", s, b)
-	}
-	// Admin still sees it and can delete it.
-	found := false
-	for _, r := range c.store.Spaces() {
-		found = found || r.Name == old
-	}
-	if !found {
-		t.Fatal("short-name space missing from the admin list")
-	}
-	srv := New(c.cfg, c.store, nil)
-	rec := httptest.NewRecorder()
-	srv.AdminHandler().ServeHTTP(rec, httptest.NewRequest("DELETE", "/spaces/"+old, nil))
-	if rec.Code != 200 {
-		t.Fatalf("admin delete: %d %s", rec.Code, rec.Body)
-	}
-	if s, _, b := c.req("PUT", "/v1/crop-turkey-salie-toxic/shared/lul", "again", a...); s != 200 {
-		t.Fatalf("write after deleting the short-name space: %d %s", s, b)
-	}
-}
-
 // Every entry says which visitor last wrote it, and a delete says who deleted.
 func TestBy(t *testing.T) {
 	c := newTest(t)
 	tokA, idA := c.anon()
 	tokB, idB := c.anon()
+	c.open("game-cedar-pilot-mango", tokA)
 	a := []string{"Authorization", "Bearer " + tokA}
 	b := []string{"Authorization", "Bearer " + tokB}
 	sp := "/v1/game-cedar-pilot-mango"

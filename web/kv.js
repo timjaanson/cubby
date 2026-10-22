@@ -1,8 +1,36 @@
-// cubby JS client. An ES module with no dependencies.
+// cubby client. A guide for whoever writes code with this, person or coding agent.
 //
-//   import { kv, newName, validSpace, KvError } from "https://kv.example.com/kv.js"
-//   const db = kv("poll-cedar-pilot-mango-frost")
-//   await db.shared.set("question", "Pizza or tacos?")
+// Spaces are PRIVATE by default. Only the creator (the owner) and people they
+// invite can read or write. Everyone else gets 404 no_space, exactly as if the
+// space didn't exist, so a missing invite looks like a wrong name. Check both.
+//
+// Every page starts the same way:
+//   const db = kv(SPACE)
+//   const me = await db.open()     // redeems an invite link (#t=...), says what you may do
+//   if (!me.inside) { /* show: "ask the owner for an invite link" */ }
+//
+// Creating a space (once from a shell with `cubby new`, or per room in the page):
+//   const { space, ownerToken } = await createSpace()
+//   Show ownerToken to the user once. It's their recovery key. Never store it in code.
+//
+// Sharing with specific people, the usual case:
+//   const { link } = await db.share({ label: "Anna" })       // member, 10 uses, 7 days
+//   const { link } = await db.share({ allow: "viewer", uses: 1 })
+//   Ready-made UI with link, QR code and member list: import "<server>/share.js"
+//   and put <cubby-share space="..."></cubby-share> in the page.
+//
+// Make a space public only when the user asked for it:
+//   createSpace({ public: "read" })     anyone reads, invited people write: status pages
+//   createSpace({ public: "respond" })  anyone reads and adds their own entry: polls, RSVPs
+//   createSpace({ public: "all" })      anyone with the name reads and writes
+//
+// Never put an access token (at_...) or owner token (ot_...) in page source.
+// Anyone who can load the page could use it. Invite links are for sending to people.
+//
+// Docs: docs/agents.md in the cubby repository.
+//
+// An ES module with no dependencies. Exports: kv, createSpace, takeInvite,
+// inviteLink, newName, validSpace, KvError.
 
 const SERVER = new URL(".", import.meta.url).href.replace(/\/$/, "")
 
@@ -69,7 +97,24 @@ const HIDDEN_PAUSE = 5 * 60 * 1000
 // One identity per server, shared by every kv() instance on the page.
 const identities = new Map()
 
-function identity(server, tokenKey, fetchFn) {
+function identity(server, tokenKey, fetchFn, fixedToken) {
+  if (fixedToken) {
+    // A visitor token given by the caller: used as is, never saved or renewed.
+    const v = { token: fixedToken, id: null }
+    return {
+      fixed: true, current: () => v, adopt() {},
+      async get() {
+        if (!v.id) {
+          const res = await fetchFn(server + "/v1/whoami?token=" + encodeURIComponent(fixedToken))
+          const body = await res.json().catch(() => ({}))
+          if (!res.ok) throw new KvError(res.status, body.error || "http_error", body.message || res.statusText, body)
+          v.id = body.id
+        }
+        return v
+      },
+      renew: () => { throw new KvError(401, "invalid_token", "The given visitor token is unknown or expired.") },
+    }
+  }
   const id = server + "\n" + tokenKey
   if (identities.has(id)) return identities.get(id)
   let memory = null
@@ -104,6 +149,10 @@ function identity(server, tokenKey, fetchFn) {
       if (cur?.token) return cur
       return ident.renew()
     },
+    // A visitor the server created in a createSpace or join response.
+    adopt(token, id) {
+      if (token) store.save({ token, id })
+    },
     renew() {
       if (!pending) {
         pending = (async () => {
@@ -129,26 +178,25 @@ export function kv(space, opts = {}) {
   }
   const server = (opts.server || SERVER).replace(/\/$/, "")
   const fetchFn = opts.fetch || globalThis.fetch.bind(globalThis)
-  const ident = identity(server, opts.tokenKey || "cubby:" + server, fetchFn)
-  const spaceKey = opts.key || null
-  let knownLocked = false
+  const ident = identity(server, opts.tokenKey || "cubby:" + server, fetchFn, opts.token)
 
-  // auth: the request needs the visitor's token, and gets one if there isn't
-  // one yet. Public reads go without it: an Authorization header makes the
-  // browser send a CORS preflight, and preflights are cached per URL, so every
-  // watch request would pay for one.
-  async function request(method, path, { body, auth = false, shared = false, query, signal } = {}) {
-    let url = `${server}/v1/${space}/${path}`
-    if (query) {
-      const q = new URLSearchParams()
-      for (const [k, v] of Object.entries(query)) if (v !== undefined && v !== null) q.set(k, String(v))
-      const s = q.toString()
-      if (s) url += "?" + s
-    }
+  // auth: the request needs a visitor token, and gets one if there isn't one
+  // yet. Without auth, whatever token there is still goes along, so a
+  // private space works with no option. Reads send it as ?token=: an
+  // Authorization header makes the browser send a CORS preflight, cached per
+  // URL, and every watch request has a new URL.
+  async function request(method, path, { body, auth = false, query, signal } = {}) {
+    const read = method === "GET" || method === "HEAD"
     for (let attempt = 0; ; attempt++) {
+      const cur = auth ? await ident.get() : ident.current()
+      let url = `${server}/v1/${space}${path ? "/" + path : ""}`
+      const q = new URLSearchParams()
+      for (const [k, v] of Object.entries(query || {})) if (v !== undefined && v !== null) q.set(k, String(v))
+      if (read && cur?.token) q.set("token", cur.token)
+      const qs = q.toString()
+      if (qs) url += "?" + qs
       const headers = {}
-      if (auth) headers.Authorization = "Bearer " + (await ident.get()).token
-      if (shared && spaceKey && method !== "GET") headers["Space-Key"] = spaceKey
+      if (!read && cur?.token) headers.Authorization = "Bearer " + cur.token
       let res
       try {
         res = await fetchFn(url, { method, headers, body, signal })
@@ -156,9 +204,11 @@ export function kv(space, opts = {}) {
         if (err?.name === "AbortError") throw err
         throw new KvError(0, "network_error", String(err?.message || err))
       }
-      if (auth && res.status === 401 && attempt === 0) {
+      if (auth && res.status === 401 && attempt === 0 && !ident.fixed) {
         const b = await res.clone().json().catch(() => ({}))
         if (b.error === "invalid_token") {
+          // The visitor is gone, say after a year unused. The new one has no
+          // grants, so in a private space the retry gets no_space.
           await ident.renew()
           continue
         }
@@ -167,20 +217,16 @@ export function kv(space, opts = {}) {
     }
   }
 
-  async function fail(res) {
-    const b = await res.json().catch(() => ({}))
-    if (b.error === "space_locked") knownLocked = true
-    return new KvError(res.status, b.error || "http_error", b.message || res.statusText, b)
-  }
+  const fail = errorFrom
 
   // mine: this visitor made the last write or the delete.
   const withMine = e => ({ ...e, mine: !!e.by && e.by === ident.current()?.id })
 
-  // owner: for another visitor's area, the ID only they may write under.
-  function area(prefix, { needsAuth = false, owner = null, shared = false } = {}) {
+  // other: for another visitor's area, the ID only they may write under.
+  // Owners may still delete there; the server decides that.
+  function area(prefix, { needsAuth = false, other = null } = {}) {
     const checkWrite = () => {
-      if (owner && ident.current()?.id !== owner) throw new KvError(0, "read_only", "This is another visitor's area. Only they can write it.")
-      if (shared && knownLocked && !spaceKey) throw new KvError(0, "space_locked", "This space is locked. Pass { key } to kv() to write shared/.")
+      if (other && ident.current()?.id !== other) throw new KvError(0, "not_yours", "This is another visitor's area. Only they can write it.")
     }
     const pathOf = async target => {
       const p = typeof prefix === "function" ? await prefix() : prefix
@@ -191,7 +237,7 @@ export function kv(space, opts = {}) {
       async getEntry(key) {
         checkKey(key)
         const res = await request("GET", await pathOf(key), { auth: needsAuth })
-        if (res.status === 404) return null
+        if (await missingKey(res)) return null
         if (!res.ok) throw await fail(res)
         const version = Number((res.headers.get("ETag") || "").replace(/"/g, ""))
         const text = await res.text()
@@ -210,15 +256,14 @@ export function kv(space, opts = {}) {
         checkWrite()
         const body = JSON.stringify(value)
         if (body === undefined) throw new KvError(0, "invalid_value", "That value can't be stored as JSON.")
-        const res = await request("PUT", await pathOf(key), { body, auth: true, shared, query: { ifVersion: o.ifVersion } })
+        const res = await request("PUT", await pathOf(key), { body, auth: true, query: { ifVersion: o.ifVersion } })
         if (!res.ok) throw await fail(res)
         return (await res.json()).version
       },
       async delete(key, o = {}) {
         checkKey(key)
-        checkWrite()
-        const res = await request("DELETE", await pathOf(key), { auth: true, shared, query: { ifVersion: o.ifVersion } })
-        if (res.status === 404) return false
+        const res = await request("DELETE", await pathOf(key), { auth: true, query: { ifVersion: o.ifVersion } })
+        if (await missingKey(res)) return false
         if (!res.ok) throw await fail(res)
         return true
       },
@@ -249,7 +294,7 @@ export function kv(space, opts = {}) {
         }
         const body = JSON.stringify(value)
         if (body === undefined) throw new KvError(0, "invalid_value", "That value can't be stored as JSON.")
-        const res = await request("POST", (await pathOf(target)) + "/series", { body, auth: true, shared, query: { t: o.t } })
+        const res = await request("POST", (await pathOf(target)) + "/series", { body, auth: true, query: { t: o.t } })
         if (!res.ok) throw await fail(res)
         return res.json()
       },
@@ -258,7 +303,7 @@ export function kv(space, opts = {}) {
       async series(key, o = {}) {
         checkKey(key)
         const res = await request("GET", (await pathOf(key)) + "/series", { auth: needsAuth, query: { since: o.since, limit: o.limit } })
-        if (res.status === 404) return null
+        if (await missingKey(res)) return null
         if (!res.ok) throw await fail(res)
         return res.json()
       },
@@ -446,15 +491,85 @@ export function kv(space, opts = {}) {
 
   const myArea = async () => "users/" + (await ident.get()).id
 
-  return {
-    shared: area("shared", { shared: true }),
+  // JSON calls on the space itself: join, access, settings, tokens, grants.
+  async function call(method, path, { body, auth = true, query } = {}) {
+    const res = await request(method, path, { body: body === undefined ? undefined : JSON.stringify(body), auth, query })
+    if (!res.ok) throw await fail(res)
+    return res.json()
+  }
+
+  const accessFrom = (a, extra = {}) => makeAccess({ inside: true, joined: false, inviteFailed: false, ...a, ...extra })
+
+  const db = {
+    async join(token) {
+      if (token === null || token === undefined || token === "") return null
+      // Without a stored visitor, the server creates one and returns it.
+      const out = await call("POST", "join", { body: { token }, auth: false })
+      ident.adopt(out.token, out.id)
+      return db.access()
+    },
+    async access() {
+      return accessFrom(await call("GET", "access", { auth: false }))
+    },
+    // The first call on every page. It never throws for "not invited":
+    // inside is false for a missing space and for a private one alike.
+    async open(o = {}) {
+      const invite = "invite" in o ? o.invite : takeInvite()
+      let joined = false
+      let inviteFailed = false
+      if (invite) {
+        try {
+          await db.join(invite)
+          joined = true
+        } catch (err) {
+          if (err.code !== "invite_invalid") throw err
+          inviteFailed = true
+        }
+      }
+      try {
+        return accessFrom(await call("GET", "access", { auth: false }), { joined, inviteFailed })
+      } catch (err) {
+        if (err.code !== "no_space") throw err
+        return makeAccess({ inside: false, joined, inviteFailed, id: ident.current()?.id ?? null, owner: false, settings: null, grants: [] })
+      }
+    },
+    // An invite link to send: this page (or base) with #t=at_... added.
+    async share(o = {}) {
+      const { base, ...rest } = o
+      const t = await db.owner.tokens.create(rest)
+      return { link: inviteLink(t.token, base), token: t.token, id: t.id, allow: t.allow, uses: t.uses, until: t.until }
+    },
+    owner: {
+      settings: async patch => (await call("PATCH", "", { body: patch })).settings,
+      deleteSpace: async () => { await call("DELETE", "") },
+      rotateOwnerToken: async () => (await call("POST", "owner-token")).owner,
+      tokens: {
+        create: (o = {}) => call("POST", "tokens", { body: tokenBody(o, true) }),
+        list: async () => (await call("GET", "tokens")).items,
+        update: (id, o = {}) => call("PATCH", "tokens/" + encodeURIComponent(id), { body: tokenBody(o, false) }),
+        revoke: async id => { await call("DELETE", "tokens/" + encodeURIComponent(id)) },
+      },
+      grants: {
+        list: async (o = {}) => (await call("GET", "grants", { query: { user: o.user } })).items,
+        add: (user, o = {}) => {
+          const body = { user }
+          if (o.owner) body.owner = true
+          else if (o.allow !== undefined) body.allow = o.allow
+          if (o.until !== undefined) body.until = timeValue(o.until)
+          return call("POST", "grants", { body })
+        },
+        revoke: async id => { await call("DELETE", "grants/" + encodeURIComponent(id)) },
+        revokeUser: async user => { await call("DELETE", "grants", { query: { user } }) },
+      },
+    },
+    shared: area("shared"),
     me: area("me", { needsAuth: true }),
     user(id) {
       if (id === undefined) return area(myArea)
       if (typeof id !== "string" || !VISITOR_RE.test(id)) {
         throw new KvError(0, "invalid_key", `${JSON.stringify(id)} isn't a visitor ID. IDs look like u_k7m2x9q4p1r8t3w6.`)
       }
-      return area("users/" + id, { owner: id })
+      return area("users/" + id, { other: id })
     },
     users: {
       list: (target, o) => list(async t => `users/*/${t}`, false, target, o),
@@ -462,4 +577,117 @@ export function kv(space, opts = {}) {
     },
     id: async () => (await ident.get()).id,
   }
+  return db
+}
+
+// A 404 for a key that doesn't exist, as opposed to no_space for a space
+// this visitor can't see.
+async function missingKey(res) {
+  if (res.status !== 404) return false
+  const b = await res.clone().json().catch(() => ({}))
+  return b.error === "not_found"
+}
+
+async function errorFrom(res) {
+  const b = await res.json().catch(() => ({}))
+  return new KvError(res.status, b.error || "http_error", b.message || res.statusText, b)
+}
+
+// until and grantFor take a duration string ("7d"), a Date, milliseconds
+// since 1970, or null.
+function timeValue(v) {
+  if (v instanceof Date) return v.toISOString()
+  return v
+}
+
+function tokenBody(o, creating) {
+  const known = creating ? ["label", "allow", "uses", "until", "grantFor"] : ["uses", "until"]
+  const body = {}
+  for (const k of Object.keys(o)) {
+    if (!known.includes(k)) throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are ${known.join(", ")}.`)
+  }
+  for (const k of known) if (k in o) body[k] = k === "until" ? timeValue(o[k]) : o[k]
+  if (typeof body.grantFor === "number") body.grantFor = Math.max(1, Math.round(body.grantFor / 1000)) + "s"
+  return body
+}
+
+// A scope is AREA[/TARGET]:RIGHTS. covers mirrors the server's rule.
+function covers(scope, method, area, key) {
+  const [body, rights] = scope.split(":")
+  if (!rights || !rights.includes(method === "write" ? "w" : "r")) return false
+  const slash = body.indexOf("/")
+  const sArea = slash < 0 ? body : body.slice(0, slash)
+  const target = slash < 0 ? "*" : body.slice(slash + 1)
+  if (sArea !== "*" && sArea !== area) return false
+  if (key === undefined) return target === "*"
+  if (target.endsWith("*")) return key.replace(/\*$/, "").startsWith(target.slice(0, -1))
+  return !key.endsWith("*") && key === target
+}
+
+function makeAccess(a) {
+  a.grants = a.grants || []
+  a.can = (method, area, key) => {
+    if (!a.inside) return false
+    if (a.owner) return true
+    const s = a.settings
+    if (method === "read" && s?.read === "anyone") return true
+    if (method === "write" && s?.write?.[area] === "anyone") return true
+    return a.grants.some(g => g.owner || g.allow.some(sc => covers(sc, method, area, key)))
+  }
+  return a
+}
+
+// createSpace makes a space owned by this visitor, private unless
+// public says otherwise. Show ownerToken to the person once: it's their
+// recovery key. It isn't stored.
+export async function createSpace(o = {}) {
+  const { server: srv, tokenKey, fetch: f, ...fields } = o
+  const server = (srv || SERVER).replace(/\/$/, "")
+  const fetchFn = f || globalThis.fetch.bind(globalThis)
+  const ident = identity(server, tokenKey || "cubby:" + server, fetchFn)
+  for (const k of Object.keys(fields)) {
+    if (!["label", "name", "public", "read", "write"].includes(k)) {
+      throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are label, name, public, read, write.`)
+    }
+  }
+  const headers = {}
+  const cur = ident.current()
+  if (cur?.token) headers.Authorization = "Bearer " + cur.token
+  let res
+  try {
+    res = await fetchFn(server + "/v1/spaces", { method: "POST", headers, body: JSON.stringify(fields) })
+  } catch (err) {
+    throw new KvError(0, "network_error", String(err?.message || err))
+  }
+  if (!res.ok) throw await errorFrom(res)
+  const out = await res.json()
+  ident.adopt(out.token, out.id)
+  return { space: out.space, ownerToken: out.owner }
+}
+
+function hashParams() {
+  return new URLSearchParams(typeof location === "undefined" ? "" : location.hash.slice(1))
+}
+
+// takeInvite reads #t=... from the address bar and removes it, keeping the
+// fragment's other parameters. null if there's none.
+export function takeInvite(param = "t") {
+  const p = hashParams()
+  const token = p.get(param)
+  if (!token) return null
+  p.delete(param)
+  const rest = p.toString()
+  if (typeof history !== "undefined") {
+    history.replaceState(history.state, "", location.pathname + location.search + (rest ? "#" + rest : ""))
+  }
+  return token
+}
+
+// inviteLink adds t=token to base's fragment, keeping its other parameters.
+export function inviteLink(token, base = typeof location === "undefined" ? "" : location.href) {
+  const u = new URL(base)
+  const p = new URLSearchParams(u.hash.slice(1))
+  p.set("t", token)
+  u.hash = p.toString()
+  return u.href
 }

@@ -2,12 +2,10 @@ package store
 
 import (
 	"context"
-	"crypto/subtle"
 	"database/sql"
 	"errors"
 
 	"github.com/timjaanson/cubby/internal/apierr"
-	"github.com/timjaanson/cubby/internal/names"
 )
 
 // A series key keeps every value written to it with POST {key}/series, each
@@ -26,8 +24,6 @@ type PointsReq struct {
 	Points      []PointIn // one per key, in request order
 	T           int64     // 0: the server's clock
 	Writer      string
-	SpaceKey    string
-	OnCreate    func() error
 }
 
 type pointsResult struct {
@@ -42,22 +38,12 @@ func (s *Store) AddPoints(ctx context.Context, r PointsReq) (res pointsResult, e
 	if err != nil {
 		return res, err
 	}
-	sp, _, err := s.Acquire(r.Space, false, "")
+	sp, err := s.Acquire(r.Space)
 	if err != nil {
 		return res, err
 	}
 	if sp == nil {
-		if s.SpaceCount() >= s.cfg.Limits.MaxSpaces {
-			return res, apierr.ServerFull
-		}
-		if r.OnCreate != nil {
-			if err := r.OnCreate(); err != nil {
-				return res, err
-			}
-		}
-		if sp, _, err = s.Acquire(r.Space, true, ""); err != nil {
-			return res, err
-		}
+		return res, apierr.NoSpace
 	}
 	defer s.Release(sp)
 
@@ -76,9 +62,6 @@ func (s *Store) AddPoints(ctx context.Context, r PointsReq) (res pointsResult, e
 	m, err := readMeta(tx)
 	if err != nil {
 		return res, err
-	}
-	if m.keyHash != "" && r.Area == "s" && (r.SpaceKey == "" || subtle.ConstantTimeCompare([]byte(names.HashSecret(r.SpaceKey)), []byte(m.keyHash)) != 1) {
-		return res, apierr.SpaceLocked
 	}
 
 	type oldRow struct {
@@ -267,12 +250,12 @@ func (s *Store) AddPoints(ctx context.Context, r PointsReq) (res pointsResult, e
 // readPoints returns points oldest first: with since, the first limit after
 // it and the next since if there are more; without, the newest limit.
 func (s *Store) ReadPoints(space, area, key string, since *int64, limit int) (points []Point, next *int64, version int64, err error) {
-	sp, _, err := s.Acquire(space, false, "")
+	sp, err := s.Acquire(space)
 	if err != nil {
 		return nil, nil, 0, err
 	}
 	if sp == nil {
-		return nil, nil, 0, apierr.NotFound
+		return nil, nil, 0, apierr.NoSpace
 	}
 	defer s.Release(sp)
 	var series bool

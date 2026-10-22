@@ -120,23 +120,24 @@ func TestNewSpaceName(t *testing.T) {
 	}
 }
 
-func TestSafeSpaceFile(t *testing.T) {
-	for name, want := range map[string]bool{
-		"a":                       true,
-		"poll-k7m2x9q4":           true, // fails ValidSpace, still file-safe
-		"cedar-pilot-mango-frost": true,
-		strings.Repeat("a", 63):   true,
-		strings.Repeat("a", 64):   false,
-		"":                        false,
-		"..":                      false,
-		"a/b":                     false,
-		"a.db":                    false,
-		"Poll":                    false,
-		"-a":                      false,
-		"a--b":                    false,
-	} {
-		if SafeSpaceFile(name) != want {
-			t.Errorf("SafeSpaceFile(%q) = %v", name, !want)
+// ValidSpace is also what keeps space files inside spaces/: no separators,
+// no dots.
+func TestSpaceNameIsFileSafe(t *testing.T) {
+	for _, name := range []string{"", "..", "a/b", "a.db", "../../etc-passwd-xxxx", "aaaaaaaaaaaaaaaa/b"} {
+		if ValidSpace(name) {
+			t.Errorf("ValidSpace(%q)", name)
 		}
+	}
+}
+
+func TestTokenShapes(t *testing.T) {
+	if !VisitorTokenRe.MatchString(RandomToken("vt_")) || !AccessTokenRe.MatchString(RandomToken("at_")) || !OwnerTokenRe.MatchString(RandomToken("ot_")) {
+		t.Fatal("token shapes")
+	}
+	if VisitorTokenRe.MatchString(RandomToken("at_")) {
+		t.Fatal("kinds mix")
+	}
+	if !ValidTokenID(NewTokenID()) || !ValidGrantID(NewGrantID()) || ValidTokenID(NewGrantID()) {
+		t.Fatal("ids")
 	}
 }

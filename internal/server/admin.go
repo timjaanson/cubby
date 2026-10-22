@@ -47,10 +47,9 @@ func (s *Server) AdminHandler() http.Handler {
 	ok := func(w http.ResponseWriter, r *http.Request, v any) {
 		(&reqCtx{w: w, r: r}).json(200, v)
 	}
-	// Admin works on any space on disk, including names the API refuses.
 	space := func(w http.ResponseWriter, r *http.Request) (string, bool) {
 		name := r.PathValue("space")
-		if !names.SafeSpaceFile(name) {
+		if !names.ValidSpace(name) {
 			fail(w, r, &apierr.Error{Status: 400, Code: "invalid_space", Message: name + " isn't a valid space name."})
 			return "", false
 		}
@@ -119,17 +118,19 @@ func (s *Server) AdminHandler() http.Handler {
 		}
 		ok(w, r, map[string]any{"deleted": name})
 	})
-	mux.HandleFunc("POST /spaces/{space}/rekey", func(w http.ResponseWriter, r *http.Request) {
+	// A new owner token, for an owner who lost theirs and every owner
+	// identity. Owner grants from the old token go with it.
+	mux.HandleFunc("POST /spaces/{space}/owner-token", func(w http.ResponseWriter, r *http.Request) {
 		name, good := space(w, r)
 		if !good {
 			return
 		}
-		key, err := s.store.Rekey(name)
+		tok, err := s.store.RotateOwner(name, "")
 		if err != nil {
 			fail(w, r, err)
 			return
 		}
-		ok(w, r, map[string]any{"space": name, "key": key})
+		ok(w, r, map[string]any{"space": name, "owner": tok})
 	})
 	mux.HandleFunc("POST /cleanup", func(w http.ResponseWriter, r *http.Request) {
 		rep, err := s.Cleanup()

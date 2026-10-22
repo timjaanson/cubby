@@ -3,7 +3,7 @@ package cli
 import "testing"
 
 func TestCLIPaths(t *testing.T) {
-	c := &client{sc: &serverCreds{Token: "kv_x", ID: "u_aaaaaaaaaaaaaaaa"}}
+	c := &client{sc: &serverCreds{Token: "vt_x", ID: "u_aaaaaaaaaaaaaaaa"}}
 	good := map[string]string{
 		"poll-cedar-pilot-mango/shared/q":                   "/v1/poll-cedar-pilot-mango/shared/q",
 		"/v1/poll-cedar-pilot-mango/shared/q":               "/v1/poll-cedar-pilot-mango/shared/q",
