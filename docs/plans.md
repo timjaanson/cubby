@@ -13,7 +13,10 @@ TTL plus `ifVersion` supports acquire, renew and release over raw HTTP, the CLI 
 Written down so they aren't lost. Each needs a decision first.
 
 - **Atomic multi-key writes in one space.** One request, one version, all or nothing, counts as one write, and a watch never splits that version across responses. Plain set and delete with optional per-key `ifVersion`, nothing query-like. Cheap with one SQLite file per space, and stops other clients seeing half-created items. Conflicts with the "transactions over several keys" non-goal in design.md, which would have to be revised.
-- **kv.js versioned mirror.** `db.shared.mirror("board.*")`: a Map kept in sync from a watch, tracking per-key versions including deletes, that ignores write acknowledgements older than what the watch already delivered. Fieldnotes hit that race (a late acknowledgement brought back a deleted note). Optional sugar over watch, raw HTTP unchanged.
+
+## Decided against
+
+- **kv.js versioned mirror** (`db.shared.mirror(...)`). Rejected 2026-10-27. It is a large primitive for a narrow race. Pages handle it with specific checks instead: keep the version per key from the watch, including deletes, and ignore a write acknowledgement whose version is older than what the watch already delivered.
 
 ## Rules for all of the above
 
@@ -25,9 +28,9 @@ So that nothing changes stored data in a way that's hard to see coming:
 - Clients never retry a write on their own. kv.js reports a retryable error and the page decides. Resuming a watch from its last version is fine, since it only reads.
 - Anything not stored never touches stored data, and stored data never arrives through a channel meant for unstored messages.
 
-## Open: a live connection per space
+## Next: a live connection per space
 
-Not decided. Direction as of 2026-10-22, so the thinking isn't redone.
+Agreed as the next build on 2026-10-27, then unstored messages after it, one at a time. The design below is the starting point, not final. Direction as of 2026-10-22, so the thinking isn't redone.
 
 **Two ways to talk to a space, nothing in between.**
 
