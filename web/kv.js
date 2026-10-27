@@ -24,6 +24,11 @@
 //   createSpace({ public: "respond" })  anyone reads and adds their own entry: polls, RSVPs
 //   createSpace({ public: "all" })      anyone with the name reads and writes
 //
+// Lots of live interaction (a shared board, a quiz, game state)? Use
+//   kv(SPACE, { live: true })
+// Same API and results; data and watches go over one WebSocket, falling back
+// to HTTP by itself. Write limits stay the same.
+//
 // Never put an access token (at_...) or owner token (ot_...) in page source.
 // Anyone who can load the page could use it. Invite links are for sending to people.
 //
@@ -94,6 +99,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
 // without failing the request.
 const WATCH_DEADLINE = 35000
 const HIDDEN_PAUSE = 5 * 60 * 1000
+
+// Live connection timing. Phones lose sockets silently when they sleep or
+// switch networks, so the client pings and gives up on silence quickly.
+const LIVE_OPEN_WAIT = 10000      // to connect
+const LIVE_WATCH_WAIT = 3000      // a watch waits this long for a connecting socket, then uses HTTP
+const LIVE_PING = 25000           // while open
+const LIVE_PING_WAIT = 10000
+const LIVE_WAKE_PING_WAIT = 3000  // when the page becomes visible again
+const LIVE_REQUEST_WAIT = 30000
 
 // One identity per server, shared by every kv() instance on the page.
 const identities = new Map()
@@ -187,6 +201,8 @@ export function kv(space, opts = {}) {
   const server = (opts.server || SERVER).replace(/\/$/, "")
   const fetchFn = opts.fetch || globalThis.fetch.bind(globalThis)
   const ident = identity(server, opts.tokenKey || "cubby:" + server, fetchFn, opts.token)
+  const WS = opts.WebSocket || globalThis.WebSocket
+  const live = opts.live && typeof WS === "function" ? makeLive(server.replace(/^http/, "ws") + "/v1/" + space + "/live", WS) : null
 
   // auth: the request needs a visitor token, and gets one if there isn't one
   // yet. Without auth, whatever token there is still goes along, so a
@@ -205,9 +221,20 @@ export function kv(space, opts = {}) {
       if (qs) url += "?" + qs
       const headers = {}
       if (!read && cur?.token) headers.Authorization = "Bearer " + cur.token
+      const dataPath = path.startsWith("shared/") || path.startsWith("me/") || path.startsWith("users/")
+      // With live on, data requests go over the socket while it's open and
+      // over HTTP otherwise. The answers are the same either way.
+      const viaLive = live && dataPath && live.isOpen()
+      if (live && dataPath && !viaLive) live.ensure()
       let res
       try {
-        res = await fetchFn(url, { method, headers, body, signal })
+        if (viaLive) {
+          const lq = {}
+          for (const [k, v] of Object.entries(query || {})) if (v !== undefined && v !== null) lq[k] = String(v)
+          res = await live.request(cur?.token, method, path, lq, body)
+        } else {
+          res = await fetchFn(url, { method, headers, body, signal })
+        }
       } catch (err) {
         if (err?.name === "AbortError") throw err
         throw new KvError(0, "network_error", String(err?.message || err))
@@ -223,7 +250,6 @@ export function kv(space, opts = {}) {
           continue
         }
       }
-      const dataPath = path.startsWith("shared/") || path.startsWith("me/") || path.startsWith("users/")
       if (dataPath && !read && (method !== "POST" || path.endsWith("/series"))) {
         const header = res.headers.get("RateLimit")
         db.writeBudget = header ? parseBudget(header) : null
@@ -378,6 +404,7 @@ export function kv(space, opts = {}) {
 
     let stopped = false
     let controller = null
+    let sub = null // the running watch on the live connection
     let hiddenSince = hasDoc && document.hidden ? Date.now() : null
     let interrupt = null // ends the current pause or retry wait early
 
@@ -406,6 +433,8 @@ export function kv(space, opts = {}) {
       window.addEventListener("offline", wake)
       window.addEventListener("pageshow", wake)
     }
+    // When the live connection opens, a watch waiting on HTTP moves over.
+    const offOpen = live ? live.onOpen(() => controller?.abort("wake")) : null
     const cleanup = () => {
       if (hasDoc) document.removeEventListener("visibilitychange", onVisibility)
       if (hasWin) {
@@ -413,6 +442,7 @@ export function kv(space, opts = {}) {
         window.removeEventListener("offline", wake)
         window.removeEventListener("pageshow", wake)
       }
+      offOpen?.()
     }
 
     const safely = (fn, arg) => {
@@ -428,15 +458,71 @@ export function kv(space, opts = {}) {
       safely(onChange, withMine({ deleted: false, ...change }))
     }
 
-    ;(async () => {
-      let backoff = 1000
-      let resync = null // keys seen in the snapshot after a 410, or true for a "now" watch
-      let initial = true
-      const retry = async err => {
-        onError(err)
-        await pause(err.code === "rate_limited" || err.status === 429 ? (err.retryAfter || 5) * 1000 : backoff)
-        backoff = Math.min(backoff * 2, 30000)
+    let backoff = 1000
+    let resync = null // keys seen in the snapshot after a 410, or true for a "now" watch
+    let initial = true
+    const retry = async err => {
+      onError(err)
+      await pause(err.code === "rate_limited" || err.status === 429 ? (err.retryAfter || 5) * 1000 : backoff)
+      backoff = Math.min(backoff * 2, 30000)
+    }
+    // 410: the version is too old. Start over and report what vanished.
+    const expired = () => {
+      if (onlyNew) {
+        from = "now"
+        resync = true
+      } else {
+        from = 0
+        resync = new Set()
       }
+    }
+    // One watch response, from an HTTP request or a live push.
+    const handle = body => {
+      backoff = 1000
+      if (resync instanceof Set) for (const c of body.changes) resync.add(entryId(c))
+      for (const c of body.changes) deliver(c)
+      from = body.version
+      if (body.more) return
+      if (resync instanceof Set) {
+        for (const id of [...known]) {
+          if (resync.has(id)) continue
+          const slash = id.indexOf("/")
+          deliver({ key: id.slice(slash + 1), user: id.slice(0, slash) || undefined, deleted: true, version: body.version })
+        }
+      }
+      if (stopped) return
+      safely(onSync, { version: body.version, initial, resync: !!resync })
+      initial = false
+      resync = null
+    }
+
+    // Watches over the live connection until it ends. false: the watch stops.
+    const overLive = async () => {
+      let cur
+      try {
+        cur = auth ? await ident.get() : ident.current()
+      } catch (err) {
+        await retry(err instanceof KvError ? err : new KvError(0, "network_error", String(err?.message || err)))
+        return true
+      }
+      const path = await pathOf(target)
+      if (stopped || !live.isOpen()) return true
+      sub = live.watch(cur?.token, path, from === "now" ? undefined : from, handle)
+      const end = await sub.done
+      sub = null
+      if (!end.frame) return true // the connection closed, or stop()
+      if (end.frame.status === 410) { expired(); return true }
+      const err = await errorFrom(frameResponse(end.frame))
+      if (err.code === "identity_changed") return true
+      if (!err.retryable) {
+        onError(err) // the watch stops here; err.retryable tells the app
+        return false
+      }
+      await retry(err)
+      return true
+    }
+
+    ;(async () => {
       let offlineReported = false
       while (!stopped) {
         if (typeof navigator !== "undefined" && navigator.onLine === false) {
@@ -445,10 +531,15 @@ export function kv(space, opts = {}) {
           continue
         }
         offlineReported = false
-        if (hiddenSince && Date.now() - hiddenSince > HIDDEN_PAUSE) {
+        if ((hiddenSince && Date.now() - hiddenSince > HIDDEN_PAUSE) || live?.paused) {
           await pause()
           continue
         }
+        if (live && await live.ready(LIVE_WATCH_WAIT)) {
+          if (stopped || !(await overLive())) break
+          continue
+        }
+        if (stopped) break
         controller = new AbortController()
         const deadline = setTimeout(() => controller.abort("deadline"), WATCH_DEADLINE)
         let res, body
@@ -469,13 +560,7 @@ export function kv(space, opts = {}) {
         clearTimeout(deadline)
         if (stopped) break
         if (res.status === 410) {
-          if (onlyNew) {
-            from = "now"
-            resync = true
-          } else {
-            from = 0
-            resync = new Set()
-          }
+          expired()
           continue
         }
         if (!res.ok) {
@@ -487,22 +572,7 @@ export function kv(space, opts = {}) {
           await retry(err)
           continue
         }
-        backoff = 1000
-        if (resync instanceof Set) for (const c of body.changes) resync.add(entryId(c))
-        for (const c of body.changes) deliver(c)
-        from = body.version
-        if (body.more) continue
-        if (resync instanceof Set) {
-          for (const id of [...known]) {
-            if (resync.has(id)) continue
-            const slash = id.indexOf("/")
-            deliver({ key: id.slice(slash + 1), user: id.slice(0, slash) || undefined, deleted: true, version: body.version })
-          }
-        }
-        if (stopped) break
-        safely(onSync, { version: body.version, initial, resync: !!resync })
-        initial = false
-        resync = null
+        handle(body)
       }
       cleanup()
     })()
@@ -511,6 +581,7 @@ export function kv(space, opts = {}) {
       if (stopped) return
       stopped = true
       controller?.abort("stop")
+      sub?.stop()
       interrupt?.()
     }
   }
@@ -608,6 +679,10 @@ export function kv(space, opts = {}) {
       watch: (target, onChange, o) => watch(async t => `users/*/${t}`, false, target, onChange, o),
     },
     id: async () => (await ident.get()).id,
+    // status: "http" without live (or after falling back), else "connecting",
+    // "open", "closed" (not needed right now, or between retries) or "offline".
+    // Set onStatus to hear about changes. Nothing else depends on it.
+    live: live ? live.api : { status: "http", onStatus: null },
   }
   return db
 }
@@ -741,6 +816,244 @@ function parseBudget(header) {
     if (name && remaining) buckets[name[1]] = { remaining: Number(remaining[1]) }
   }
   return { ...buckets, observedAt: Date.now() }
+}
+
+// A reply frame from the live connection as a fetch Response, so every
+// caller reads it exactly as it reads HTTP.
+function frameResponse(f) {
+  const headers = new Headers(f.headers || {})
+  let body = null
+  if (f.body !== undefined) {
+    body = f.text ? f.body : JSON.stringify(f.body)
+    headers.set("Content-Type", f.text ? "text/plain; charset=utf-8" : "application/json; charset=utf-8")
+  }
+  return new Response(body, { status: f.status, headers })
+}
+
+// The live connection for kv(space, { live: true }): one WebSocket, opened
+// on first use. Requests use it only while it's open; until then, and
+// whenever it's down, they go over HTTP. Watches move to it when it opens
+// and resume from their version after it closes, so nothing is lost. It
+// never resends a request. If it can't connect twice before ever opening (a
+// proxy that blocks WebSockets, an older server), it stays on HTTP.
+function makeLive(url, WS) {
+  const hasDoc = typeof document !== "undefined"
+  const hasWin = typeof window !== "undefined" && typeof window.addEventListener === "function"
+  const isOffline = () => typeof navigator !== "undefined" && navigator.onLine === false
+  let sock = null, status = "closed", everOpened = false, failures = 0
+  let nextId = 1, sentToken
+  let backoff = 0, notBefore = 0, retryTimer = null, pingTimer = null, hiddenTimer = null
+  let paused = false // hidden long enough that the socket was closed
+  const pending = new Map(), subs = new Map(), waiters = new Set(), openers = new Set()
+
+  const api = { onStatus: null, get status() { return status } }
+  const setStatus = next => {
+    if (next === status) return
+    status = next
+    try { api.onStatus?.(next) } catch (err) { console.warn("cubby live:", err) }
+  }
+  const settle = () => { for (const w of [...waiters]) w() }
+
+  function connect() {
+    if (sock || status === "http" || paused || isOffline() || retryTimer) return
+    const wait = notBefore - Date.now()
+    if (wait > 0) {
+      retryTimer = setTimeout(() => { retryTimer = null; connect() }, wait)
+      return
+    }
+    let s
+    try {
+      s = new WS(url)
+    } catch {
+      failed()
+      return
+    }
+    sock = s
+    setStatus("connecting")
+    const openTimer = setTimeout(() => drop(s), LIVE_OPEN_WAIT)
+    s.onopen = () => {
+      clearTimeout(openTimer)
+      everOpened = true
+      failures = 0
+      backoff = 0
+      sentToken = undefined
+      setStatus("open")
+      schedulePing()
+      settle()
+      for (const fn of [...openers]) fn()
+    }
+    s.onmessage = e => {
+      let f
+      try { f = JSON.parse(e.data) } catch { return }
+      const p = pending.get(f.id)
+      if (p) {
+        pending.delete(f.id)
+        p.resolve(f)
+        return
+      }
+      subs.get(f.id)?.frame(f)
+    }
+    s.onclose = () => { clearTimeout(openTimer); drop(s) }
+    s.onerror = () => {} // onclose follows
+  }
+
+  function failed() {
+    if (!everOpened && !isOffline() && ++failures >= 2) {
+      setStatus("http")
+      settle()
+      return true
+    }
+    backoff = Math.min(Math.max(backoff * 2, 1000), 30000)
+    notBefore = Date.now() + backoff
+    return false
+  }
+
+  // Ends socket s now, whatever state it's in. A dead connection can take
+  // minutes to report close, so nothing waits for the browser.
+  function drop(s) {
+    if (sock !== s) return
+    sock = null
+    s.onopen = s.onmessage = s.onclose = s.onerror = null
+    try { s.close(1000) } catch {}
+    clearTimeout(pingTimer)
+    const wasOpen = status === "open"
+    for (const p of pending.values()) p.reject(new Error("The live connection closed."))
+    pending.clear()
+    for (const sub of subs.values()) sub.end({ closed: true })
+    subs.clear()
+    if (wasOpen) {
+      backoff = 0
+      notBefore = 0
+    } else if (failed()) {
+      return
+    }
+    setStatus(isOffline() ? "offline" : "closed")
+    settle()
+  }
+
+  function send(build, wait) {
+    const s = sock
+    return new Promise((resolve, reject) => {
+      if (!s || s.readyState !== 1) return reject(new Error("The live connection isn't open."))
+      const id = nextId++
+      const timer = setTimeout(() => {
+        pending.delete(id)
+        reject(new Error("No answer on the live connection."))
+        drop(s)
+      }, wait)
+      pending.set(id, {
+        resolve: f => { clearTimeout(timer); resolve(f) },
+        reject: err => { clearTimeout(timer); reject(err) },
+      })
+      try {
+        s.send(build(id))
+      } catch (err) {
+        pending.get(id)?.reject(err)
+        pending.delete(id)
+      }
+    })
+  }
+
+  function schedulePing() {
+    clearTimeout(pingTimer)
+    pingTimer = setTimeout(() => ping(LIVE_PING_WAIT), LIVE_PING)
+  }
+  function ping(wait) {
+    const s = sock
+    if (!s || status !== "open") return
+    send(id => JSON.stringify({ id, op: "ping" }), wait).then(() => { if (sock === s) schedulePing() }, () => {})
+  }
+
+  // The server takes the visitor from the latest auth message. Sent only
+  // when it changes; the reply isn't needed, since a bad token shows up on
+  // the requests after it exactly as on HTTP.
+  function authAs(token) {
+    const t = token || null
+    if (t === sentToken) return
+    sentToken = t
+    sock.send(JSON.stringify({ id: nextId++, op: "auth", token: t }))
+  }
+
+  if (hasDoc) {
+    document.addEventListener("visibilitychange", () => {
+      clearTimeout(hiddenTimer)
+      if (document.hidden) {
+        hiddenTimer = setTimeout(() => { paused = true; if (sock) drop(sock) }, HIDDEN_PAUSE)
+      } else {
+        paused = false
+        if (status === "open") ping(LIVE_WAKE_PING_WAIT) // after a phone sleeps the socket may be dead
+      }
+    })
+  }
+  if (hasWin) {
+    window.addEventListener("offline", () => { if (sock) drop(sock); else if (status !== "http") setStatus("offline") })
+    window.addEventListener("online", () => {
+      notBefore = 0
+      clearTimeout(retryTimer)
+      retryTimer = null
+      if (status === "offline") setStatus("closed")
+    })
+    // An open socket keeps the page out of the back/forward cache, so it
+    // closes on pagehide and stays closed until the page shows again.
+    window.addEventListener("pagehide", () => { paused = true; if (sock) drop(sock) })
+    window.addEventListener("pageshow", () => { if (!(hasDoc && document.hidden)) paused = false })
+  }
+
+  return {
+    api,
+    get paused() { return paused },
+    isOpen: () => status === "open" && sock?.readyState === 1,
+    ensure: connect,
+    onOpen(fn) { openers.add(fn); return () => openers.delete(fn) },
+    // Resolves true once open, false if it isn't open within ms.
+    ready(ms) {
+      if (status === "open") return Promise.resolve(true)
+      connect()
+      if (!sock && !retryTimer) return Promise.resolve(false)
+      return new Promise(resolve => {
+        const done = () => { clearTimeout(timer); waiters.delete(done); resolve(status === "open") }
+        const timer = setTimeout(done, ms)
+        waiters.add(done)
+      })
+    },
+    request(token, method, path, query, body) {
+      if (!sock) return Promise.reject(new Error("The live connection isn't open."))
+      authAs(token)
+      return send(id => {
+        let m = `{"id":${id},"method":${JSON.stringify(method)},"path":${JSON.stringify(path)}`
+        if (Object.keys(query).length) m += `,"query":${JSON.stringify(query)}`
+        if (body !== undefined) m += `,"body":${body}` // kv.js bodies are JSON text, sent byte for byte
+        return m + "}"
+      }, LIVE_REQUEST_WAIT).then(frameResponse)
+    },
+    // Pushes each watch body to onBody. done resolves with { frame } for an
+    // error reply, { closed } when the socket ends, { stopped } after stop().
+    watch(token, path, version, onBody) {
+      const s = sock
+      let finish
+      const done = new Promise(r => { finish = r })
+      authAs(token)
+      const id = nextId++
+      subs.set(id, {
+        frame: f => {
+          if (f.status === 200) onBody(f.body)
+          else { subs.delete(id); finish({ frame: f }) }
+        },
+        end: finish,
+      })
+      const m = { id, method: "GET", path: path + "/watch" }
+      if (version !== undefined) m.query = { version: String(version) }
+      s.send(JSON.stringify(m))
+      return {
+        done,
+        stop() {
+          if (!subs.delete(id)) return
+          try { if (sock === s) s.send(JSON.stringify({ op: "stop", watch: id })) } catch {}
+          finish({ stopped: true })
+        },
+      }
+    },
+  }
 }
 
 // Clock samples do not send tokens or create a visitor. now() uses a monotonic

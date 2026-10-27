@@ -63,6 +63,8 @@ await db.user().set("answer", "B", { ifBefore: opensAt + 20000 })
 
 Every key returns its value time as `t` in list/watch and `KV-Time` on reads. `/v1/time` supplies the server clock. `ifBefore` enforces a write deadline. Clock estimates and browser timers are subject to network asymmetry and browser scheduling.
 
+For pages with a lot of live interaction, `kv(space, { live: true })` sends data requests and watches over one WebSocket per space instead of a request each. Same API and same results. It falls back to HTTP by itself where WebSockets don't get through. [Details](docs/spec.md#live-connection).
+
 Defaults are 120 writes per visitor per minute, burst 30, and 50 open watches per IP. Reads remain 600/IP/minute. Every rate is configurable. `GET /v1/limits` reports the server's actual settings; `/access` includes effective space limits and usage. Data-write responses carry remaining visitor and IP budgets in `RateLimit` headers, exposed by kv.js as `db.writeBudget`. These are snapshots, so clients must still handle 429 and `err.retryAfter`. Writes are never automatically retried after 429 or an uncertain network failure. [Full contract](docs/spec.md#limits-and-server-time).
 
 ## Install
@@ -187,6 +189,7 @@ Everything the CLI does is a single request.
 | delete | `DELETE /v1/{space}/shared/{key}` |
 | list: matching keys with their values | `GET /v1/{space}/shared/msg.*` or `GET /v1/{space}/users/*/vote` |
 | wait for changes | `GET /v1/{space}/shared/msg.*/watch?version=N` (long poll, 25 s) |
+| live connection | WebSocket to `/v1/{space}/live`: the same requests as JSON messages, watches pushed. [Contract](docs/spec.md#live-connection) |
 | add a point to a series | `POST /v1/{space}/shared/temp/series`, body is the value |
 | add to several series | `POST /v1/{space}/shared/env.*/series`, body `{"temp": 21.4, "rh": 45}` |
 | read a series | `GET /v1/{space}/shared/temp/series` (newest 1000) or `?since=MS` (after that time) |
@@ -345,6 +348,14 @@ Put it behind a TLS proxy. Caddy is two lines and also gives browsers HTTP/2, wh
 kv.example.com {
     reverse_proxy localhost:28229
 }
+```
+
+Caddy passes WebSocket upgrades as is. Behind nginx, the location needs:
+
+```nginx
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection $connection_upgrade;   # with: map $http_upgrade $connection_upgrade { default upgrade; '' close; }
 ```
 
 A systemd unit:

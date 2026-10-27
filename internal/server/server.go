@@ -27,6 +27,7 @@ type Server struct {
 	watches watchCounter
 	notify  notifier
 	log     *log.Logger
+	live    liveSet
 }
 
 func New(cfg *config.Config, store *store.Store, logger *log.Logger) *Server {
@@ -204,7 +205,7 @@ func (s *Server) route(c *reqCtx) error {
 			if len(seg) < 4 {
 				return noRoute
 			}
-		case "access", "join", "owner-token":
+		case "access", "join", "owner-token", "live":
 			if len(seg) != 2 {
 				return noRoute
 			}
@@ -222,6 +223,14 @@ func (s *Server) route(c *reqCtx) error {
 			return noRoute
 		}
 		return apierr.InvalidSpace(names.SuggestFor(space))
+	}
+	if len(seg) == 2 && seg[1] == "live" {
+		if c.live != nil {
+			return noRoute
+		}
+		// Access is checked per message, not here: a page may connect
+		// before it joins, and a grant can arrive or end mid-connection.
+		return s.liveRoute(c, space)
 	}
 	rights, err := s.store.Rights(space, c.visitor)
 	if err != nil {
@@ -384,5 +393,6 @@ func (s *Server) route(c *reqCtx) error {
 	} else if !rights.Allows(op) {
 		return apierr.NoSpace // visible through a write-only grant, but not readable
 	}
+	c.op = op
 	return h(c, t)
 }

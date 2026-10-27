@@ -28,7 +28,7 @@ Hosted services do realtime, offline support and scale better. This trades those
 - File or binary storage.
 - Partial updates. A value is always read and written whole.
 - Calculations on stored data. Series points come back exactly as stored, with no averages or downsampling.
-- High-frequency realtime. Watching is long polling, made for changes every few seconds.
+- High-frequency realtime of things that aren't state, like cursors at 30 per second. Watching delivers state, over long polling or a live WebSocket. Unstored messages are planned separately.
 - Anything specific to one kind of host or page.
 
 ## Quickstart
@@ -502,6 +502,9 @@ To show a list first and follow it after, pass the list itself: `watch("game.*",
 | Raw value as the body | `{ value, version }` wrapper | People would PUT the wrapper back and end up with nested wrappers. |
 | Whole-value writes only | JSON field paths, `PATCH`, increment | Too much server logic. Separate keys and `ifVersion` cover the real needs. Series add whole points, they don't edit values. |
 | Long polling with a version cursor | SSE | `EventSource` can't send headers, proxies buffer SSE, and SSE needs its own replay logic. |
+| One optional WebSocket per space, carrying HTTP requests in an envelope | SSE beside HTTP, or a separate realtime protocol | Pages with tight live use need pushes without a request each and a warm connection both ways, which matters most on phones. Running each message through the same router keeps rules, limits and errors identical to HTTP. With a socket available, SSE would be a third way that adds nothing. |
+| Socket auth in the first message, or a header | Token in the socket URL, a ticket route, a token in `Sec-WebSocket-Protocol` | URLs end up in proxy logs. Browsers can't set headers on a WebSocket. A ticket costs a request and server state for what a message does. `auth` can also switch visitor mid-connection, so a reader who starts writing keeps the socket. |
+| Access checked per socket message | A check at connect | A page may connect before it joins, and a grant can start or end while connected. Per message, a socket answers exactly like the HTTP request would. |
 | Watch returns current state since a version | Replaying history, or only changes since connecting | "Since connecting" loses writes between long-poll requests. A version cursor doesn't, and needs no history. |
 | `/watch` path suffix | `?watch` query flag | Keys are one path segment, so a trailing `/watch` is unambiguous. |
 | Every URL names a key or pattern, then at most one action | `/shared/watch` for a whole area, actions after actions | One shape to learn. A whole area is `*`, which already means "several keys". |

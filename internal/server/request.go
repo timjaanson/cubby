@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/timjaanson/cubby/internal/access"
 	"github.com/timjaanson/cubby/internal/apierr"
 )
 
@@ -23,6 +24,13 @@ type reqCtx struct {
 	visitor string // "" when no valid token was sent
 	tokErr  *apierr.Error
 	status  int
+
+	op access.Op // what route checked, for watches that check again later
+
+	// Set for a message on a live connection.
+	live        *liveConn
+	liveID      json.RawMessage
+	liveStarted bool // a watch took over the reply
 }
 
 func (c *reqCtx) header() http.Header { return c.w.Header() }
@@ -39,6 +47,18 @@ func (c *reqCtx) json(status int, v any) {
 }
 
 func (c *reqCtx) fail(err error) {
+	ae, body := apiErrBody(err)
+	if ae.Status == 429 {
+		c.header().Set("Retry-After", fmt.Sprint(ae.Extra["retryAfter"]))
+	}
+	if ae.Status == 405 {
+		c.header().Set("Allow", fmt.Sprint(ae.Extra["allow"]))
+	}
+	c.json(ae.Status, body)
+}
+
+// apiErrBody turns any error into its API error and JSON body.
+func apiErrBody(err error) (*apierr.Error, map[string]any) {
 	var ae *apierr.Error
 	if !errors.As(err, &ae) {
 		ae = &apierr.Error{Status: 500, Code: "internal", Message: "Internal server error."}
@@ -48,13 +68,7 @@ func (c *reqCtx) fail(err error) {
 	for k, v := range ae.Extra {
 		body[k] = v
 	}
-	if ae.Status == 429 {
-		c.header().Set("Retry-After", fmt.Sprint(ae.Extra["retryAfter"]))
-	}
-	if ae.Status == 405 {
-		c.header().Set("Allow", fmt.Sprint(ae.Extra["allow"]))
-	}
-	c.json(ae.Status, body)
+	return ae, body
 }
 
 // needVisitor returns the visitor or the right 401.

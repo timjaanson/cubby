@@ -63,6 +63,7 @@ func cmdServe(args []string) int {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+	hs.RegisterOnShutdown(srv.CloseLive)
 	// Plain-text HTTP/2 too, so a proxy in front can multiplex watches.
 	hs.Protocols = new(http.Protocols)
 	hs.Protocols.SetHTTP1(true)

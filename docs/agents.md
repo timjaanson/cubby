@@ -111,6 +111,8 @@ Presence belongs in `db.user().set("here", value, {ttl: 30})`, renewed every 15 
 
 Leases use `ifVersion: 0` to acquire, the acquired version to renew the same holder value with TTL, and that version to delete. A failed renewal means stop. No automatic lock helper is provided. This cannot prevent an actor from continuing external work after a long stall. See the [lease contract](spec.md#expiring-keys-and-leases).
 
+For pages with a lot of live interaction, such as a shared board, a quiz or a game state that changes every second or so, use `kv(SPACE, { live: true })`. Everything works the same, but data goes over one WebSocket, watches are pushed, and each change costs no request. It falls back to HTTP by itself. Don't use it for a page that reads once and writes rarely. Live mode doesn't raise write limits: still 120 writes per minute per visitor, so don't stream cursors or drags through stored keys.
+
 For a synchronized reveal, call `db.clock.sync()` and schedule with `db.clock.at(serverMilliseconds, callback)`. Set an opening time a little ahead to allow HTTP watches to deliver it. Enforce closing times with `{ifBefore: closesAt}` on set, delete or add. A late write returns `too_late`, status 412. Plain keys have a server-generated `t`; a series point's time may be caller-supplied. Clock sync does not guarantee precise browser execution.
 
 The share panel preserves the recovery view regardless of whether `ownerToken` or the `open` attribute is assigned first. Setting `ownerToken` alone opens it. Dismissing the recovery dialog clears that token from the component.

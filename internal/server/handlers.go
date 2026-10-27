@@ -270,6 +270,29 @@ func (s *Server) list(c *reqCtx, t store.Target) error {
 	return nil
 }
 
+var errVersionExpired = &apierr.Error{Status: 410, Code: "version_expired", Message: "That version is too old or from elsewhere. Start again from version=0."}
+
+// watchBatch is one watch response: at most 1000 changes after from, and
+// the version to continue from.
+func watchBatch(changes []store.Entry, seq, from int64) (body map[string]any, next int64) {
+	more := len(changes) > 1000
+	if more {
+		changes = changes[:1000]
+	}
+	out := make([]itemJSON, 0, len(changes))
+	for _, e := range changes {
+		out = append(out, toItem(e))
+	}
+	next = max(seq, from)
+	if len(changes) > 0 {
+		next = max(seq, changes[len(changes)-1].Version)
+	}
+	if more {
+		next = changes[len(changes)-1].Version
+	}
+	return map[string]any{"changes": out, "version": next, "more": more}, next
+}
+
 func (s *Server) watch(c *reqCtx, t store.Target) error {
 	if err := s.rate(s.lim.readsPerIP, c.ip, 1, "rate_limited"); err != nil {
 		return err
@@ -277,6 +300,9 @@ func (s *Server) watch(c *reqCtx, t store.Target) error {
 	q := c.r.URL.Query()
 	timeout := 25 * time.Second
 	if q.Has("timeout") {
+		if c.live != nil {
+			return apierr.BadParam("timeout", "A watch on a live connection runs until stopped, so it takes no timeout.")
+		}
 		n, ok := parseUint(q.Get("timeout"))
 		if !ok || n < 1 || n > 55 {
 			return apierr.BadParam("timeout", "timeout is 1 to 55 seconds.")
@@ -297,6 +323,9 @@ func (s *Server) watch(c *reqCtx, t store.Target) error {
 		}
 		from = seq
 	}
+	if c.live != nil {
+		return c.live.startWatch(c, t, from)
+	}
 
 	if !s.watches.acquire(c.ip) {
 		return &apierr.Error{Status: 429, Code: "too_many_watches", Message: "Too many open watches."}
@@ -315,7 +344,7 @@ func (s *Server) watch(c *reqCtx, t store.Target) error {
 		sig := s.notify.subscribe(t.Space)
 		changes, seq, err := s.store.Changes(t, from, 1000)
 		if errors.Is(err, store.ErrVersionExpired) {
-			return &apierr.Error{Status: 410, Code: "version_expired", Message: "That version is too old or from elsewhere. Start again from version=0."}
+			return errVersionExpired
 		}
 		if err != nil {
 			return err
@@ -331,22 +360,8 @@ func (s *Server) watch(c *reqCtx, t store.Target) error {
 				woken = false
 				continue
 			}
-			more := len(changes) > 1000
-			if more {
-				changes = changes[:1000]
-			}
-			out := make([]itemJSON, 0, len(changes))
-			for _, e := range changes {
-				out = append(out, toItem(e))
-			}
-			v := seq
-			if len(changes) > 0 {
-				v = max(seq, changes[len(changes)-1].Version)
-			}
-			if more {
-				v = changes[len(changes)-1].Version
-			}
-			c.json(200, map[string]any{"changes": out, "version": v, "more": more})
+			body, _ := watchBatch(changes, seq, from)
+			c.json(200, body)
 			return nil
 		}
 		select {

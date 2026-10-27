@@ -877,8 +877,76 @@ The client always passes the version from its last response. A write between two
 
 ### Limits
 
-- At most 20 open watches per IP and 1000 on the server. Over the limit: 429 `too_many_watches`.
+- At most 50 open watches per IP and 1000 on the server (`watches_per_ip`, `watches_total`). A [live connection](#live-connection) counts as one, however many watches it carries. Over the limit: 429 `too_many_watches`.
 - Browsers allow 6 HTTP/1.1 connections per domain across all tabs, so serve the API over HTTP/2.
+
+### Live connection
+
+```
+GET /v1/{space}/live        Upgrade: websocket
+```
+
+One WebSocket per space carries reads, writes and watches. It's the same store as HTTP: a write over either wakes watchers on both, versions are shared, and a `curl` script and a page on a socket see each other's changes as they happen. Watched changes are pushed with no request per change. HTTP stays the basic way, and keeps every feature.
+
+Only data goes over the socket: get, set, delete, list, watch and series, under `shared/`, `me/` and `users/`. Creating spaces, visitors, `join`, `access`, settings, tokens, grants, `owner-token`, `whoami`, `/limits` and `/time` stay HTTP only.
+
+#### Connecting and auth
+
+- A token never goes in the URL. `?token=` on this route is refused with 400 before the upgrade.
+- **An auth message.** Browsers can't set headers on a WebSocket, so the first message is usually `{"id":1,"op":"auth","token":"vt_..."}`. The server waits up to 10 seconds for a first message, then closes with 4408. Any first message ends the wait. A data message first means no visitor, as an HTTP request without a token.
+- **Or a header.** Clients that can set headers may send `Authorization: Bearer vt_...` with the upgrade. A bad one fails before the upgrade with 401 `invalid_token`. There's no wait then.
+- Both together are fine, and `auth` may come again at any time, for example after the page creates a visitor for its first write. Each message runs as the visitor from the latest `auth` (or the header).
+- `auth` answers `200 {"id":"u_..."}`, or `{"id":null}` for `{"op":"auth"}` without a token. A bad token answers 401 `invalid_token`, and what follows behaves exactly like HTTP with a bad token: reads run without a visitor, writes answer `invalid_token`.
+- Access is checked per message, never at connect, so a page may connect before it joins and use a grant the moment it gets one. A space the caller can't see answers each message with `no_space`, exactly like a missing space, and costs the same [miss](#guessing-space-names).
+- Switching to a different visitor ends watches on `me/` with 409 `identity_changed`. `me/` meant the old visitor's area. Start them again from their last version.
+
+#### Messages
+
+Messages are JSON text frames. A data message is an HTTP request in an envelope:
+
+```
+→ {"id":2,"method":"PUT","path":"shared/note.42","query":{"ifVersion":17,"ttl":30},"body":{"text":"Buy milk"}}
+→ {"id":3,"method":"GET","path":"shared/note.42"}
+→ {"id":4,"method":"PUT","path":"shared/memo","text":"stored as text"}
+→ {"id":5,"method":"GET","path":"shared/board.*/watch","query":{"version":0}}
+→ {"op":"stop","watch":5}
+→ {"id":6,"op":"ping"}
+```
+
+- `method` is GET, PUT, DELETE or POST. `path` is what follows `/v1/{space}/` in the HTTP route, without a query string. `query` holds the route's parameters as strings, numbers or booleans, the same ones the route takes over HTTP. Unknown fields anywhere are refused with `bad_message`, and unknown parameters with `invalid_parameter`, as on HTTP.
+- `body` is a JSON value, stored byte for byte as sent. `text` is a string stored as text. Only PUT and POST take one.
+- `id` is a number or a string, and every reply carries it back. Replies may arrive in any order.
+- `op` messages are `auth`, `ping` (answers `200 {}`) and `stop` (`watch` names the watch's id; a reply only if it has its own `id`).
+
+Replies are the HTTP response in an envelope:
+
+```
+← {"id":3,"status":200,"headers":{"ETag":"\"17\"","KV-By":"u_...","KV-Time":"1791449600000"},"body":{"text":"Buy milk"}}
+← {"id":4,"status":201,"headers":{"ETag":"\"18\"","RateLimit":"\"visitor\";r=28, ...","RateLimit-Policy":"..."},"body":{"version":18}}
+← {"id":2,"status":412,"body":{"error":"version_conflict","message":"...","current":18}}
+```
+
+- `status` and `body` are what HTTP would answer. The handlers are the same, so rules, limits and errors can't differ.
+- `headers` holds the response headers that carry data: `ETag`, `KV-By`, `KV-Time`, `KV-Expires`, `RateLimit`, `RateLimit-Policy`, `Retry-After`, `Allow`.
+- A stored value is `body` byte for byte. A text value is a JSON string with `"text":true`, where HTTP would say `text/plain`.
+- A message that isn't a valid envelope answers 400 `bad_message`, with its `id` if one could be read.
+
+#### Watches over the socket
+
+- The first push comes at once, even with no changes, so the client knows the watch runs and from which version. Without `version` that's an empty push at the current version.
+- After that, each push is the same body an HTTP watch returns, whenever matching changes exist. A burst of writes is combined as on HTTP. `more: true` means the next push follows at once.
+- A slow client loses nothing. Each push carries everything since the last one, merged per key, as long-poll does.
+- `timeout` isn't taken. A watch runs until `stop`, an error or the end of the connection. Pushes already on the way may still arrive after `stop`; ignore ids you no longer follow.
+- Before each push the server checks access again, as a new request would. A grant that ended ends the watch with `no_space`. 410 `version_expired` and other errors end it the same way: one error frame with the watch's id.
+- At most 20 watches per connection. One more answers 429 `too_many_watches`. Reusing the id of a running watch answers 400 `id_in_use`.
+
+#### Limits and keepalive
+
+- A data message costs what its HTTP request costs: a read, or a write against the write limits. Starting a watch costs one read; pushes cost nothing. `auth`, `ping` and refused envelopes cost one read each, `stop` nothing.
+- The server pings every 30 seconds and closes a connection that doesn't answer within 15. A client that can't take a frame for 10 seconds is disconnected.
+- Messages are at most 256 KB.
+- Close codes: 1000 normal, 1001 server restarting (reconnect at once), 1003 a binary frame, 1009 too large, 4408 no first message in 10 seconds.
+- Proxies must pass WebSocket upgrades. For nginx: `proxy_http_version 1.1`, `proxy_set_header Upgrade $http_upgrade` and `proxy_set_header Connection $connection_upgrade` with the usual `map`.
 
 ## 11. Series
 
@@ -1241,6 +1309,7 @@ These stop a browser from treating a stored value as a page or script, even when
 - Run behind TLS, for example with Caddy in front, which also gives HTTP/2.
 - The client IP comes from `X-Forwarded-For` only if the request came from `trusted_proxies`.
 - Log method, path, status, duration, IP and a short hash of the visitor ID. Never log any token, the `token` query parameter or bodies. `join`, `tokens` and `owner-token` carry tokens in their bodies.
+- A live connection logs one line per data message, prefixed `WS`, and one line for the connection when it closes, with status 101 and its duration. Pushes and `op` messages aren't logged.
 - `/kv.js` is cached for an hour. Everything under `/v1` is `no-store`.
 
 ## 16. JS client
@@ -1304,6 +1373,8 @@ These seven are the module's only exports. There is no default export.
 | `tokenKey` | `"cubby:" + server` | localStorage key for the visitor token and ID |
 | `token` | none | a visitor token to use instead of the stored one, for scripts and tests. Never saved |
 | `fetch` | global `fetch` | for tests or other runtimes |
+| `live` | `false` | use a [live connection](#live-connection) for data while it's open. Same API, same results |
+| `WebSocket` | global `WebSocket` | for tests or other runtimes |
 
 - `kv()` makes no request, and throws at once for an invalid name, with the server's `suggestion`.
 - Several `kv()` instances for different spaces share one visitor.
@@ -1454,6 +1525,14 @@ type WatchOptions = {
   - When the page becomes visible, comes back online or is restored from the back/forward cache, the watch drops its current request or wait and asks again at once. A phone that slept may have a dead connection that never fails on its own.
   - After the tab has been hidden for 5 minutes it pauses, and resumes from its last version when visible.
   - The returned function stops the watch and removes its event listeners.
+- **`live: true`** changes the transport, not the API. Every method returns the same values and errors, and callbacks fire the same way.
+  - The socket opens on first use. Data requests use it while it's open and HTTP otherwise, so the first requests of a page never wait for it. Everything else (`open`, `join`, `access`, owner calls, `createSpace`, `clock`) is always HTTP.
+  - A watch waits up to 3 seconds for a connecting socket, then uses HTTP, and moves over when the socket opens. A watch on the socket syncs at once, also with `from: "now"`.
+  - When the socket drops, requests in flight fail with a retryable `network_error` and are never resent. Watches resume from their last version, over HTTP until the socket is back, so nothing is lost. Reconnects back off from 1 to 30 seconds after failures.
+  - The client pings every 25 seconds and drops the socket after 10 seconds of silence, and pings with a 3-second limit when the page becomes visible again. A phone that slept can hold a socket that looks open and is dead.
+  - The socket closes on `pagehide`, so the page can enter the back/forward cache, and after 5 minutes hidden. It reopens when needed after `pageshow` or when visible.
+  - If the socket fails twice before ever opening (a proxy that blocks WebSockets, Chrome's Local Network Access rules for a public page calling a local server, an older server), the client stays on HTTP for that `kv()` without an error.
+  - `db.live.status` is `"http"` (live off, or fell back), `"connecting"`, `"open"`, `"closed"` (not needed right now, or between retries) or `"offline"`. Assign `db.live.onStatus` to hear changes. Pages don't need either.
 
 ### Errors
 
@@ -1732,6 +1811,7 @@ Go.
 - Cross-compiling is one `GOOS`/`GOARCH` pair per target. Release builds for Linux, macOS and Windows on amd64 and arm64, plus Linux arm (for Raspberry Pi and similar).
 - `net/http` from the standard library, using its pattern routing, for both the server and the CLI's client. No web framework.
 - `embed` puts `kv.js` into the binary.
+- `github.com/coder/websocket` for live connections. Small, no dependencies of its own.
 - A goroutine per waiting watch is cheap enough for the 1000-watch limit.
 - The binary is expected to be around 15 MB, mostly SQLite. Client machines carry the server code too, which doesn't matter in practice.
 
