@@ -155,7 +155,7 @@ func parseBatch(body []byte, isJSON bool, prefix string, maxPoint int64, tooLarg
 		seen[key] = true
 		if !names.ValidKey(key) {
 			return nil, &apierr.Error{Status: 400, Code: "invalid_key", Extra: map[string]any{"key": key},
-				Message: strconv.Quote(key) + " isn't a valid key. The prefix plus each member's name must be 1 to 128 of A-Z a-z 0-9 . _ : -, and not \"watch\" or \"series\"."}
+				Message: strconv.Quote(key) + " isn't a valid key. The prefix plus each member's name must be 1 to 128 of A-Z a-z 0-9 . _ : -, and not \"watch\", \"series\" or \"pulse\"."}
 		}
 		if int64(len(raw)) > maxPoint {
 			return nil, tooLarge(key)

@@ -588,6 +588,63 @@ func (l *liveConn) startWatch(c *reqCtx, t store.Target, from int64) error {
 	return nil
 }
 
+// startPulses runs a pulse listener on the connection. Like a watch it sends
+// a first frame at once, then one whenever matching pulses arrive. It never
+// waits to batch: on a socket each pulse goes out as soon as it's sent.
+func (l *liveConn) startPulses(c *reqCtx, t store.Target, h *pulseHub, cursor int64, missed bool) error {
+	key := string(c.liveID)
+	l.mu.Lock()
+	if l.watches[key] != nil {
+		l.mu.Unlock()
+		return &apierr.Error{Status: 400, Code: "id_in_use", Message: "A watch or listener with this id is running. Stop it first, or use a new id."}
+	}
+	if len(l.watches) >= liveMaxWatches {
+		l.mu.Unlock()
+		return &apierr.Error{Status: 429, Code: "too_many_watches", Message: "At most 20 watches and listeners run on one live connection."}
+	}
+	ctx, cancel := context.WithCancel(l.ctx)
+	w := &liveWatch{cancel: cancel, me: strings.HasPrefix(t.Area, "m:")}
+	l.watches[key] = w
+	l.mu.Unlock()
+	c.liveStarted = true
+	go l.runPulses(ctx, w, c.liveID, t, c.op, h, cursor, missed)
+	return nil
+}
+
+func (l *liveConn) runPulses(ctx context.Context, w *liveWatch, id json.RawMessage, t store.Target, op access.Op, h *pulseHub, cursor int64, missed bool) {
+	defer l.endWatch(string(id), w)
+	h.listen(1)
+	defer h.listen(-1)
+	match := pulseMatch(t)
+	first := true
+	for {
+		sig := h.wait()
+		out, next, lost := h.since(cursor, match)
+		if len(out) > 0 || lost || missed || first {
+			if !first && !l.allowed(t.Space, op) {
+				if ctx.Err() == nil {
+					l.sendErr(id, apierr.NoSpace)
+				}
+				return
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			body := map[string]any{"pulses": nonNil(out), "seq": next, "missed": lost || missed}
+			if l.send(liveOut{ID: id, Status: 200, Body: json.RawMessage(jsonText(body))}) != nil {
+				return
+			}
+			first, missed = false, false
+		}
+		cursor = next
+		select {
+		case <-sig:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func (l *liveConn) endWatch(key string, w *liveWatch) {
 	l.mu.Lock()
 	if l.watches[key] == w {

@@ -28,7 +28,7 @@ Hosted services do realtime, offline support and scale better. This trades those
 - File or binary storage.
 - Partial updates. A value is always read and written whole.
 - Calculations on stored data. Series points come back exactly as stored, with no averages or downsampling.
-- High-frequency realtime of things that aren't state, like cursors at 30 per second. Watching delivers state, over long polling or a live WebSocket. Unstored messages are planned separately.
+- Storing high-frequency events. Watching delivers state; pulses carry what isn't state, like cursors at 30 per second, and are never stored or replayed beyond a few seconds.
 - Anything specific to one kind of host or page.
 
 ## Quickstart
@@ -272,7 +272,7 @@ POST   /v1/{space}/owner-token                              rotate              
 
 "token" means the visitor token in `Authorization: Bearer`, or `?token=`. It's the only credential any request carries.
 
-Every data URL is `/v1/{space}/{area}/{key or pattern}`, optionally followed by one action, `watch` or `series`. There's always a key or pattern, and nothing comes after the action.
+Every data URL is `/v1/{space}/{area}/{key or pattern}`, optionally followed by one action, `watch`, `series` or `pulse`. There's always a key or pattern, and nothing comes after the action.
 
 Examples shorten space names to `poll` for readability. Real names are at least 16 characters.
 
@@ -504,6 +504,8 @@ To show a list first and follow it after, pass the list itself: `watch("game.*",
 | Long polling with a version cursor | SSE | `EventSource` can't send headers, proxies buffer SSE, and SSE needs its own replay logic. |
 | One optional WebSocket per space, carrying HTTP requests in an envelope | SSE beside HTTP, or a separate realtime protocol | Pages with tight live use need pushes without a request each and a warm connection both ways, which matters most on phones. Running each message through the same router keeps rules, limits and errors identical to HTTP. With a socket available, SSE would be a third way that adds nothing. |
 | Socket auth in the first message, or a header | Token in the socket URL, a ticket route, a token in `Sec-WebSocket-Protocol` | URLs end up in proxy logs. Browsers can't set headers on a WebSocket. A ticket costs a request and server state for what a message does. `auth` can also switch visitor mid-connection, so a reader who starts writing keeps the socket. |
+| Pulses: unstored values on the same keys and rights | A separate pub/sub channel namespace, or storing events with a short TTL | The access model already says who may write `users/{id}/cursor`, so a cursor can't be faked with no new rules. Storing would cost a disk write and a version per mouse move, and a watch would merge the moves away. |
+| A 10-second in-memory window per space with a cursor | Pure fan-out to connected sockets | HTTP listeners are between requests most of the time, and sockets reconnect. A short window with a cursor lets both catch up, and a listener that falls behind is told instead of slowing the sender. |
 | Access checked per socket message | A check at connect | A page may connect before it joins, and a grant can start or end while connected. Per message, a socket answers exactly like the HTTP request would. |
 | Watch returns current state since a version | Replaying history, or only changes since connecting | "Since connecting" loses writes between long-poll requests. A version cursor doesn't, and needs no history. |
 | `/watch` path suffix | `?watch` query flag | Keys are one path segment, so a trailing `/watch` is unambiguous. |

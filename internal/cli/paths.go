@@ -63,7 +63,7 @@ func (c *client) parsePath(s string) (kvPath, error) {
 	// Checked before anything is sent: a # or ? in a key would otherwise
 	// silently address a different key.
 	if !names.ValidKey(p.name) && !names.ValidPattern(p.name) {
-		return kvPath{}, &cliError{code: 5, err: "invalid_key", msg: fmt.Sprintf("%q isn't a valid key. Keys are 1 to 128 of A-Z a-z 0-9 . _ : - and can't be \".\", \"..\", \"watch\" or \"series\". Patterns end in *.", p.name)}
+		return kvPath{}, &cliError{code: 5, err: "invalid_key", msg: fmt.Sprintf("%q isn't a valid key. Keys are 1 to 128 of A-Z a-z 0-9 . _ : - and can't be \".\", \"..\", \"watch\", \"series\" or \"pulse\". Patterns end in *.", p.name)}
 	}
 	if p.area == "users/me" {
 		id, err := c.visitorID()

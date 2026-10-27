@@ -55,7 +55,19 @@ async page => {
     await b.shared.set('card.3', 'after')
     await until(() => got.some(c => c.key === 'card.3'), 'watch resumed after pageshow')
     stop()
-    return { pushMs: Math.round(pushMs), writeMs: Math.round(writeMs * 10) / 10, states }
+
+    // Pulses: a live listener and an HTTP listener, 30 quick pulses each way.
+    const onA = [], onB = []
+    const stopA = a.users.onPulse('cursor', p => { if (!p.mine) onA.push(p) })
+    const stopB = b.users.onPulse('cursor', p => { if (!p.mine) onB.push(p) })
+    await sleep(200)
+    const t2 = performance.now()
+    for (let i = 0; i < 30; i++) { a.user().pulse('cursor', { x: i }); b.user().pulse('cursor', { x: i }) }
+    await until(() => onA.length === 30 && onB.length === 30, `pulses ${onA.length}/${onB.length}`)
+    const pulseMs = performance.now() - t2
+    if (await a.shared.get('cursor') !== null) throw Error('pulse was stored')
+    stopA(); stopB()
+    return { pushMs: Math.round(pushMs), writeMs: Math.round(writeMs * 10) / 10, pulse60Ms: Math.round(pulseMs), states }
   }, base)
   if (frames.received < 20) throw Error('few socket frames: ' + JSON.stringify(frames))
   return { ...out, frames, ua: await page.evaluate(() => navigator.userAgent) }

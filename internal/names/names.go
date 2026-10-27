@@ -72,7 +72,7 @@ func ValidKey(k string) bool {
 }
 
 // actionWords can follow a key in a path, so they can't be keys themselves.
-var ActionWords = map[string]bool{"watch": true, "series": true}
+var ActionWords = map[string]bool{"watch": true, "series": true, "pulse": true}
 
 func ValidPattern(p string) bool { return patternRe.MatchString(p) }
 

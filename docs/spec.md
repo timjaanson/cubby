@@ -17,14 +17,15 @@ Contents:
 9. [Endpoints](#9-endpoints)
 10. [Watching](#10-watching)
 11. [Series](#11-series)
-12. [Limits and quotas](#12-limits-and-quotas)
-13. [Server config and lifecycle](#13-server-config-and-lifecycle)
-14. [Errors](#14-errors)
-15. [HTTP details](#15-http-details)
-16. [JS client](#16-js-client)
-17. [CLI](#17-cli)
-18. [Implementation notes](#18-implementation-notes)
-19. [Later](#19-later)
+12. [Pulses](#12-pulses)
+13. [Limits and quotas](#13-limits-and-quotas)
+14. [Server config and lifecycle](#14-server-config-and-lifecycle)
+15. [Errors](#15-errors)
+16. [HTTP details](#16-http-details)
+17. [JS client](#17-js-client)
+18. [CLI](#18-cli)
+19. [Implementation notes](#19-implementation-notes)
+20. [Later](#20-later)
 
 ## 1. Conventions
 
@@ -79,7 +80,7 @@ Getting a name:
 
 - No slashes, so a key is always one path segment. Slashes and `%2F` return 400 `invalid_key`.
 - Case-sensitive.
-- `watch` and `series` aren't keys. They're the action words that can follow a key (see [Paths](#paths)), and a key with the same name would make URLs like `/shared/series/series` hard to read. Any later action word is reserved the same way.
+- `watch`, `series` and `pulse` aren't keys. They're the action words that can follow a key (see [Paths](#paths)), and a key with the same name would make URLs like `/shared/series/series` hard to read. Any later action word is reserved the same way.
 - `.` and `..` aren't keys. Browsers, `fetch` and `curl` collapse them as path segments, so they could never be reached and would send the request elsewhere. `...` and longer are fine.
 - Percent-escapes are decoded once before checking, so `%2E%2E` is `..` and `%2F` is a slash. Both are rejected.
 - Group related keys with dots, like `msg.1791449600123.a8k2`. Listing and watching select by prefix, so the grouping part goes first.
@@ -105,7 +106,7 @@ What a pattern does on each route, with `shared/` holding `env.temp` = `21.4`, `
 | `GET env.*` | none | the matching keys with their values: `{"items": [{"key": "env.rh", "value": 45, "version": …}, {"key": "env.temp", "value": 21.4, "version": …}], "version": …, "next": null}` |
 | `GET env.*/watch` | none | the matching keys that changed, with their current values: `{"changes": [{"key": "env.temp", "value": 21.5, "version": …}], "version": …, "more": false}` |
 | `POST env.*/series` | `{"temp": 21.5, "rh": 46}` | the names of the keys written, not their values: `{"version": …, "t": …, "keys": ["env.temp", "env.rh"]}` |
-| `GET env.*/series` | none | 400 `invalid_key`. Series are read one key at a time for now, see [Later](#19-later) |
+| `GET env.*/series` | none | 400 `invalid_key`. Series are read one key at a time for now, see [Later](#20-later) |
 | `PUT env.*`, `DELETE env.*` | | 405. Writing and deleting take one key |
 
 - "List" in this spec means a `GET` with a `*` anywhere in the path, in the key or in `users/*/`. It isn't a separate action. A `GET` on a single key returns the raw value. A list returns JSON items, because it can match many keys.
@@ -123,7 +124,7 @@ Every data URL has the same shape:
 
 - `{area}` is `shared`, `users/{id}`, `users/*` or `me`.
 - `{target}` is a key or a pattern. It's always there. There's no URL that acts on a whole area without one, so watching an area is `*/watch`.
-- `{action}` is left out, `watch` or `series`. Without it, the request is about the target's current value.
+- `{action}` is left out, `watch`, `series` or `pulse`. Without it, the request is about the target's current value.
 - Nothing comes after the action.
 
 Besides data URLs, each space has a few routes of its own. Their names aren't areas, so they can't collide with data:
@@ -139,12 +140,12 @@ Besides data URLs, each space has a few routes of its own. Their names aren't ar
 
 The method and the action together say what happens:
 
-| | no action | `/watch` | `/series` |
-|---|---|---|---|
-| `GET` | read a key, or list a pattern | wait for changes | read a series' points |
-| `PUT` | replace a value | 405 | 405 |
-| `POST` | 405 | 405 | add a point, or one point to each of several series with a pattern |
-| `DELETE` | delete a key and its points | 405 | 405 |
+| | no action | `/watch` | `/series` | `/pulse` |
+|---|---|---|---|---|
+| `GET` | read a key, or list a pattern | wait for changes | read a series' points | wait for [pulses](#12-pulses) |
+| `PUT` | replace a value | 405 | 405 | 405 |
+| `POST` | 405 | 405 | add a point, or one point to each of several series with a pattern | send a pulse |
+| `DELETE` | delete a key and its points | 405 | 405 | 405 |
 
 A 405 names the methods that work and, where it helps, the route you probably meant. `POST /shared/temp` answers "to add a point use /temp/series, to replace the value use PUT".
 
@@ -226,7 +227,7 @@ For clients that kept the token but lost the ID.
 | all visitors | `/v1/{space}/users/*/{key or pattern}` | the same key across every visitor. Read-only |
 | private | `/v1/{space}/me/{key}` | the requesting visitor's private data. Nobody else can address it |
 
-All areas support read, write, delete, list, watch and series, except that `users/*/` is read-only and doesn't read series yet (see [Later](#19-later)).
+All areas support read, write, delete, list, watch and series, except that `users/*/` is read-only and doesn't read series yet (see [Later](#20-later)).
 
 - **shared/** is for things the group works on together: lists, boards, documents, room settings, game state, a poll's question.
 - **users/{id}/** is for things that belong to one visitor and everyone who can read the space may see: a vote, a display name, a score, messages they wrote. Writing or deleting under another visitor's ID returns 403 `not_yours`, whatever their grants. Only the space's owner may delete there, as moderation. The data goes away with the visitor.
@@ -434,8 +435,8 @@ Two presets can be given instead of a list, as `"allow": "member"`. Responses al
 
 Rules:
 
-- `r` covers `GET` and `HEAD`: reading, listing, watching and reading series. It only matters in a private space, since elsewhere reading is open.
-- `w` covers `PUT`, `DELETE` and `POST`: writing, deleting and adding points. It doesn't include reading, but write responses still return versions and times, so conditional writes work.
+- `r` covers `GET` and `HEAD`: reading, listing, watching, reading series and listening for pulses. It only matters in a private space, since elsewhere reading is open.
+- `w` covers `PUT`, `DELETE` and `POST`: writing, deleting, adding points and sending pulses. It doesn't include reading, but write responses still return versions and times, so conditional writes work.
 - `users` covers both `users/{id}/` and `users/*/`. Writing is always only into your own ID.
 - A key covers only itself. A pattern `p*` covers every key that starts with `p`, and every pattern `q*` where `q` starts with `p`. `env.*` covers `env.temp`, `env.*` and `env.t*`, but not `*` or `e*`.
 - A request with a pattern needs one scope that covers the whole pattern. Scopes don't add up across keys: `env.temp:r` and `env.rh:r` together don't allow `GET env.*`. A batch `POST env.*/series` needs `w` on a scope covering `env.*`.
@@ -888,7 +889,7 @@ GET /v1/{space}/live        Upgrade: websocket
 
 One WebSocket per space carries reads, writes and watches. It's the same store as HTTP: a write over either wakes watchers on both, versions are shared, and a `curl` script and a page on a socket see each other's changes as they happen. Watched changes are pushed with no request per change. HTTP stays the basic way, and keeps every feature.
 
-Only data goes over the socket: get, set, delete, list, watch and series, under `shared/`, `me/` and `users/`. Creating spaces, visitors, `join`, `access`, settings, tokens, grants, `owner-token`, `whoami`, `/limits` and `/time` stay HTTP only.
+Only data goes over the socket: get, set, delete, list, watch, series and pulses, under `shared/`, `me/` and `users/`. Creating spaces, visitors, `join`, `access`, settings, tokens, grants, `owner-token`, `whoami`, `/limits` and `/time` stay HTTP only.
 
 #### Connecting and auth
 
@@ -1052,7 +1053,58 @@ Watching a series key works like watching any key. It returns the newest point, 
 
 There's no `{key}/series/watch`. Nothing comes after an action.
 
-## 12. Limits and quotas
+## 12. Pulses
+
+A pulse is a value that is never stored. It goes to whoever is listening at that moment and is then gone: no version, no disk, nothing to read back later. Pulses are for things that change many times a second, or that matter as events rather than as state: a cursor, a dragged card, a reaction, a doorbell, a game input.
+
+Stored values and pulses use the same keys, areas and rights, and never touch each other. A pulse doesn't change a key, doesn't wake a watch and never appears in a get, list or watch. A stored write never produces a pulse.
+
+```
+POST /v1/{space}/{area}/{key}/pulse                  body: the value     → 202 {"t": 1791449600123}
+GET  /v1/{space}/{area}/{key or pattern}/pulse?after=SEQ                 → {"pulses": [...], "seq": SEQ, "missed": false}
+```
+
+### Sending
+
+- The body follows the rules for a value: UTF-8, JSON or text, not empty. At most 4 KB (`max_pulse_size`). The route takes no parameters.
+- It needs the right to write that key. Under `users/{id}/` only that visitor sends; owners can't send as someone else. A pulse to `me/` reaches only your own listeners, such as your other tabs and devices.
+- The answer is `202 Accepted` with the server time `t`, whether or not anyone listens. There's no version, `ETag` or `RateLimit` header.
+- Pulses have their own rate limits, separate from writes: 60 per second per visitor with a burst of 120, and 300 per second per IP. Sending pulses never uses up the write budget, and writes never use up the pulse budget.
+- A pulse goes to one key. Patterns and `users/*/` are for listening.
+
+### Listening
+
+- `GET .../pulse` is a long poll, like a watch. Without `after` it listens from now. It answers as soon as pulses after its cursor exist, or after `timeout` seconds (1 to 55, default 25) with none.
+- The answer is `{"pulses": [{"key", "user", "by", "value", "t"}], "seq", "missed"}`. `user` is set under `users/*/`. Text values are JSON strings, as in lists. Pulses come in the order the server received them, including the listener's own.
+- Pass `seq` back as `after`. Pulses sent between two requests arrive with the next one.
+- Over HTTP, once a pulse arrives the server waits 50 ms before answering, to take the ones right behind it in the same answer.
+- It needs the right to read the key or pattern. One request costs one read and counts as an open watch while it waits.
+
+### The window
+
+Pulses aren't stored, but each space keeps the most recent ones in memory for a short time, so a listener between two requests, or reconnecting a socket, doesn't lose them.
+
+- A pulse stays in the window for 10 seconds, and a space keeps at most 1024 pulses or 256 KB. An answer carries at most 256, the newest.
+- `missed: true` means some pulses for this listener left the window before it got to them, or didn't fit in the answer. It's best effort: a listener away longer than the window might not be told.
+- The window lives in the server's memory only. A restart empties it.
+- Anything not meant to be lost belongs in a stored key.
+
+### On a live connection
+
+```
+→ {"id":1,"method":"POST","path":"users/u_k7m2x9q4p1r8t3w6/cursor/pulse","body":{"x":120,"y":40}}
+← {"id":1,"status":202,"body":{"t":1791449600123}}
+→ {"id":"c","method":"GET","path":"users/*/cursor/pulse"}
+← {"id":"c","status":200,"body":{"pulses":[],"seq":1793107200000001,"missed":false}}
+← {"id":"c","status":200,"body":{"pulses":[{"key":"cursor","user":"u_...","by":"u_...","value":{"x":120,"y":40},"t":...}],"seq":...,"missed":false}}
+→ {"op":"stop","watch":"c"}
+```
+
+- Sending is the same request in the envelope. On one connection, pulses arrive at the server in the order they were sent.
+- A listener sends its first frame at once, then one whenever matching pulses arrive, without the 50 ms wait. It takes `after` to resume, no `timeout`, and runs until `stop`. It counts towards the 20 watches per connection.
+- Access is checked again before each frame, as for watches.
+
+## 13. Limits and quotas
 
 ### Values and keys
 
@@ -1105,6 +1157,8 @@ Every rate in this table is configurable under `[limits]`, including `write_burs
 | New spaces per visitor | 5 per day | 429 `space_limit` |
 | New spaces per IP | 20 per day | 429 `space_limit` |
 | Distinct missing spaces per IP | 30 per hour, burst 30 | 429 `miss_limit` |
+| Pulses per visitor | 60 per second, burst 120 | 429 `rate_limited` |
+| Pulses per IP | 300 per second, burst 600 | 429 `rate_limited` |
 | Spaces on the server | 1000 | 507 `server_full` |
 
 A `POST` that adds points counts as one write, however many series it adds to.
@@ -1130,7 +1184,7 @@ With generated names (48 bits) and 1000 spaces, one address needs about 3 × 10^
 
 Only the request that would go over fails. Nothing stored is touched, and reads and watches keep working.
 
-## 13. Server config and lifecycle
+## 14. Server config and lifecycle
 
 ### Lifecycle of a space
 
@@ -1218,7 +1272,7 @@ max_series_points = 500000
 
 Through `cubby admin`, see [Admin](#admin) in the CLI section. There is no admin HTTP API.
 
-## 14. Errors
+## 15. Errors
 
 ```json
 {"error": "code", "message": "Human-readable explanation", "...": "extra fields for some codes"}
@@ -1271,7 +1325,7 @@ Clients branch on `error`, never on `message`.
 
 The CLI and the JS client validate space names, keys, patterns and visitor IDs locally and refuse bad ones without a request. Otherwise a `#` or `?` typed into a key would be read as a fragment or query, and the request would silently address a different key.
 
-## 15. HTTP details
+## 16. HTTP details
 
 ### CORS
 
@@ -1312,7 +1366,7 @@ These stop a browser from treating a stored value as a page or script, even when
 - A live connection logs one line per data message, prefixed `WS`, and one line for the connection when it closes, with status 101 and its duration. Pushes and `op` messages aren't logged.
 - `/kv.js` is cached for an hour. Everything under `/v1` is `no-store`.
 
-## 16. JS client
+## 17. JS client
 
 Optional. Served at `/kv.js` as an ES module with no dependencies. Every method maps to the HTTP calls above. It works in browsers, workers, Node and Deno, and touches the DOM only through `location` and `history` in `takeInvite` and `inviteLink`. The ready-made sharing UI is a separate module, see [Share component](#share-component).
 
@@ -1473,7 +1527,7 @@ Defaults are the server's: a token with no options is a full member, 10 uses, 7 
 db.shared: Area
 db.me: Area
 db.user(id?: string): Area      // no id: your own; another visitor's id: writes throw not_yours, delete works for owners
-db.users: { list(target, opts?), watch(target, onChange, opts?) }    // across all visitors
+db.users: { list(target, opts?), watch(target, onChange, opts?), onPulse(target, onPulse, opts?) }    // across all visitors
 db.id(): Promise<string>        // your visitor ID, gets a token if needed
 ```
 
@@ -1489,11 +1543,14 @@ delete(key, opts?: { ifVersion?: number, ifBefore?: number }): Promise<boolean>
 update(key, fn: (current: any | null) => any, opts?: { retries?: number, ttl?: number, ifBefore?: number }): Promise<any>
 list(target, opts?: { limit?: number, order?: "asc" | "desc" }): Promise<List>
 watch(target, onChange: (change: Change) => void, opts?: WatchOptions): () => void
+pulse(key, value): Promise<void>                                    // not stored; see Pulses
+onPulse(target, onPulse: (pulse: Pulse) => void, opts?: { onMissed?: () => void, onError?: (err: KvError) => void }): () => void
 
 type Entry  = { key, value, version, by, mine: boolean, user?, t?, expires? }
 type Change = Entry & { deleted: boolean, expired?: boolean }
 type List   = { items: Entry[], version: number }
 type Point  = { t, value }
+type Pulse  = { key, value, by, mine: boolean, user?, t }
 type WatchOptions = {
   from?: 0 | "now" | number | List                                  // default 0
   onSync?: (sync: { version: number, initial: boolean, resync: boolean }) => void
@@ -1590,7 +1647,7 @@ The panel has four parts:
 - Headless use: `import { qrSvg } from ".../share.js"` returns the SVG markup for any text, for pages with their own UI.
 - Budget: under 25 KB unminified, no dependencies. Served and cached like kv.js.
 
-## 17. CLI
+## 18. CLI
 
 The same binary that runs the server is also a command-line client. It's the main way to use the store from shell scripts, cron jobs and terminals. Raw HTTP stays the contract underneath, for anything that can't run the binary: browsers, microcontrollers, other languages, locked-down machines.
 
@@ -1650,6 +1707,8 @@ The server URL defaults to `http://localhost:28229`. A bare port (`9000` or `:90
 | `limits [space]` | effective server limits, or space limits and caller usage | formatted JSON |
 | `time` | sample server time five times; choose shortest RTT | `offset_ms` and `rtt_ms`, tab-separated |
 | `series <path>` | read a series' points | one line per point, see Output |
+| `pulse <path> [value]` | send a pulse | nothing |
+| `pulses <path or pattern> [--exec CMD] [--json]` | print pulses as they arrive, from now on | one line per pulse |
 | `new [label or name] [--public P]` | create a space with `POST /v1/spaces`, as its owner. Private unless `--public read\|respond\|all`. A full space name is created as is, anything else is a label | the name, then the owner token on a second line. Keep it, it's shown once |
 | `name [label]` | generate a valid space name locally, no request | the name |
 | `join <space> <token or link>` | redeem an access or owner token. A link is searched for `t=` in its fragment | your scopes from this grant, one per line |
@@ -1799,7 +1858,7 @@ cubby admin stats                  totals, visitors, largest spaces
 - `owner-token` invalidates the old owner token like a rotation, and removes the owner grants that came from it. Grants from creating the space and direct grants stay.
 - `admin spaces` shows each space's settings in two columns: `read`, and `write` as `anyone`, `granted`, or a list like `shared=granted`.
 
-## 18. Implementation notes
+## 19. Implementation notes
 
 Guidance for the build, not part of the contract.
 
@@ -1965,7 +2024,7 @@ Everything held in memory has a bound, and nothing in it has to survive a restar
 - A bucket that's full and untouched behaves exactly like a new one, so dropping it changes nothing. Dropping one early under the cap is slightly lenient towards that IP or visitor, which is acceptable.
 - Request bodies are read only up to the value limit plus one byte, so a single request can't use more than about 64 KB of body memory.
 
-## 19. Later
+## 20. Later
 
 Ideas from the design discussion that were left out to keep the first version small. Each is an addition, and none changes the API above. Items that are agreed and planned, with their design, are in [plans.md](plans.md).
 

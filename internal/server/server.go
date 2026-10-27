@@ -28,6 +28,7 @@ type Server struct {
 	notify  notifier
 	log     *log.Logger
 	live    liveSet
+	pulses  *pulseHubs
 }
 
 func New(cfg *config.Config, store *store.Store, logger *log.Logger) *Server {
@@ -35,6 +36,7 @@ func New(cfg *config.Config, store *store.Store, logger *log.Logger) *Server {
 		cfg: cfg, store: store, lim: newLimits(cfg), log: logger,
 		watches: watchCounter{perIP: map[string]int{}, perIPLimit: cfg.Limits.WatchesPerIP, totalLimit: cfg.Limits.WatchesTotal},
 		notify:  notifier{spaces: map[string]*spaceSignal{}},
+		pulses:  newPulseHubs(),
 	}
 	store.OnChange = s.notify.fire
 	return s
@@ -294,9 +296,9 @@ func (s *Server) route(c *reqCtx) error {
 	case len(rest) == 2 && names.ActionWords[rest[1]]:
 		action = rest[1]
 	case len(rest) == 2:
-		return &apierr.Error{Status: 400, Code: "invalid_key", Message: "After a key or pattern, a path can only end in /watch or /series. Keys can't contain slashes."}
+		return &apierr.Error{Status: 400, Code: "invalid_key", Message: "After a key or pattern, a path can only end in /watch, /series or /pulse. Keys can't contain slashes."}
 	case len(rest) != 1:
-		return &apierr.Error{Status: 400, Code: "invalid_key", Message: "Keys can't contain slashes, and nothing comes after /watch or /series."}
+		return &apierr.Error{Status: 400, Code: "invalid_key", Message: "Keys can't contain slashes, and nothing comes after /watch, /series or /pulse."}
 	}
 	name := rest[0]
 	switch {
@@ -306,7 +308,7 @@ func (s *Server) route(c *reqCtx) error {
 		t.Key = name
 	default:
 		return &apierr.Error{Status: 400, Code: "invalid_key",
-			Message: "A key is 1 to 128 of A-Z a-z 0-9 . _ : - and can't be \".\", \"..\", \"watch\" or \"series\". A pattern is a prefix followed by *."}
+			Message: "A key is 1 to 128 of A-Z a-z 0-9 . _ : - and can't be \".\", \"..\", \"watch\", \"series\" or \"pulse\". A pattern is a prefix followed by *."}
 	}
 	op.Key, op.Pattern = t.Key, t.Pattern
 
@@ -335,6 +337,24 @@ func (s *Server) route(c *reqCtx) error {
 			h = s.seriesAdd
 		default:
 			return methodErrMsg("GET, HEAD, POST", "A series takes POST to add points and GET to read them. To replace or delete the key, use the path without /series.")
+		}
+	case action == "pulse":
+		switch {
+		case isRead:
+			if err := checkParams(c.r, "after", "timeout"); err != nil {
+				return err
+			}
+			h = s.pulseRead
+		case m == http.MethodPost:
+			if t.Pattern || t.AllUsers {
+				return &apierr.Error{Status: 400, Code: "invalid_key", Message: "A pulse goes to one key. Listen with a pattern, send to a key."}
+			}
+			if err := checkParams(c.r); err != nil {
+				return err
+			}
+			h = s.pulseSend
+		default:
+			return methodErrMsg("GET, POST", "POST sends a pulse, GET listens. Pulses aren't stored, so there's nothing to replace or delete.")
 		}
 	case action == "watch":
 		if m != http.MethodGet {

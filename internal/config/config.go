@@ -96,6 +96,9 @@ type Config struct {
 		WatchesTotal           int `toml:"watches_total"`
 		TTLMinSeconds          int `toml:"ttl_min_seconds"`
 		TTLMaxSeconds          int `toml:"ttl_max_seconds"`
+		PulsesPerSecond        int `toml:"pulses_per_second"`
+		PulseBurst             int `toml:"pulse_burst"`
+		PulsesPerIPPerSecond   int `toml:"pulses_per_ip_per_second"`
 
 		MaxValueSize    Size `toml:"max_value_size"`
 		MaxPointSize    Size `toml:"max_point_size"`
@@ -105,6 +108,7 @@ type Config struct {
 		MaxSpaceKeys    int  `toml:"max_space_keys"`
 		MaxTotalBytes   Size `toml:"max_total_bytes"`
 		MaxSpaces       int  `toml:"max_spaces"`
+		MaxPulseSize    Size `toml:"max_pulse_size"`
 	} `toml:"limits"`
 	Spaces map[string]PinnedSpace `toml:"spaces"`
 
@@ -140,6 +144,10 @@ func Default() *Config {
 	c.Limits.WatchesTotal = 1000
 	c.Limits.TTLMinSeconds = 5
 	c.Limits.TTLMaxSeconds = 2592000
+	c.Limits.PulsesPerSecond = 60
+	c.Limits.PulseBurst = 120
+	c.Limits.PulsesPerIPPerSecond = 300
+	c.Limits.MaxPulseSize = 4 << 10
 	return c
 }
 
@@ -205,6 +213,9 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Limits.MissesPerIPPerHour < 1 {
 		return nil, fmt.Errorf("misses_per_ip_per_hour must be positive")
+	}
+	if c.Limits.PulsesPerSecond < 1 || c.Limits.PulseBurst < 1 || c.Limits.PulsesPerIPPerSecond < 1 || c.Limits.MaxPulseSize < 1 {
+		return nil, fmt.Errorf("pulses_per_second, pulse_burst, pulses_per_ip_per_second and max_pulse_size must be positive")
 	}
 	if c.Limits.WatchesPerIP < 1 {
 		return nil, fmt.Errorf("watches_per_ip must be positive")

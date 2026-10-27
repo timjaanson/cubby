@@ -31,6 +31,8 @@ var commandFlags = map[string]struct {
 	"watch":       {[]string{"from", "state", "exec"}, []string{"json", "once", "raw"}, "watch <path or pattern> [--from N|now] [--state FILE] [--exec CMD] [--once] [--raw] [--json]\n  Print current state, then changes. --exec runs CMD per change with the value on stdin\n  and KV_KEY, KV_VERSION, KV_DELETED, KV_USER set. --state FILE resumes after restarts."},
 	"add":         {[]string{"time", "if-before"}, nil, "add <path> [value|-] [--time MS] [--if-before MS]\n  Add a point to a series, from the argument or stdin. Prints the point's time.\nadd <prefix*> name=value ... [--time MS] [--if-before MS]\n  Add one point to each series prefix+name, all at one time. A value is JSON if it parses,\n  otherwise a string. Without name=value arguments, reads one JSON object from stdin."},
 	"series":      {[]string{"since", "limit"}, []string{"json"}, "series <path> [--since MS|24h|90m|7d] [--limit N] [--json]\n  Print a series' points oldest first, as t<TAB>value. Without --since, the newest 1000."},
+	"pulse":       {nil, nil, "pulse <path> [value|-]\n  Send a pulse: a value that isn't stored, delivered to whoever listens right now and\n  then gone. Nothing to read back later. For signals between running things."},
+	"pulses":      {[]string{"exec"}, []string{"json"}, "pulses <path or pattern> [--exec CMD] [--json]\n  Print pulses as they arrive, from now on: key<TAB>value, or user<TAB>key<TAB>value under\n  users/*/. --exec runs CMD per pulse with the value on stdin and KV_KEY, KV_BY,\n  KV_TIME, KV_USER set."},
 	"update":      {[]string{"exec"}, nil, "update <path> [--exec CMD]\n  Read, pipe through CMD (or open $EDITOR), write back with ifVersion, retry on conflict.\n  Example: cubby update space/shared/count --exec 'jq \"(. // 0) + 1\"'"},
 	"new":         {[]string{"label", "public", "read", "write"}, nil, "new [label | name] [--public none|read|respond|all] [--read R --write W]\n  Create a space you own. Print its name, then its owner token: keep that one, it's\n  shown once and gets you back in from another machine. Spaces are private unless\n  --public says otherwise:\n    read      anyone reads, invited people write (status pages, sensor readings)\n    respond   anyone reads and adds their own users/ entry (polls, RSVPs)\n    all       anyone with the name reads and writes\n  With nothing, the name is four random words; a label gets the words added\n  (new poll -> poll-cedar-pilot-mango-frost); a full name of 16+ characters is used\n  as is and fails if taken."},
 	"name":        {nil, nil, "name [label]\n  Print a new space name: four random words, after the label if given. No server needed."},
@@ -143,6 +145,10 @@ func (c *client) run(cmd string, f *flags) error {
 		return c.watch(f)
 	case "update":
 		return c.update(f)
+	case "pulse":
+		return c.pulse(f)
+	case "pulses":
+		return c.pulses(f)
 	case "add":
 		return c.add(f)
 	case "series":

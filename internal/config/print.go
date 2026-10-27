@@ -58,6 +58,8 @@ func (c *Config) TOML(def *Config, dataDirNote string) string {
 		"Everything on this server together.")
 	w.set("max_spaces", strconv.Itoa(c.Limits.MaxSpaces), strconv.Itoa(def.Limits.MaxSpaces),
 		"Spaces on this server.")
+	w.set("max_pulse_size", size(c.Limits.MaxPulseSize), size(def.Limits.MaxPulseSize),
+		"One pulse. Pulses aren't stored, so they don't count towards storage.")
 
 	w.set("writes_per_minute", strconv.Itoa(c.Limits.WritesPerMinute), strconv.Itoa(def.Limits.WritesPerMinute), "Writes per visitor per minute, across spaces.")
 	w.set("write_burst", strconv.Itoa(c.Limits.WriteBurst), strconv.Itoa(def.Limits.WriteBurst), "Visitor write bucket capacity.")
@@ -71,6 +73,9 @@ func (c *Config) TOML(def *Config, dataDirNote string) string {
 	w.set("watches_per_ip", strconv.Itoa(c.Limits.WatchesPerIP), strconv.Itoa(def.Limits.WatchesPerIP), "Maximum concurrent watches per IP, even when rate_limits is false.")
 	w.set("watches_total", strconv.Itoa(c.Limits.WatchesTotal), strconv.Itoa(def.Limits.WatchesTotal), "Maximum concurrent watches on this server.")
 	w.set("ttl_min_seconds", strconv.Itoa(c.Limits.TTLMinSeconds), strconv.Itoa(def.Limits.TTLMinSeconds), "Minimum key TTL in whole seconds.")
+	w.set("pulses_per_second", strconv.Itoa(c.Limits.PulsesPerSecond), strconv.Itoa(def.Limits.PulsesPerSecond), "Pulses per visitor per second, across spaces.")
+	w.set("pulse_burst", strconv.Itoa(c.Limits.PulseBurst), strconv.Itoa(def.Limits.PulseBurst), "Visitor pulse bucket capacity.")
+	w.set("pulses_per_ip_per_second", strconv.Itoa(c.Limits.PulsesPerIPPerSecond), strconv.Itoa(def.Limits.PulsesPerIPPerSecond), "Pulses per IP per second. Bucket capacity is twice this.")
 	w.set("ttl_max_seconds", strconv.Itoa(c.Limits.TTLMaxSeconds), strconv.Itoa(def.Limits.TTLMaxSeconds), "Maximum key TTL in whole seconds, at most 10 years.")
 
 	w.blank()

@@ -8,6 +8,7 @@ It's for the things that are too small for a real back-end: a poll for the group
 - **No sign-up.** Each browser gets an anonymous identity by itself. One request creates a space.
 - **Private unless you say so.** Spaces are invite-only. One word (`public: "read"`, `"respond"`, `"all"`) opens them up.
 - **Safe with many writers.** Every value has a version, and `ifVersion` refuses a write if someone got there first. Each visitor has an area only they can write, so votes and names can't be faked.
+- **Pulses for the fast stuff.** Cursors, drags, reactions and game inputs go out as pulses: values that are never stored, reach whoever is listening right now, and can be sent dozens of times a second.
 - **Live primitives.** Expiring keys for presence and locks, a shared server clock, write deadlines, and time series for sensor readings.
 - **Plain HTTP underneath.** A browser client at `/kv.js`, a CLI in the same binary, and `curl` for everything else.
 
@@ -37,7 +38,7 @@ db.users.watch("vote", c => c.deleted ? votes.delete(c.user) : votes.set(c.user,
 </script>
 ```
 
-Open it, send the link around, and the counts move on every screen as people tap. A page that only needs to save something is shorter still: `await db.shared.set("list", items)` and `await db.shared.get("list")`.
+Open it, send the link around, and the counts move on every screen as people tap. For something that moves rather than something to keep, like everyone's cursor, send pulses: `db.user().pulse("cursor", { x, y })` on every mouse move, and `db.users.onPulse("cursor", p => draw(p.user, p.value))` on every screen. A page that only needs to save something is shorter still: `await db.shared.set("list", items)` and `await db.shared.get("list")`.
 
 ## Install and run
 

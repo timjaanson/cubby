@@ -29,6 +29,11 @@
 // Same API and results; data and watches go over one WebSocket, falling back
 // to HTTP by itself. Write limits stay the same.
 //
+// Cursors, drags, reactions? Pulses are values that are never stored:
+//   db.user().pulse("cursor", { x, y })              // to whoever listens now
+//   db.users.onPulse("cursor", p => draw(p.user, p.value))
+// Anything a late joiner needs still goes in a stored key.
+//
 // Never put an access token (at_...) or owner token (ot_...) in page source.
 // Anyone who can load the page could use it. Invite links are for sending to people.
 //
@@ -60,8 +65,8 @@ const KEY_RE = /^[A-Za-z0-9._:-]{1,128}$/
 const PATTERN_RE = /^[A-Za-z0-9._:-]{0,127}\*$/
 const VISITOR_RE = /^u_[a-z2-7]{16}$/
 
-// "watch" and "series" can follow a key in a path, so they aren't keys.
-const validKey = k => typeof k === "string" && KEY_RE.test(k) && k !== "watch" && k !== "series" && k !== "." && k !== ".."
+// "watch", "series" and "pulse" can follow a key in a path, so they aren't keys.
+const validKey = k => typeof k === "string" && KEY_RE.test(k) && k !== "watch" && k !== "series" && k !== "pulse" && k !== "." && k !== ".."
 const validTarget = t => validKey(t) || (typeof t === "string" && PATTERN_RE.test(t))
 
 // Checked before any request. Keys go into the URL, where "#", "?", "/" or
@@ -69,7 +74,7 @@ const validTarget = t => validKey(t) || (typeof t === "string" && PATTERN_RE.tes
 function checkKey(k, patternOk = false) {
   if (patternOk ? validTarget(k) : validKey(k)) return
   throw new KvError(0, "invalid_key",
-    `${JSON.stringify(k)} isn't a valid ${patternOk ? "key or pattern" : "key"}. Keys are 1 to 128 of A-Z a-z 0-9 . _ : - and can't be ".", "..", "watch" or "series".` +
+    `${JSON.stringify(k)} isn't a valid ${patternOk ? "key or pattern" : "key"}. Keys are 1 to 128 of A-Z a-z 0-9 . _ : - and can't be ".", "..", "watch", "series" or "pulse".` +
     (patternOk ? " A pattern is a prefix followed by *." : ""))
 }
 // The 4096 words generated names are made of. The server fills this in when
@@ -352,6 +357,19 @@ export function kv(space, opts = {}) {
       },
       list: (target, o) => list(pathOf, needsAuth, target, o),
       watch: (target, onChange, o) => watch(pathOf, needsAuth, target, onChange, o),
+      // Pulses are never stored. pulse() hands a value to whoever is
+      // listening right now; nothing keeps it, so get() and watch() never
+      // see it. For cursors, drags, reactions: things sent often, or that
+      // matter as events rather than as state.
+      async pulse(key, value) {
+        checkKey(key)
+        checkWrite()
+        const body = JSON.stringify(value)
+        if (body === undefined) throw new KvError(0, "invalid_value", "That value can't be sent as JSON.")
+        const res = await request("POST", (await pathOf(key)) + "/pulse", { body, auth: true })
+        if (!res.ok) throw await fail(res)
+      },
+      onPulse: (target, onPulse, o) => listenPulses(pathOf, needsAuth, target, onPulse, o),
     }
     return a
   }
@@ -507,7 +525,7 @@ export function kv(space, opts = {}) {
       }
       const path = await pathOf(target)
       if (stopped || !live.isOpen()) return true
-      sub = live.watch(cur?.token, path, from === "now" ? undefined : from, handle)
+      sub = live.subscribe(cur?.token, path + "/watch", from === "now" ? undefined : { version: String(from) }, handle)
       const end = await sub.done
       sub = null
       if (!end.frame) return true // the connection closed, or stop()
@@ -575,6 +593,108 @@ export function kv(space, opts = {}) {
         handle(body)
       }
       cleanup()
+    })()
+
+    return () => {
+      if (stopped) return
+      stopped = true
+      controller?.abort("stop")
+      sub?.stop()
+      interrupt?.()
+    }
+  }
+
+  // Calls onPulse for each pulse sent to target from now on, until the
+  // returned function is called. Over the live connection when it's open,
+  // HTTP long polls otherwise; switching loses nothing still in the
+  // server's short window. onMissed runs when some were dropped: the
+  // listener fell more than a few seconds or 256 pulses behind.
+  function listenPulses(pathOf, auth, target, onPulse, o = {}) {
+    checkKey(target, true)
+    const onError = o.onError || (err => console.warn("cubby pulses:", err))
+    const onMissed = o.onMissed || (() => {})
+    const hasDoc = typeof document !== "undefined"
+    const hasWin = typeof window !== "undefined" && typeof window.addEventListener === "function"
+    let stopped = false, controller = null, sub = null, interrupt = null, after
+    let hiddenSince = hasDoc && document.hidden ? Date.now() : null
+    let backoff = 1000
+
+    const pause = ms => new Promise(r => {
+      const timer = ms === undefined ? null : setTimeout(done, ms)
+      function done() { clearTimeout(timer); interrupt = null; r() }
+      interrupt = done
+    })
+    const wake = () => { if (!stopped) { controller?.abort("wake"); interrupt?.() } }
+    const onVisibility = () => {
+      if (document.hidden) hiddenSince = Date.now()
+      else { hiddenSince = null; wake() }
+    }
+    if (hasDoc) document.addEventListener("visibilitychange", onVisibility)
+    if (hasWin) for (const e of ["online", "offline", "pageshow"]) window.addEventListener(e, wake)
+    const offOpen = live ? live.onOpen(() => controller?.abort("wake")) : null
+    const safely = (fn, arg) => { try { fn(arg) } catch (err) { onError(err) } }
+    const handle = body => {
+      backoff = 1000
+      if (body.missed) safely(onMissed)
+      for (const p of body.pulses) {
+        if (stopped) return
+        safely(onPulse, withMine(p))
+      }
+      after = body.seq
+    }
+    const retry = async err => {
+      onError(err)
+      await pause(err.status === 429 ? (err.retryAfter || 1) * 1000 : backoff)
+      backoff = Math.min(backoff * 2, 30000)
+    }
+    const query = () => after === undefined ? undefined : { after: String(after) }
+
+    ;(async () => {
+      while (!stopped) {
+        if ((typeof navigator !== "undefined" && navigator.onLine === false) ||
+            (hiddenSince && Date.now() - hiddenSince > HIDDEN_PAUSE) || live?.paused) {
+          await pause()
+          continue
+        }
+        const path = (await pathOf(target)) + "/pulse"
+        if (live && await live.ready(LIVE_WATCH_WAIT)) {
+          if (stopped) break
+          let cur
+          try { cur = auth ? await ident.get() : ident.current() } catch (err) { await retry(err instanceof KvError ? err : new KvError(0, "network_error", String(err?.message || err))); continue }
+          if (!live.isOpen()) continue
+          sub = live.subscribe(cur?.token, path, query(), handle)
+          const end = await sub.done
+          sub = null
+          if (!end.frame) continue
+          const err = await errorFrom(frameResponse(end.frame))
+          if (err.code === "identity_changed") continue
+          if (!err.retryable) { onError(err); break }
+          await retry(err)
+          continue
+        }
+        if (stopped) break
+        controller = new AbortController()
+        const deadline = setTimeout(() => controller.abort("deadline"), WATCH_DEADLINE)
+        try {
+          const res = await request("GET", path, { auth, signal: controller.signal, query: query() })
+          clearTimeout(deadline)
+          if (!res.ok) {
+            const err = await fail(res)
+            if (!err.retryable) { onError(err); break }
+            await retry(err)
+            continue
+          }
+          handle(await res.json())
+        } catch (err) {
+          clearTimeout(deadline)
+          if (stopped) break
+          if (controller.signal.reason === "wake") continue
+          await retry(err instanceof KvError ? err : new KvError(0, "network_error", String(err?.message || err)))
+        }
+      }
+      if (hasDoc) document.removeEventListener("visibilitychange", onVisibility)
+      if (hasWin) for (const e of ["online", "offline", "pageshow"]) window.removeEventListener(e, wake)
+      offOpen?.()
     })()
 
     return () => {
@@ -677,6 +797,7 @@ export function kv(space, opts = {}) {
     users: {
       list: (target, o) => list(async t => `users/*/${t}`, false, target, o),
       watch: (target, onChange, o) => watch(async t => `users/*/${t}`, false, target, onChange, o),
+      onPulse: (target, onPulse, o) => listenPulses(async t => `users/*/${t}`, false, target, onPulse, o),
     },
     id: async () => (await ident.get()).id,
     // status: "http" without live (or after falling back), else "connecting",
@@ -1026,9 +1147,10 @@ function makeLive(url, WS) {
         return m + "}"
       }, LIVE_REQUEST_WAIT).then(frameResponse)
     },
-    // Pushes each watch body to onBody. done resolves with { frame } for an
-    // error reply, { closed } when the socket ends, { stopped } after stop().
-    watch(token, path, version, onBody) {
+    // A running request on the socket: a watch or a pulse listener. Pushes
+    // each body to onBody. done resolves with { frame } for an error reply,
+    // { closed } when the socket ends, { stopped } after stop().
+    subscribe(token, path, query, onBody) {
       const s = sock
       let finish
       const done = new Promise(r => { finish = r })
@@ -1041,8 +1163,8 @@ function makeLive(url, WS) {
         },
         end: finish,
       })
-      const m = { id, method: "GET", path: path + "/watch" }
-      if (version !== undefined) m.query = { version: String(version) }
+      const m = { id, method: "GET", path }
+      if (query) m.query = query
       s.send(JSON.stringify(m))
       return {
         done,

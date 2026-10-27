@@ -5,6 +5,7 @@ How to use a cubby server from a page, a shell or anything that speaks HTTP. Ins
 - [How data is organised](#how-data-is-organised)
 - [JS client](#js-client)
 - [Live updates](#live-updates)
+- [Pulses](#pulses)
 - [Expiry, limits and timing](#expiry-limits-and-timing)
 - [CLI](#cli)
 - [Plain HTTP](#plain-http)
@@ -31,7 +32,7 @@ space                 notes-cedar-pilot-mango-frost    owners, settings, invites
 
 - Owners invite people with access tokens (`at_...`), usually sent as a link with `#t=at_...`. Redeeming one with `join` gives that visitor a grant. By default an invite makes a full member, works for 10 people and expires after 7 days. The owner token (`ot_...`) is the owner's recovery key.
 - A private space looks exactly like a missing one to anyone without a grant: 404 `no_space`.
-- A key is up to 128 of `A-Z a-z 0-9 . _ : -`, and can't be `.`, `..`, `watch` or `series`. Group with dots (`msg.1791449600123`), because listing and watching select by prefix (`msg.*`).
+- A key is up to 128 of `A-Z a-z 0-9 . _ : -`, and can't be `.`, `..`, `watch`, `series` or `pulse`. Group with dots (`msg.1791449600123`), because listing and watching select by prefix (`msg.*`).
 - A value is UTF-8 text up to 64 KB. Valid JSON comes back as `application/json`, anything else as `text/plain`, always byte for byte as written.
 - A series key keeps every value added to it, each with a time, for sensor readings and the like. Its value is the newest point. See [Series](#series).
 - Every write gets a version number. Pass it back with `ifVersion` to write only if nobody changed the key meanwhile.
@@ -84,9 +85,36 @@ await db.shared.set("card.7", { x: 120, y: 40 })
 - Watches resume from their last version after a dropped connection, a sleeping phone or a server restart, so no change is lost. A watch delivers state, not every event: several quick writes to one key can arrive as the latest value.
 - Where WebSockets don't get through (a strict proxy, an older server), the client stays on HTTP by itself. `db.live.status` says which is in use.
 - Use it for pages where several people change things often: boards, quizzes, games, presence. A page that saves now and then doesn't need it.
-- Write limits stay the same, 120 writes per minute per visitor by default, so don't stream cursor positions through stored keys.
+- Write limits stay the same, 120 writes per minute per visitor by default. For cursor positions and other fast traffic, use [pulses](#pulses).
 
 Without the JS client, any WebSocket client can connect to `/v1/{space}/live` and send requests as JSON. [The live contract](spec.md#live-connection).
+
+## Pulses
+
+A pulse is a value that is never stored. It goes to whoever is listening at that moment and is gone. Use pulses for things that move or happen, and stored keys for things to keep:
+
+| Stored key | Pulse |
+|---|---|
+| a card's position after the drop | the card while it's being dragged |
+| who's in the room (`ttl` presence) | everyone's cursor |
+| the vote | the confetti when someone votes |
+| the game state | the inputs, many per second |
+
+```js
+const db = kv(space, { live: true })
+
+addEventListener("pointermove", e => db.user().pulse("cursor", { x: e.clientX, y: e.clientY }))
+const stop = db.users.onPulse("cursor", p => { if (!p.mine) drawCursor(p.user, p.value) })
+
+db.shared.pulse("confetti", { by: "Anna" })  // to everyone listening on shared/confetti
+db.me.pulse("sync", { tab: "settings" })     // to your own other tabs and devices
+```
+
+- **Nothing is kept.** `get`, `list` and `watch` never see a pulse, and it doesn't touch a stored key of the same name. Someone who opens the page a second later doesn't get it.
+- **Fast and cheap.** Pulses have their own budget, 60 a second per visitor with bursts of 120, apart from the 120 writes a minute. On a live connection they arrive within one round trip, in the order they were sent. A pulse is at most 4 KB.
+- **Same rights as the key.** Sending needs write access to the key, listening needs read access. Under `users/{id}/` only that visitor sends, so a cursor can't be faked.
+- **Best effort, honestly.** The server keeps the last 10 seconds in memory, so a listener between two HTTP requests or reconnecting a socket catches up. If a listener falls further behind, it gets `onMissed` instead of the old pulses. A restart drops them all.
+- **Without the JS client:** `POST /v1/{space}/shared/confetti/pulse` sends, `GET .../confetti/pulse?after=SEQ` long-polls (pass `seq` back as `after`), and on a WebSocket the same requests stream. From a shell: `cubby pulse space/shared/doorbell ding` and `cubby pulses 'space/shared/*'`. Details in the [spec](spec.md#12-pulses).
 
 ## Expiry, limits and timing
 
@@ -202,7 +230,7 @@ Everything the CLI does is a single request.
 
 Unknown or repeated query parameters, and unknown JSON fields, are rejected with 400, so a typo like `ifversion=0` fails instead of overwriting. Errors are JSON with a stable `error` code and a `message`. CORS is open, so pages on any origin can call it.
 
-Every data URL is `/v1/{space}/{area}/{key or pattern}`, optionally followed by `/watch` or `/series`, and nothing after that.
+Every data URL is `/v1/{space}/{area}/{key or pattern}`, optionally followed by `/watch`, `/series` or `/pulse`, and nothing after that.
 
 The full contract is in [docs/spec.md](spec.md), with worked examples in [docs/scenarios.md](scenarios.md).
 

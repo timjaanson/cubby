@@ -25,7 +25,7 @@ func (s *Server) spaceLimits(space string) map[string]any {
 	value, bytes, keys := s.cfg.LimitsFor(space)
 	point, points := s.cfg.SeriesLimitsFor(space)
 	c := s.cfg.Limits
-	return map[string]any{"valueBytes": value, "pointBytes": point, "seriesPoints": points, "spaceBytes": bytes, "spaceKeys": keys, "visitorBytes": c.MaxVisitorBytes, "writesPerMinute": c.WritesPerMinute, "writeBurst": c.WriteBurst, "rateLimits": s.cfg.RateLimitsOn(), "ttlMinSeconds": c.TTLMinSeconds, "ttlMaxSeconds": c.TTLMaxSeconds}
+	return map[string]any{"valueBytes": value, "pointBytes": point, "seriesPoints": points, "spaceBytes": bytes, "spaceKeys": keys, "visitorBytes": c.MaxVisitorBytes, "writesPerMinute": c.WritesPerMinute, "writeBurst": c.WriteBurst, "rateLimits": s.cfg.RateLimitsOn(), "ttlMinSeconds": c.TTLMinSeconds, "ttlMaxSeconds": c.TTLMaxSeconds, "pulseBytes": int64(c.MaxPulseSize), "pulsesPerSecond": c.PulsesPerSecond, "pulseBurst": c.PulseBurst}
 }
 
 // Each header member describes a token bucket. r is an advisory snapshot.

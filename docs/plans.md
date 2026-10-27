@@ -32,17 +32,6 @@ So that nothing changes stored data in a way that's hard to see coming:
 
 Built 2026-10-27. One WebSocket per space at `/v1/{space}/live`, carrying data requests as HTTP routes in an envelope and pushing watches. Auth comes in the first message or an `Authorization` header, never in the URL, and may change mid-connection. Access is checked per message. kv.js `live: true` uses it while open and HTTP otherwise, with identical results, and falls back to HTTP for good if it can't connect twice before ever opening. Decided against: clock sync over the socket (HTTP clock stays), tokens in the socket URL. The contract is [spec.md](spec.md#live-connection).
 
-## Next: messages that aren't stored
+## Done: pulses
 
-Agreed as the next build after the live connection. Check with TJ before starting. The notes below are the starting point.
-
-Working names were `send` and `listen`; better names wanted. Messages that live only in the server's memory and go to whoever is connected at that moment. Nothing is stored, nothing is versioned, nothing is replayed, and nobody would miss one that got lost. Same keys, patterns and rights as stored data (`r` to receive, `w` to send), so sending to `users/{me}/cursor` and receiving `users/*/cursor` gives one cursor per person that nobody else can fake.
-
-Stored data with a socket watch already covers presence (with `ttl`), typing indicators, board edits, quiz rounds and device states. Unstored messages are only for the three cases it can't handle:
-
-1. **High rates.** A cursor or a dragged card moves 10 to 30 times a second. Every stored write hits disk, makes a version and counts against 120 writes a minute.
-2. **Every message matters.** Watch merges quick changes into the latest state, so the points of a freehand stroke or a burst of game inputs get lost.
-3. **Repeats.** Writing identical bytes wakes nobody, so a doorbell or reaction pressed twice registers once.
-
-Build it when an app needs one of these. Notes for then: a message rate per connection and a small size limit (for example 30 per second, 4 KB), dropping a slow receiver's oldest messages and telling it how many, whether a sender gets its own messages back, and whether HTTP clients can send them with a plain `POST`.
-
+Built 2026-10-27. The messages that aren't stored are called pulses: `POST {key}/pulse` sends, `GET {key or pattern}/pulse` listens (long poll over HTTP, a stream on a live connection). Same keys, areas and rights as stored data. Own rate limits (60/s per visitor, burst 120; 300/s per IP), 4 KB each. A per-space in-memory window (10 s, 1024 pulses, 256 KB) with a server-wide sequence lets HTTP listeners and reconnecting sockets catch up, and reports `missed` instead of blocking. kv.js `pulse()` and `onPulse()`, CLI `pulse` and `pulses`. Senders get their own pulses back, marked `mine`. Contract: [spec.md](spec.md#12-pulses).
