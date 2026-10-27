@@ -1,2 +1,0 @@
-[     121ms] [ERROR] WebSocket connection to 'ws://localhost:28991/v1/trance-renown-offend-course/live' failed: Error in connection establishment: net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS @ http://localhost:28991/kv.js:860
-[    1126ms] [ERROR] WebSocket connection to 'ws://localhost:28991/v1/trance-renown-offend-course/live' failed: Error in connection establishment: net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS @ http://localhost:28991/kv.js:860
