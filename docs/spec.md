@@ -2067,4 +2067,3 @@ Who it's for: machines where the binary can't run but `curl` or `wget` can, such
 - Append with a server-chosen key, so clients don't build `msg.{time}.{random}` themselves.
 - Watching several targets in one request.
 - Batch reads of several specific keys.
-- The JS client aborting a waiting watch on the window's `offline` event, so a watch-only page shows offline at once instead of after up to 35 seconds. Planned, see [plans.md](plans.md#6-client-helper-fixes-from-fieldnotes).
