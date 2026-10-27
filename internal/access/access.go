@@ -78,6 +78,17 @@ func (s Settings) MarshalJSON() ([]byte, error) {
 		Write: map[string]string{"shared": word(s.WriteShared), "users": word(s.WriteUsers), "me": word(s.WriteMe)}})
 }
 
+// UnmarshalJSON reads MarshalJSON's form, so clients such as admin can decode it.
+func (s *Settings) UnmarshalJSON(b []byte) error {
+	var j settingsJSON
+	if err := json.Unmarshal(b, &j); err != nil {
+		return err
+	}
+	*s = Settings{Read: j.Read == "anyone", WriteShared: j.Write["shared"] == "anyone",
+		WriteUsers: j.Write["users"] == "anyone", WriteMe: j.Write["me"] == "anyone"}
+	return nil
+}
+
 // Encode is the compact form stored in a space file.
 func (s Settings) Encode() string {
 	b := func(v bool) byte {

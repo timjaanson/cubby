@@ -130,3 +130,19 @@ func TestParseTime(t *testing.T) {
 		t.Fatal("garbage accepted")
 	}
 }
+
+func TestSettingsJSONRoundTrip(t *testing.T) {
+	for _, s := range []Settings{{}, {Read: true}, {Read: true, WriteUsers: true, WriteMe: true}, {Read: true, WriteShared: true}} {
+		b, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got Settings
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatalf("%s: %v", b, err)
+		}
+		if got != s {
+			t.Fatalf("%s: got %+v, want %+v", b, got, s)
+		}
+	}
+}
