@@ -111,6 +111,7 @@ db.me.pulse("sync", { tab: "settings" })     // to your own other tabs and devic
 ```
 
 - **Nothing is kept.** `get`, `list` and `watch` never see a pulse, and it doesn't touch a stored key of the same name. Someone who opens the page a second later doesn't get it.
+- **Throttled in the client.** kv.js sends at most 20 pulses a second per key and replaces a waiting value with a newer one, so the latest always arrives. `pulse(key, value, { maxRate })` or `kv(space, { pulseRate })` changes it, `0` turns it off for events that must all arrive. When it drops anything, it says so in one console warning per 10 seconds.
 - **Fast and cheap.** Pulses have their own budget, 60 a second per visitor with bursts of 120, apart from the 120 writes a minute. On a live connection they arrive within one round trip, in the order they were sent. A pulse is at most 4 KB.
 - **Same rights as the key.** Sending needs write access to the key, listening needs read access. Under `users/{id}/` only that visitor sends, so a cursor can't be faked.
 - **Best effort, honestly.** The server keeps the last 10 seconds in memory, so a listener between two HTTP requests or reconnecting a socket catches up. If a listener falls further behind, it gets `onMissed` instead of the old pulses. A restart drops them all.

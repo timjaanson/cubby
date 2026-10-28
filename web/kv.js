@@ -198,6 +198,40 @@ function identity(server, tokenKey, fetchFn, fixedToken) {
   return ident
 }
 
+// Pulses dropped by the client throttle, or refused by the server with 429.
+// One console.warn per 10 seconds at most, for all keys together: the first
+// right away, then a summary of what happened in between.
+const pulseReport = (() => {
+  const WINDOW = 10000
+  let counts = new Map(), last = -Infinity, timer = null
+  function flush() {
+    timer = null
+    if (!counts.size) return
+    const parts = []
+    for (const [path, c] of counts) {
+      const bits = []
+      if (c.client) bits.push(`${c.client} dropped (limit ${c.rate}/s)`)
+      if (c.server) bits.push(`${c.server} refused by the server (429)`)
+      parts.push(`${path.replace(/\/pulse$/, "")} ${bits.join(", ")}`)
+    }
+    console.warn(`cubby: pulses throttled since the last report: ${parts.join("; ")}. ` +
+      "The newest value per key is always sent. Pass { maxRate } to pulse() or pulseRate to kv() to change the limit.")
+    counts = new Map(); last = Date.now()
+  }
+  return {
+    count(path, kind, rate) {
+      const c = counts.get(path) || { client: 0, server: 0, rate }
+      c[kind]++
+      if (rate) c.rate = rate
+      counts.set(path, c)
+      if (!timer) {
+        timer = setTimeout(flush, Math.max(0, last + WINDOW - Date.now()))
+        timer.unref?.() // don't keep Node alive for a log line
+      }
+    },
+  }
+})()
+
 export function kv(space, opts = {}) {
   if (!validSpace(space)) {
     const suggestion = newName(String(space ?? ""))
@@ -207,6 +241,7 @@ export function kv(space, opts = {}) {
   const fetchFn = opts.fetch || globalThis.fetch.bind(globalThis)
   const ident = identity(server, opts.tokenKey || "cubby:" + server, fetchFn, opts.token)
   const WS = opts.WebSocket || globalThis.WebSocket
+  const pulseRate = opts.pulseRate ?? 20
   const live = opts.live && typeof WS === "function" ? makeLive(server.replace(/^http/, "ws") + "/v1/" + space + "/live", WS) : null
 
   // auth: the request needs a visitor token, and gets one if there isn't one
@@ -264,6 +299,40 @@ export function kv(space, opts = {}) {
   }
 
   const fail = errorFrom
+
+  async function sendPulse(path, body) {
+    const res = await request("POST", path, { body, auth: true })
+    if (res.ok) return true
+    const err = await fail(res)
+    if (err.status === 429) pulseReport.count(path, "server")
+    throw err
+  }
+
+  // Per path: when the last send went out, and the value waiting for the next slot.
+  const throttles = new Map()
+  function throttledPulse(path, body, rate) {
+    if (!(rate > 0) || rate === Infinity) return sendPulse(path, body)
+    const gap = 1000 / rate
+    let t = throttles.get(path)
+    if (!t) throttles.set(path, t = { last: -Infinity, waiting: null, timer: null })
+    if (!t.waiting && Date.now() - t.last >= gap) {
+      t.last = Date.now()
+      return sendPulse(path, body)
+    }
+    if (t.waiting) {
+      t.waiting.resolve(false)
+      pulseReport.count(path, "client", rate)
+    }
+    return new Promise((resolve, reject) => {
+      t.waiting = { body, resolve, reject }
+      if (t.timer) return
+      t.timer = setTimeout(() => {
+        const w = t.waiting
+        t.waiting = null; t.timer = null; t.last = Date.now()
+        sendPulse(path, w.body).then(w.resolve, w.reject)
+      }, Math.max(0, t.last + gap - Date.now()))
+    })
+  }
 
   // mine: this visitor made the last write or the delete.
   const withMine = e => ({ ...e, mine: !!e.by && e.by === ident.current()?.id })
@@ -361,13 +430,18 @@ export function kv(space, opts = {}) {
       // listening right now; nothing keeps it, so get() and watch() never
       // see it. For cursors, drags, reactions: things sent often, or that
       // matter as events rather than as state.
-      async pulse(key, value) {
+      //
+      // At most maxRate per second per key (default 20, kv option pulseRate).
+      // Faster sends wait for the next slot, and a newer value replaces one
+      // still waiting, so the latest always goes out. Resolves true when
+      // sent, false when replaced. maxRate: 0 sends everything at once.
+      async pulse(key, value, o = {}) {
         checkKey(key)
         checkWrite()
         const body = JSON.stringify(value)
         if (body === undefined) throw new KvError(0, "invalid_value", "That value can't be sent as JSON.")
-        const res = await request("POST", (await pathOf(key)) + "/pulse", { body, auth: true })
-        if (!res.ok) throw await fail(res)
+        const path = (await pathOf(key)) + "/pulse"
+        return throttledPulse(path, body, o.maxRate ?? pulseRate)
       },
       onPulse: (target, onPulse, o) => listenPulses(pathOf, needsAuth, target, onPulse, o),
     }

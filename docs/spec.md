@@ -1429,6 +1429,7 @@ These seven are the module's only exports. There is no default export.
 | `fetch` | global `fetch` | for tests or other runtimes |
 | `live` | `false` | use a [live connection](#live-connection) for data while it's open. Same API, same results |
 | `WebSocket` | global `WebSocket` | for tests or other runtimes |
+| `pulseRate` | `20` | most pulses per second per key, see [Pulse throttle](#pulse-throttle). `0` turns it off |
 
 - `kv()` makes no request, and throws at once for an invalid name, with the server's `suggestion`.
 - Several `kv()` instances for different spaces share one visitor.
@@ -1543,7 +1544,7 @@ delete(key, opts?: { ifVersion?: number, ifBefore?: number }): Promise<boolean>
 update(key, fn: (current: any | null) => any, opts?: { retries?: number, ttl?: number, ifBefore?: number }): Promise<any>
 list(target, opts?: { limit?: number, order?: "asc" | "desc" }): Promise<List>
 watch(target, onChange: (change: Change) => void, opts?: WatchOptions): () => void
-pulse(key, value): Promise<void>                                    // not stored; see Pulses
+pulse(key, value, opts?: { maxRate?: number }): Promise<boolean>    // not stored; see Pulses. false: replaced before sending
 onPulse(target, onPulse: (pulse: Pulse) => void, opts?: { onMissed?: () => void, onError?: (err: KvError) => void }): () => void
 
 type Entry  = { key, value, version, by, mine: boolean, user?, t?, expires? }
@@ -1590,6 +1591,16 @@ type WatchOptions = {
   - The socket closes on `pagehide`, so the page can enter the back/forward cache, and after 5 minutes hidden. It reopens when needed after `pageshow` or when visible.
   - If the socket fails twice before ever opening (a proxy that blocks WebSockets, Chrome's Local Network Access rules for a public page calling a local server, an older server), the client stays on HTTP for that `kv()` without an error.
   - `db.live.status` is `"http"` (live off, or fell back), `"connecting"`, `"open"`, `"closed"` (not needed right now, or between retries) or `"offline"`. Assign `db.live.onStatus` to hear changes. Pages don't need either.
+
+### Pulse throttle
+
+kv.js limits pulses per key, so a page that pulses on every `pointermove` stays under the server's pulse limit instead of running into 429s.
+
+- At most `pulseRate` (default 20) pulses per second per key, counted per path, such as `users/u_.../cursor`. `pulse(key, value, { maxRate })` sets it for one call. `0` sends at once with no limit.
+- A pulse sent too soon waits for the next slot. If another arrives while one waits, the newer replaces it. The newest value is always sent, so the last position is never lost, only the ones in between.
+- `pulse()` resolves `true` once its value was sent and `false` if a newer one replaced it first. Errors from the send reject it as usual.
+- Pulses that must all arrive, such as button presses, stay under the rate or pass `maxRate: 0` and take the server's limit (60 per second per visitor, burst 120).
+- Dropped pulses and pulse 429s are reported with `console.warn`, at most once per 10 seconds for all keys together: the first at once, then a summary per key of what happened since. Nothing is logged while nothing is throttled.
 
 ### Errors
 
