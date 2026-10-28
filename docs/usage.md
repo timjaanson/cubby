@@ -62,6 +62,17 @@ const { points } = await db.shared.series("env.temp", { since: Date.now() - 864e
 </script>
 ```
 
+A page that is a room, shared by passing its link around, can skip the setup with `openRoom`:
+
+```js
+import { openRoom } from "https://cubby.example.com/kv.js"
+
+const room = await openRoom("board", { live: true })   // finds #s=... or the last room, or creates one
+if (!room.me.inside) showRoomGone()                     // room.forget() before starting a new one
+const db = room.db
+shareButton.onclick = async () => showQr(await room.link())   // a reusable invite, from owners and members alike
+```
+
 It keeps the visitor token in `localStorage`, sends it as a header on writes and as `?token=` on reads (so reads skip CORS preflights), and finds the API from the URL it was loaded from. The module exports `kv`, `createSpace`, `takeInvite`, `inviteLink`, `newName`, `validSpace` and `KvError`. Every entry has `by`, the visitor who wrote it, and `mine`. Its opening comment is a short guide for coding agents; [docs/agents.md](agents.md) is the long one.
 
 For sharing without writing any UI, the server also serves a panel: invite links, QR codes, the member list, who can see the space, and the recovery key.

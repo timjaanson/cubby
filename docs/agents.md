@@ -70,6 +70,8 @@ const { link } = await db.share({ label: "Grandma", uses: 1 })  // one person
 const { link } = await db.share({ allow: "viewer", uses: 1 })   // can only look
 ```
 
+For a page where each room is its own space and people join by passing the link around (a board, a game, a party playlist), use `openRoom` instead of writing the setup yourself: `const room = await openRoom("board", { live: true })`, then `room.db` for data, `room.me.inside` to check, and `await room.link()` for a reusable invite link any member can show as a QR code.
+
 The link is the current page with `#t=at_...` added. The page that opens it calls `db.open()`, which handles everything. Members can call `db.share()` too (check `me.canInvite`); their link gives what they have. To keep invites to owners, create the space with `invite: "owners"`.
 
 Defaults are deliberately short-lived: 10 uses, 7 days. Don't make invites unlimited (`uses: null, until: null`) unless the user asked for a link that works forever. For a page meant to be open to anyone, use `public` instead of an unlimited invite.

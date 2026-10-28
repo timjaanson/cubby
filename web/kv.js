@@ -12,6 +12,8 @@
 // Creating a space (once from a shell with `cubby new`, or per room in the page):
 //   const { space, ownerToken } = await createSpace()
 //   Show ownerToken to the user once. It's their recovery key. Never store it in code.
+// A page that is a room, shared by its link? openRoom("board") creates or finds
+// the space, opens it and gives await room.link(). Members can share it too.
 //
 // Sharing with specific people, the usual case:
 //   const { link } = await db.share({ label: "Anna" })       // member, 10 uses, 7 days
@@ -39,8 +41,8 @@
 //
 // Docs: docs/agents.md in the cubby repository.
 //
-// An ES module with no dependencies. Exports: kv, createSpace, takeInvite,
-// inviteLink, newName, validSpace, KvError.
+// An ES module with no dependencies. Exports: kv, createSpace, openRoom,
+// takeInvite, inviteLink, newName, validSpace, KvError.
 
 const SERVER = new URL(".", import.meta.url).href.replace(/\/$/, "")
 
@@ -994,6 +996,75 @@ export function takeInvite(param = "t") {
     history.replaceState(history.state, "", location.pathname + location.search + (rest ? "#" + rest : ""))
   }
   return token
+}
+
+// openRoom: a page is a room, and its link lets others in. Finds the room
+// in the address (#s=...) or the one this browser was last in under label,
+// creates one if there's neither, opens it (redeeming #t=...), and keeps
+// #s=<space> in the address so a reload stays in the room.
+//   const room = await openRoom("board", { live: true })
+//   if (!room.me.inside) ...           // gone, or a bad link
+//   const link = await room.link()     // a reusable invite, minted once per device
+// Options: param ("s"), create (true), space and invite (instead of the
+// address, outside browsers), public, and anything kv() takes. Members can share too, so every device makes its own link.
+export async function openRoom(label, o = {}) {
+  const { param = "s", create = true, space: given, public: pub, invite, ...kvOpts } = o
+  const server = (kvOpts.server || SERVER).replace(/\/$/, "")
+  const key = `cubby-room:${server}:${label}`
+  const fromHash = hashParams().get(param)
+  let space = given || (fromHash && validSpace(fromHash) ? fromHash : null) || roomStore.get(key)
+  let created = false
+  if (!space) {
+    if (!create) return { db: null, me: { inside: false }, space: null, created, link: async () => null, forget }
+    const fields = { label, server: kvOpts.server, tokenKey: kvOpts.tokenKey, fetch: kvOpts.fetch }
+    if (pub) fields.public = pub
+    space = (await createSpace(fields)).space
+    created = true
+  }
+  const db = kv(space, kvOpts)
+  const me = await db.open(invite === undefined ? {} : { invite })
+  if (me.inside) {
+    roomStore.set(key, space)
+    setHashParam(param, space)
+  }
+  // The invite this visitor minted for the room, reused while it still works.
+  async function link(lo = {}) {
+    const base = lo.base || (typeof location === "undefined" ? undefined : location.origin + location.pathname + location.search + "#" + param + "=" + space)
+    const lkey = `cubby-room-link:${server}:${space}:${me.id || await db.id()}`
+    const saved = roomStore.get(lkey)
+    if (saved) {
+      const t = await db.tokens.list().then(l => l.find(t => t.id === saved.id), () => null)
+      if (t?.state === "active") return inviteLink(saved.token, base)
+    }
+    const t = await db.tokens.create({ label: label + " link", uses: null, until: null })
+    roomStore.set(lkey, { id: t.id, token: t.token })
+    return inviteLink(t.token, base)
+  }
+  function forget() {
+    roomStore.del(key)
+    setHashParam(param, null)
+  }
+  return { db, me, space, created, link, forget }
+}
+
+// localStorage when there is one, memory otherwise.
+const roomStore = (() => {
+  const mem = new Map()
+  const ls = () => { try { return globalThis.localStorage || null } catch { return null } }
+  return {
+    get(k) { const l = ls(); const v = l ? l.getItem(k) : mem.get(k); try { return v ? JSON.parse(v) : null } catch { return null } },
+    set(k, v) { const j = JSON.stringify(v); const l = ls(); try { l ? l.setItem(k, j) : mem.set(k, j) } catch { mem.set(k, j) } },
+    del(k) { const l = ls(); try { l?.removeItem(k) } catch {} mem.delete(k) },
+  }
+})()
+
+function setHashParam(name, value) {
+  if (typeof location === "undefined" || typeof history === "undefined") return
+  const p = hashParams()
+  if (value === null) p.delete(name)
+  else p.set(name, value)
+  const rest = p.toString()
+  history.replaceState(history.state, "", location.pathname + location.search + (rest ? "#" + rest : ""))
 }
 
 // inviteLink adds t=token to base's fragment, keeping its other parameters.

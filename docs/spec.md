@@ -1429,7 +1429,7 @@ Many pages using cubby are written by coding agents for people who don't know wh
 ### Setup
 
 ```js
-import { kv, createSpace, takeInvite, inviteLink, newName, validSpace, KvError } from "https://kv.example.com/kv.js"
+import { kv, createSpace, openRoom, takeInvite, inviteLink, newName, validSpace, KvError } from "https://kv.example.com/kv.js"
 
 const db = kv("poll-cedar-pilot-mango-frost")
 const me = await db.open()
@@ -1438,7 +1438,7 @@ newName("poll")        // "poll-slate-hinge-cocoa-pilot", local, no request
 validSpace(fromLink)   // true if a string from a link or a form is a usable space name
 ```
 
-These seven are the module's only exports. There is no default export.
+These eight are the module's only exports. There is no default export.
 
 | Option | Default | Purpose |
 |---|---|---|
@@ -1500,6 +1500,29 @@ type Invite = { link: string, token: string, id: string, allow: string[], uses: 
 - `takeInvite` keeps other fragment parameters, so `#room=...&t=at_...` becomes `#room=...`. `inviteLink` keeps them too: `inviteLink(token)` on a page at `/chat/#room=x` gives `/chat/#room=x&t=at_...`.
 - `db.join` sends the stored visitor token if there is one, as the server requires. Use it directly only for tokens that don't come from the URL, such as one typed into a form.
 - `access().can()` applies the [access rule](#the-access-rule) to the answer locally, for showing and hiding controls.
+
+### Rooms
+
+For the common "this page is a room, its link lets people in" setup:
+
+```ts
+openRoom(label: string, opts?: { param?, create?, space?, invite?, public?, ...kvOptions }): Promise<Room>
+
+type Room = {
+  db: Db | null,                 // kv(space, kvOptions); null only with create: false and no room
+  me: Access,                    // from db.open()
+  space: string | null,
+  created: boolean,              // this call created the space
+  link(opts?: { base? }): Promise<string>,   // a reusable invite link to this room
+  forget(): void,                // drop the remembered room, for "start a new room"
+}
+```
+
+- It takes the space from the address fragment (`#s=...`, `param` changes the name), else the space this browser last opened under `label`, else creates one with that label (`public` passed on, private by default). `create: false` creates nothing. `space` and `invite` replace the address outside browsers.
+- It calls `db.open()`, which redeems `#t=...`. When the visitor is inside, it remembers the space in localStorage under `label` and puts `#s=<space>` in the address, so a reload or a bookmark stays in the room.
+- `me.inside === false` means the room is gone or the link didn't work. The page decides what to show, and `forget()` before creating a new one.
+- `link()` mints an invite with no use limit and no end, once per visitor and room, and keeps it in localStorage. It checks the token still works before reusing it, and mints a new one otherwise. Owners and members can both call it, so nobody keeps someone else's token. The link is the page with `#s=<space>&t=<token>`.
+- Every kv option works, such as `live: true`.
 
 ### Client limits and clock
 
