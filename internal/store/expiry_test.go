@@ -179,13 +179,17 @@ func TestMigrationPreservesOldData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, _, err := s.CreateToken(space, TokenSpec{By: id, Allow: []string{"*:rw"}}); err != nil {
+		t.Fatal(err)
+	}
 	s.Close()
 	db, err := openDB(filepath.Join(cfg.Server.DataDir, "spaces", space+".db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Recreate exactly the pre-migration column set, including NULL plain-key t.
-	_, err = db.Exec(`DROP INDEX IF EXISTS kv_expiry; ALTER TABLE kv DROP COLUMN expires; ALTER TABLE kv DROP COLUMN expired; UPDATE kv SET t=NULL,updated_at=1700000000; PRAGMA user_version=0`)
+	_, err = db.Exec(`DROP INDEX IF EXISTS kv_expiry; ALTER TABLE kv DROP COLUMN expires; ALTER TABLE kv DROP COLUMN expired;
+		ALTER TABLE tokens DROP COLUMN minted_by; ALTER TABLE tokens DROP COLUMN revoked_at; UPDATE kv SET t=NULL,updated_at=1700000000; PRAGMA user_version=0`)
 	db.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -202,6 +206,10 @@ func TestMigrationPreservesOldData(t *testing.T) {
 	rights, err := s.Rights(space, id)
 	if err != nil || !rights.Owner {
 		t.Fatalf("lost ownership: %+v %v", rights, err)
+	}
+	toks, err := s.ListTokens(space, "")
+	if err != nil || len(toks) != 1 || toks[0].By != nil || toks[0].State != "active" {
+		t.Fatalf("tokens after migration: %+v %v", toks, err)
 	}
 }
 

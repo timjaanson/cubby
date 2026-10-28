@@ -304,7 +304,7 @@ class CubbyShare extends Base {
     if (generation !== this._generation) return
     this._access = a
     const style = h("style", {}, CSS)
-    if (a?.owner) {
+    if (a?.owner || a?.canInvite) {
       root.replaceChildren(style, h("button", { part: "button", className: "main", onclick: () => this._show("invite") }, "Share"))
       if (this._ownerToken || this.hasAttribute("open")) this._show(this._ownerToken ? "recovery" : "invite")
     } else if (a?.inside && a.grants.length && this.hasAttribute("members")) {
@@ -328,15 +328,16 @@ class CubbyShare extends Base {
     })
     this.shadowRoot.append(dlg)
     const render = async () => {
-      const [tokens, grants] = await Promise.all([db.owner.tokens.list(), db.owner.grants.list()])
-      const settings = (await db.access()).settings
+      // Owners manage everything; members invite and see their own open invites.
+      const a = await db.access()
+      const [tokens, grants] = await Promise.all([db.tokens.list(), a.owner ? db.owner.grants.list() : []])
       dlg.replaceChildren(
         h("button", { className: "close", "aria-label": "Close", onclick: () => dlg.close() }, "×"),
         h("h2", {}, "Share"),
-        this._recovery(db, focus === "recovery"),
+        a.owner ? this._recovery(db, focus === "recovery") : null,
         this._invite(db, render),
-        this._people(db, tokens, grants, render),
-        this._visibility(db, settings, render),
+        this._people(db, tokens, grants, render, a.owner),
+        a.owner ? this._visibility(db, a.settings, render) : null,
       )
     }
     await render()
@@ -418,7 +419,7 @@ class CubbyShare extends Base {
     )
   }
 
-  _people(db, tokens, grants, rerender) {
+  _people(db, tokens, grants, rerender, owner) {
     const labels = new Map(tokens.map(t => [t.id, t.label]))
     const byUser = new Map()
     for (const g of grants) {
@@ -432,8 +433,8 @@ class CubbyShare extends Base {
     const pending = tokens.filter(t => t.state === "active")
     const act = fn => async () => { await fn(); this._changed(); rerender() }
     return h("section", {},
-      h("h3", {}, "People"),
-      people.length ? h("ul", {}, people.map(p => h("li", {},
+      owner ? h("h3", {}, "People") : null,
+      !owner ? null : people.length ? h("ul", {}, people.map(p => h("li", {},
         h("span", {}, p.labels.filter(Boolean).join(", ") || p.user, h("span", { className: "muted" }, ` · joined ${ago(p.created)}, active ${ago(p.last)}`)),
         h("button", { onclick: act(() => db.owner.grants.revokeUser(p.user)) }, "Remove"),
       ))) : h("p", { className: "muted" }, "Nobody has joined yet."),
@@ -443,8 +444,8 @@ class CubbyShare extends Base {
           h("span", {}, t.label || "Invite", h("span", { className: "muted" },
             ` · ${t.usesLeft === null ? "no limit" : `${t.usesLeft} left`}, until ${when(t.until)}`)),
           h("span", { className: "row" },
-            h("button", { onclick: act(() => db.owner.tokens.update(t.id, { until: "7d" })) }, "Extend"),
-            h("button", { onclick: act(() => t.grants ? db.owner.tokens.update(t.id, { uses: 0 }) : db.owner.tokens.revoke(t.id)) }, "Cancel"),
+            h("button", { onclick: act(() => db.tokens.update(t.id, { until: "7d" })) }, "Extend"),
+            h("button", { onclick: act(() => t.grants ? db.tokens.update(t.id, { uses: 0 }) : db.tokens.revoke(t.id)) }, "Cancel"),
           ),
         ))),
       ) : null,

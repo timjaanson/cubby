@@ -53,7 +53,7 @@ await db.shared.set("item.123", { text: "milk" })
 
 ## Sharing
 
-The easiest way is the ready-made panel. It gives owners invite links, a QR code, a member list with Remove, the space's visibility and its recovery key:
+The easiest way is the ready-made panel. It gives owners invite links, a QR code, a member list with Remove, the space's visibility and its recovery key. Members get the invite part: anyone in a space can pass it on, with at most their own rights.
 
 ```html
 <script type="module" src="https://SERVER/share.js"></script>
@@ -70,7 +70,7 @@ const { link } = await db.share({ label: "Grandma", uses: 1 })  // one person
 const { link } = await db.share({ allow: "viewer", uses: 1 })   // can only look
 ```
 
-The link is the current page with `#t=at_...` added. The page that opens it calls `db.open()`, which handles everything.
+The link is the current page with `#t=at_...` added. The page that opens it calls `db.open()`, which handles everything. Members can call `db.share()` too (check `me.canInvite`); their link gives what they have. To keep invites to owners, create the space with `invite: "owners"`.
 
 Defaults are deliberately short-lived: 10 uses, 7 days. Don't make invites unlimited (`uses: null, until: null`) unless the user asked for a link that works forever. For a page meant to be open to anyone, use `public` instead of an unlimited invite.
 

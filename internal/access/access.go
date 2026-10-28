@@ -18,6 +18,9 @@ type Settings struct {
 	WriteShared bool
 	WriteUsers  bool
 	WriteMe     bool
+	// InviteOwners: only owners mint access tokens. The default, false, lets
+	// every member invite others with rights they hold themselves.
+	InviteOwners bool
 }
 
 // The public shorthand. Private is the default.
@@ -33,6 +36,7 @@ var Private = Settings{}
 
 // Public names the settings, or "custom".
 func (s Settings) Public() string {
+	s.InviteOwners = false // not part of the shorthand
 	for _, n := range []string{"none", "read", "respond", "all"} {
 		if presets[n] == s {
 			return n
@@ -71,11 +75,21 @@ type settingsJSON struct {
 	Public string            `json:"public"`
 	Read   string            `json:"read"`
 	Write  map[string]string `json:"write"`
+	Invite string            `json:"invite"`
+}
+
+// Invite names who may mint access tokens: "members" or "owners".
+func (s Settings) Invite() string {
+	if s.InviteOwners {
+		return "owners"
+	}
+	return "members"
 }
 
 func (s Settings) MarshalJSON() ([]byte, error) {
 	return json.Marshal(settingsJSON{Public: s.Public(), Read: word(s.Read),
-		Write: map[string]string{"shared": word(s.WriteShared), "users": word(s.WriteUsers), "me": word(s.WriteMe)}})
+		Write:  map[string]string{"shared": word(s.WriteShared), "users": word(s.WriteUsers), "me": word(s.WriteMe)},
+		Invite: s.Invite()})
 }
 
 // UnmarshalJSON reads MarshalJSON's form, so clients such as admin can decode it.
@@ -85,7 +99,7 @@ func (s *Settings) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	*s = Settings{Read: j.Read == "anyone", WriteShared: j.Write["shared"] == "anyone",
-		WriteUsers: j.Write["users"] == "anyone", WriteMe: j.Write["me"] == "anyone"}
+		WriteUsers: j.Write["users"] == "anyone", WriteMe: j.Write["me"] == "anyone", InviteOwners: j.Invite == "owners"}
 	return nil
 }
 
@@ -97,15 +111,21 @@ func (s Settings) Encode() string {
 		}
 		return 'g'
 	}
-	return string([]byte{b(s.Read), b(s.WriteShared), b(s.WriteUsers), b(s.WriteMe)})
+	inv := byte('m')
+	if s.InviteOwners {
+		inv = 'o'
+	}
+	return string([]byte{b(s.Read), b(s.WriteShared), b(s.WriteUsers), b(s.WriteMe), inv})
 }
 
-// Decode reads Encode's form. Anything unreadable is private.
+// Decode reads Encode's form. Anything unreadable is private. The four-letter
+// form from before the invite setting means members may invite.
 func Decode(v string) Settings {
-	if len(v) != 4 {
+	if len(v) != 4 && len(v) != 5 {
 		return Private
 	}
-	return Settings{Read: v[0] == 'a', WriteShared: v[1] == 'a', WriteUsers: v[2] == 'a', WriteMe: v[3] == 'a'}
+	return Settings{Read: v[0] == 'a', WriteShared: v[1] == 'a', WriteUsers: v[2] == 'a', WriteMe: v[3] == 'a',
+		InviteOwners: len(v) == 5 && v[4] == 'o'}
 }
 
 // SettingsError is a problem with requested settings, for invalid_settings.
@@ -114,9 +134,26 @@ type SettingsError string
 func (e SettingsError) Error() string { return string(e) }
 
 // ApplyInput applies the settings fields of a request body to base: either
-// public, or read and write. Fields left out keep base's value. raw holds
-// only the fields that were present.
-func ApplyInput(base Settings, public, read, write json.RawMessage) (Settings, error) {
+// public, or read and write, and invite. Fields left out keep base's value.
+func ApplyInput(base Settings, public, read, write, invite json.RawMessage) (Settings, error) {
+	s, err := applyAccess(base, public, read, write)
+	if err != nil || invite == nil {
+		return s, err
+	}
+	var v string
+	json.Unmarshal(invite, &v)
+	switch v {
+	case "members":
+		s.InviteOwners = false
+	case "owners":
+		s.InviteOwners = true
+	default:
+		return base, SettingsError(`invite is "members" or "owners".`)
+	}
+	return s, nil
+}
+
+func applyAccess(base Settings, public, read, write json.RawMessage) (Settings, error) {
 	if public != nil {
 		if read != nil || write != nil {
 			return base, SettingsError("Give either public, or read and write, not both.")
@@ -129,6 +166,7 @@ func ApplyInput(base Settings, public, read, write json.RawMessage) (Settings, e
 		if !ok {
 			return base, SettingsError(`public is "none", "read", "respond" or "all".`)
 		}
+		s.InviteOwners = base.InviteOwners
 		return s, nil
 	}
 	s := base
@@ -368,6 +406,61 @@ func (r *Rights) Allows(op Op) bool {
 		}
 	}
 	return false
+}
+
+// CanInvite reports whether this visitor may mint access tokens: owners
+// always, members when the space lets members invite.
+func (r *Rights) CanInvite() bool {
+	return r.Owner || !r.Settings.InviteOwners && len(r.Grants) > 0
+}
+
+// CanGive reports whether every right in allow is one this visitor holds
+// through a grant, so a token with it hands out nothing they don't have.
+// Rights from settings don't count: everyone has them already.
+func (r *Rights) CanGive(allow []string) bool {
+	if r.Owner {
+		return true
+	}
+	for _, a := range allow {
+		sc, err := ParseScope(a)
+		if err != nil {
+			return false
+		}
+		for _, w := range []bool{false, true} {
+			if w && !sc.W || !w && !sc.R {
+				continue
+			}
+			op := Op{Area: sc.Area, Key: sc.Prefix, Pattern: sc.Pattern, Write: w}
+			held := false
+			for _, g := range r.Grants {
+				for _, gs := range g.Scopes {
+					if gs.Covers(op) {
+						held = true
+					}
+				}
+			}
+			if !held {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// OwnAllow is every scope this visitor's grants hold, for a member's token
+// that names no allow: an invite to have what the inviter has.
+func (r *Rights) OwnAllow() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, g := range r.Grants {
+		for _, a := range g.Allow {
+			if !seen[a] && len(out) < MaxScopes {
+				seen[a] = true
+				out = append(out, a)
+			}
+		}
+	}
+	return out
 }
 
 // ParseScopes turns stored allow strings back into scopes. Stored lists were

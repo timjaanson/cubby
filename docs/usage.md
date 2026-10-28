@@ -30,7 +30,7 @@ space                 notes-cedar-pilot-mango-frost    owners, settings, invites
 | `respond` | anyone with the name | invited people in `shared/`; everyone their own `users/` and `me/` |
 | `all` | anyone with the name | anyone with the name |
 
-- Owners invite people with access tokens (`at_...`), usually sent as a link with `#t=at_...`. Redeeming one with `join` gives that visitor a grant. By default an invite makes a full member, works for 10 people and expires after 7 days. The owner token (`ot_...`) is the owner's recovery key.
+- Owners invite people with access tokens (`at_...`), usually sent as a link with `#t=at_...`. Redeeming one with `join` gives that visitor a grant. By default an invite makes a full member, works for 10 people and expires after 7 days. Members can invite too, with at most the rights they hold, unless the space says `invite: "owners"`. The owner token (`ot_...`) is the owner's recovery key.
 - A private space looks exactly like a missing one to anyone without a grant: 404 `no_space`.
 - A key is up to 128 of `A-Z a-z 0-9 . _ : -`, and can't be `.`, `..`, `watch`, `series` or `pulse`. Group with dots (`msg.1791449600123`), because listing and watching select by prefix (`msg.*`).
 - A value is UTF-8 text up to 64 KB. Valid JSON comes back as `application/json`, anything else as `text/plain`, always byte for byte as written.
@@ -49,7 +49,7 @@ import { kv, createSpace } from "https://cubby.example.com/kv.js"
 const db = kv("poll-orbit-lilac-tango-slate")
 const me = await db.open()                               // redeems #t=... invites; me.inside, me.owner, me.can()
 if (!me.inside) showAskForInvite()
-const { link } = await db.share({ label: "Anna" })       // owners: an invite link to send
+const { link } = await db.share({ label: "Anna" })       // owners and members: an invite link to send
 await db.shared.set("question", "Pizza or tacos?")
 await db.user().set("vote", "tacos")
 

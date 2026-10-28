@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/timjaanson/cubby/internal/apierr"
 )
@@ -14,31 +15,69 @@ func migrateSpace(db *sql.DB) error {
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		return err
 	}
-	if v >= 1 {
-		return nil
+	if v < 1 {
+		if err := migrateExpiry(db); err != nil {
+			return err
+		}
 	}
-	tx, err := db.Begin()
+	if v < 2 {
+		return migrateMinters(db)
+	}
+	return nil
+}
+
+func tableCols(tx *sql.Tx, table string) (map[string]bool, error) {
+	rows, err := tx.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer tx.Rollback()
-	rows, err := tx.Query(`PRAGMA table_info(kv)`)
-	if err != nil {
-		return err
-	}
+	defer rows.Close()
 	cols := map[string]bool{}
 	for rows.Next() {
 		var cid, nn, pk int
 		var name, typ string
 		var def any
 		if err := rows.Scan(&cid, &name, &typ, &nn, &def, &pk); err != nil {
-			rows.Close()
-			return err
+			return nil, err
 		}
 		cols[name] = true
 	}
-	err = rows.Err()
-	rows.Close()
+	return cols, rows.Err()
+}
+
+// migrateMinters records who minted each token, for delegated invites.
+// Tokens from before stay unattributed.
+func migrateMinters(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	cols, err := tableCols(tx, "tokens")
+	if err != nil {
+		return err
+	}
+	for _, c := range []string{"minted_by TEXT", "revoked_at INTEGER"} {
+		name, _, _ := strings.Cut(c, " ")
+		if !cols[name] {
+			if _, err := tx.Exec(`ALTER TABLE tokens ADD COLUMN ` + c); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.Exec(`PRAGMA user_version = 2`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateExpiry(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	cols, err := tableCols(tx, "kv")
 	if err != nil {
 		return err
 	}

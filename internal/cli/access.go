@@ -45,8 +45,11 @@ func spaceArg(s string) (string, error) {
 	return s, nil
 }
 
-// settingsFlags puts --public, or --read and --write, into a request body.
+// settingsFlags puts --public, or --read and --write, and --invite into a request body.
 func settingsFlags(f *flags, body map[string]any) error {
+	if f.has("invite") {
+		body["invite"] = f.str("invite")
+	}
 	if f.has("public") {
 		if f.has("read") || f.has("write") {
 			return usageCli("give --public, or --read and --write, not both")
@@ -140,11 +143,12 @@ type settingsOut struct {
 	Public string
 	Read   string
 	Write  map[string]string
+	Invite string
 }
 
 func (s settingsOut) print() {
-	fmt.Printf("public\t%s\nread\t%s\nwrite.shared\t%s\nwrite.users\t%s\nwrite.me\t%s\n",
-		s.Public, s.Read, s.Write["shared"], s.Write["users"], s.Write["me"])
+	fmt.Printf("public\t%s\nread\t%s\nwrite.shared\t%s\nwrite.users\t%s\nwrite.me\t%s\ninvite\t%s\n",
+		s.Public, s.Read, s.Write["shared"], s.Write["users"], s.Write["me"], s.Invite)
 }
 
 func (c *client) access(f *flags) error {

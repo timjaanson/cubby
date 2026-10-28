@@ -15,7 +15,7 @@ func raw(s string) json.RawMessage {
 
 func TestPublicShorthand(t *testing.T) {
 	for _, p := range []string{"none", "read", "respond", "all"} {
-		s, err := ApplyInput(Private, raw(`"`+p+`"`), nil, nil)
+		s, err := ApplyInput(Private, raw(`"`+p+`"`), nil, nil, nil)
 		if err != nil || s.Public() != p {
 			t.Fatalf("%s: %v %v", p, s.Public(), err)
 		}
@@ -26,21 +26,21 @@ func TestPublicShorthand(t *testing.T) {
 	if Private.Public() != "none" {
 		t.Fatal("default isn't private")
 	}
-	s, err := ApplyInput(presets["all"], nil, nil, raw(`{"me": "granted"}`))
+	s, err := ApplyInput(presets["all"], nil, nil, raw(`{"me": "granted"}`), nil)
 	if err != nil || s.Public() != "custom" || !s.WriteShared || s.WriteMe {
 		t.Fatalf("custom: %+v %v", s, err)
 	}
-	if _, err := ApplyInput(Private, raw(`"read"`), raw(`"anyone"`), nil); err == nil {
+	if _, err := ApplyInput(Private, raw(`"read"`), raw(`"anyone"`), nil, nil); err == nil {
 		t.Fatal("public with read accepted")
 	}
-	if _, err := ApplyInput(Private, nil, nil, raw(`{"shared": "anyone"}`)); err == nil {
+	if _, err := ApplyInput(Private, nil, nil, raw(`{"shared": "anyone"}`), nil); err == nil {
 		t.Fatal("open write into a private space accepted")
 	}
-	if _, err := ApplyInput(Private, raw(`"open"`), nil, nil); err == nil {
+	if _, err := ApplyInput(Private, raw(`"open"`), nil, nil, nil); err == nil {
 		t.Fatal("unknown preset accepted")
 	}
 	b, _ := json.Marshal(presets["respond"])
-	if string(b) != `{"public":"respond","read":"anyone","write":{"me":"anyone","shared":"granted","users":"anyone"}}` {
+	if string(b) != `{"public":"respond","read":"anyone","write":{"me":"anyone","shared":"granted","users":"anyone"},"invite":"members"}` {
 		t.Fatalf("json: %s", b)
 	}
 }
@@ -144,5 +144,67 @@ func TestSettingsJSONRoundTrip(t *testing.T) {
 		if got != s {
 			t.Fatalf("%s: got %+v, want %+v", b, got, s)
 		}
+	}
+}
+
+func TestInviteSetting(t *testing.T) {
+	if Private.Invite() != "members" {
+		t.Fatal("members invite by default")
+	}
+	s, err := ApplyInput(Private, nil, nil, nil, raw(`"owners"`))
+	if err != nil || !s.InviteOwners || s.Public() != "none" {
+		t.Fatalf("owners: %+v %v", s, err)
+	}
+	if Decode(s.Encode()) != s || Decode("gggg") != Private {
+		t.Fatal("encode round trip, old four-letter form is members")
+	}
+	s2, err := ApplyInput(s, raw(`"read"`), nil, nil, nil)
+	if err != nil || !s2.InviteOwners || s2.Public() != "read" {
+		t.Fatalf("public keeps invite: %+v %v", s2, err)
+	}
+	if _, err := ApplyInput(Private, nil, nil, nil, raw(`"everyone"`)); err == nil {
+		t.Fatal("bad invite accepted")
+	}
+	var back Settings
+	b, _ := json.Marshal(s)
+	if json.Unmarshal(b, &back) != nil || back != s {
+		t.Fatalf("json round trip %s", b)
+	}
+}
+
+func TestCanGive(t *testing.T) {
+	member := func(allow ...string) *Rights {
+		return &Rights{Grants: []Grant{{Allow: allow, Scopes: ParseScopes(allow)}}}
+	}
+	cases := []struct {
+		have, give []string
+		ok         bool
+	}{
+		{[]string{"*:rw"}, []string{"*:rw"}, true},
+		{[]string{"*:rw"}, []string{"shared/x:w", "users:r"}, true},
+		{[]string{"shared:r", "users:r"}, []string{"*:rw"}, false},
+		{[]string{"shared:r", "users:r"}, []string{"shared:r"}, true},
+		{[]string{"shared:r"}, []string{"shared:rw"}, false},
+		{[]string{"shared/board.*:rw"}, []string{"shared/board.cards*:w"}, true},
+		{[]string{"shared/board.*:rw"}, []string{"shared:r"}, false},
+		{[]string{"shared/note:rw"}, []string{"shared/note:r"}, true},
+		{[]string{"shared/note:rw"}, []string{"shared/note.*:r"}, false},
+		{[]string{"shared:r", "shared:w"}, []string{"shared:rw"}, true},
+	}
+	for _, c := range cases {
+		if got := member(c.have...).CanGive(c.give); got != c.ok {
+			t.Errorf("have %v give %v: %v", c.have, c.give, got)
+		}
+	}
+	r := member("shared:r")
+	if !r.CanInvite() {
+		t.Fatal("member invites by default")
+	}
+	r.Settings.InviteOwners = true
+	if r.CanInvite() || (&Rights{}).CanInvite() || !(&Rights{Owner: true, Settings: Settings{InviteOwners: true}}).CanInvite() {
+		t.Fatal("invite owners")
+	}
+	if got := (&Rights{Grants: []Grant{{Allow: []string{"shared:r"}}, {Allow: []string{"shared:r", "me:rw"}}}}).OwnAllow(); len(got) != 2 {
+		t.Fatalf("own allow %v", got)
 	}
 }

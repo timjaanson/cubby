@@ -63,7 +63,9 @@ CREATE TABLE IF NOT EXISTS tokens (
   grant_for        INTEGER,              -- ms, NULL: grants last until revoked
   created_at       INTEGER NOT NULL,     -- ms
   ended_at         INTEGER,              -- ms, when it ran out of uses
-  last_redeemed_at INTEGER
+  last_redeemed_at INTEGER,
+  minted_by        TEXT,                 -- visitor who minted it, NULL before this was recorded
+  revoked_at       INTEGER               -- ms, ended because its minter may no longer invite
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS grants (
   id           TEXT PRIMARY KEY,         -- g_ + 8 base32

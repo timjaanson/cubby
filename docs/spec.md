@@ -236,16 +236,18 @@ All areas support read, write, delete, list, watch and series, except that `user
 
 ### Settings
 
-Every space has two settings. They decide what a visitor may do without a grant. **A new space is private unless its creator says otherwise:** only its owners and visitors they invite can read or write it.
+Every space has two access settings and one about invites. The access settings decide what a visitor may do without a grant. **A new space is private unless its creator says otherwise:** only its owners and visitors they invite can read or write it.
 
 | Setting | Values | Default |
 |---|---|---|
 | `read` | `anyone`, `granted` | `granted` |
 | `write` | per area: `{"shared": ..., "users": ..., "me": ...}`, each `anyone` or `granted` | `granted` for all three |
+| `invite` | `members`, `owners`: who may mint [access tokens](#minting) | `members` |
 
 - `read` covers every area: `shared/`, `users/`, `users/*/` and `me/`. `granted` makes the space [private](#private-spaces).
 - `write` covers `PUT`, `DELETE` and `POST` in that area. `"write": "granted"` is shorthand for all three areas `granted`, and `"write": "anyone"` for all three `anyone`.
 - `read: granted` requires `write: granted` in every area. Anything else returns 400 `invalid_settings`, because an open write into an unreadable space would tell a stranger the space exists.
+- `invite: members` lets anyone holding a grant invite others, never with more than they hold. See [Invites from members](#invites-from-members). `owners` keeps minting to owners.
 - The owner changes settings at any time with [`PATCH /v1/{space}`](#settings-and-deletion). Data and grants stay as they are.
 
 ### The public shorthand
@@ -315,14 +317,14 @@ Every entry records `by`, the visitor who last wrote or deleted it. Owners act w
 An access token is an invite. A grant is what redeeming it leaves behind: "visitor X has these scopes in this space". The token is used once per visitor and then no longer matters to that visitor. The grant is what every later request is checked against.
 
 ```
-owner ── mints ──> access token at_... ── link, chat, QR ──> visitor redeems with join ──> grant on the visitor
+owner or member ── mints ──> access token at_... ── link, chat, QR ──> visitor redeems with join ──> grant on the visitor
 ```
 
 ### Minting
 
 ```
 POST /v1/{space}/tokens
-Authorization: Bearer vt_...           an owner of the space
+Authorization: Bearer vt_...           an owner, or a member when the space allows it
 
 {"label": "anna"}
 ```
@@ -343,7 +345,7 @@ Authorization: Bearer vt_...           an owner of the space
 | Field | Means | Default |
 |---|---|---|
 | `label` | a note for the owner, at most 63 characters | none |
-| `allow` | scopes the grant will have, see [Scopes](#scopes), or a preset name: `member` or `viewer` | `member`, i.e. `["*:rw"]` |
+| `allow` | scopes the grant will have, see [Scopes](#scopes), or a preset name: `member` or `viewer` | from an owner `member`, i.e. `["*:rw"]`; from a member, the scopes of their own grants |
 | `uses` | how many visitors can redeem it, 1 or more, or `null` for no limit | `10` |
 | `until` | until when it can be redeemed: a duration like `7d`, a date, an RFC 3339 time, or `null` for no end | `7d` |
 | `grantFor` | how long each grant lasts after its redemption: a duration, or `null` for until revoked | `null` |
@@ -353,6 +355,18 @@ Authorization: Bearer vt_...           an owner of the space
 - The token is shown once. The server stores only its SHA-256 hash. It's `at_` plus 32 random bytes in base64url.
 - `until` as a date means the end of that day in the server's time zone. A time without an offset is also in the server's time zone. The response always gives milliseconds.
 - `uses` and `until` can be changed later, see [Managing tokens](#managing-tokens). `allow` and `grantFor` can't, so every grant matches the token it came from.
+- The response and the token list carry `by`, the visitor who minted it.
+
+### Invites from members
+
+Unless the space's `invite` setting is `owners`, every visitor holding a grant may mint access tokens. It's the same `POST /v1/{space}/tokens`, with two rules:
+
+- **Nothing beyond your own rights.** Every scope in `allow` must be covered by the minter's own grants. Rights everyone has through `public` don't count. A member who asks for more gets 403 `exceeds_rights`. Leaving `allow` out gives the invitee what the inviter holds.
+- **A token works only while its minter could still mint it.** Redeeming checks the minter's rights again. When an owner revokes the minter, a grant they relied on ends, or the space switches to `invite: owners`, the minter's open tokens end with state `revoked`.
+
+Everyone a member invited keeps their grant when the member is removed. Grants stand on their own, as they already outlive the token they came from. An owner removes invitees separately if they want to, and can follow who invited whom: each grant in [`GET /grants`](#managing-grants) has `invitedBy`, the minter of the token it came from.
+
+Members list, change and revoke only the tokens they minted. Revoking one removes the grants redeemed from it, as for owners, so a member can take back their own invite. Everything else under [Managing a space](#6-managing-a-space) stays with owners.
 
 ### Handing it out
 
@@ -485,7 +499,8 @@ Authorization: Bearer vt_...           optional
 {
   "id": "u_k7m2x9q4p1r8t3w6",
   "owner": false,
-  "settings": {"public": "respond", "read": "anyone", "write": {"shared": "granted", "users": "anyone", "me": "anyone"}},
+  "canInvite": true,
+  "settings": {"public": "respond", "read": "anyone", "write": {"shared": "granted", "users": "anyone", "me": "anyone"}, "invite": "members"},
   "grants": [
     {"id": "g_7d2kq9wm", "allow": ["shared/poll.*:rw"], "source": "t_3k9f2m7q", "until": null},
     {"id": "g_m4x8r2pt", "allow": ["shared/notes.*:rw"], "source": "t_9wq4n6zd", "until": 1794646400000}
@@ -494,12 +509,12 @@ Authorization: Bearer vt_...           optional
 ```
 
 - Without a visitor token, `id` is `null` and `grants` is empty. The answer then says what anyone may do.
-- A page uses it to show or hide edit controls without waiting for a 403.
+- A page uses it to show or hide edit controls without waiting for a 403. `canInvite` says whether this visitor may mint invites.
 - In a private space without a readable grant, it returns 404 `no_space` like everything else.
 
 ## 6. Managing a space
 
-Every route here needs a visitor token of an owner. Anyone else gets 403 `owner_only`, or 404 `no_space` if they can't read the space.
+Every route here needs a visitor token of an owner. Anyone else gets 403 `owner_only`, or 404 `no_space` if they can't read the space. The exception is tokens: members who [may invite](#invites-from-members) manage their own.
 
 ### Settings and deletion
 
@@ -509,7 +524,7 @@ PATCH  /v1/{space}        {"write": {"users": "anyone"}}
 DELETE /v1/{space}                                                → 200 {}
 ```
 
-- `PATCH` takes either `public`, which replaces both settings, or `read` and `write`, both optional. `write` may be the shorthand string or an object with some areas. Areas left out keep their value. The result must be valid, see [Settings](#settings).
+- `PATCH` takes either `public`, which replaces both access settings, or `read` and `write`, both optional, and `invite` alongside either. `write` may be the shorthand string or an object with some areas. Areas left out keep their value. The result must be valid, see [Settings](#settings).
 - `DELETE` deletes the space with all its data, tokens and grants. Waiting watches get 404 `no_space`. The name is free again afterwards.
 
 ### Managing tokens
@@ -524,12 +539,14 @@ DELETE /v1/{space}/tokens/{id}
 200
 {"items": [
   {"id": "t_3k9f2m7q", "label": "anna", "allow": ["*:rw"], "usesLeft": 9, "until": 1792054400000,
-   "grantFor": null, "state": "active", "grants": 1, "createdAt": 1791449600000, "lastRedeemedAt": 1791450000000}
+   "grantFor": null, "state": "active", "grants": 1, "createdAt": 1791449600000, "lastRedeemedAt": 1791450000000,
+   "by": "u_k7m2x9q4p1r8t3w6"}
 ]}
 ```
 
-- Token values are never shown again. The list has what the owner needs to recognise them.
-- `state` is `active`, `expired` or `used_up`. A token that can't be redeemed stays listed while any grant from it exists, and for 30 days after it ended.
+- Token values are never shown again. The list has what the owner needs to recognise them. Owners see every token, members only their own.
+- `by` is the visitor who minted the token, `null` for tokens from before this was recorded.
+- `state` is `active`, `expired`, `used_up` or `revoked` (its member minter can no longer give it). A token that can't be redeemed stays listed while any grant from it exists, and for 30 days after it ended.
 - `PATCH` changes only `uses` (uses left from now) and `until`. It extends an invite or ends it early. `{"uses": 0}` stops new redemptions and keeps everyone who already joined.
 - `DELETE` removes the token and every grant redeemed from it.
 
@@ -547,11 +564,12 @@ DELETE /v1/{space}/grants?user=u_p1r8t3w6k7m2x9q4
 200
 {"items": [
   {"id": "g_7d2kq9wm", "user": "u_p1r8t3w6k7m2x9q4", "owner": false, "allow": ["*:rw"],
-   "source": "t_3k9f2m7q", "until": null, "createdAt": 1791450000000, "lastUsedAt": 1791459600000}
+   "source": "t_3k9f2m7q", "invitedBy": "u_k7m2x9q4p1r8t3w6", "until": null, "createdAt": 1791450000000, "lastUsedAt": 1791459600000}
 ]}
 ```
 
 - Owner grants are in the list with `"owner": true`.
+- `invitedBy` is the minter of the token the grant came from, `null` for direct grants and older tokens. Following it gives the chain of invites.
 - `DELETE ...?user=` removes everything that visitor holds in the space, ownership included.
 - An owner can remove their own owner grant. The owner token still works afterwards.
 
@@ -639,6 +657,7 @@ The body is optional. An empty body creates a private space with a generated nam
 | `name` | create exactly this name instead. It must follow the [naming rule](#space-name). Can't be combined with `label` |
 | `public` | `none`, `read`, `respond` or `all`, see [The public shorthand](#the-public-shorthand). Left out: `none`, private |
 | `read`, `write` | the space's [settings](#settings) in full, instead of `public` |
+| `invite` | `members` (default) or `owners`, who may mint invites |
 
 - The caller becomes the space's owner. The response has the [owner token](#owner-token), shown once, and the caller's visitor `id`.
 - Without a visitor token, a new visitor is created and becomes the owner. The response then also has `token`, the new visitor token, which the client must save before anything else.
@@ -1452,7 +1471,7 @@ These seven are the module's only exports. There is no default export.
 ### Opening, creating and sharing
 
 ```ts
-createSpace(opts?: { label?, name?, public?, read?, write?, server? }): Promise<{ space: string, ownerToken: string }>
+createSpace(opts?: { label?, name?, public?, read?, write?, invite?, server? }): Promise<{ space: string, ownerToken: string }>
 takeInvite(param = "t"): string | null        // reads #t=... from location.hash and removes it from the address bar
 inviteLink(token: string, base = location.href): string   // base with t=token added to its fragment
 
@@ -1466,7 +1485,8 @@ type Access = {
   joined: boolean,               // an invite was redeemed by this call
   inviteFailed: boolean,         // the link had an invite that was unknown, expired or used up
   id: string | null, owner: boolean,
-  settings: { public: "none" | "read" | "respond" | "all" | "custom", read: "anyone" | "granted", write: { shared, users, me } } | null,
+  canInvite: boolean,            // may mint invites: an owner, or a member when the space allows it
+  settings: { public: "none" | "read" | "respond" | "all" | "custom", read: "anyone" | "granted", write: { shared, users, me }, invite: "members" | "owners" } | null,
   grants: { id, allow: string[], source: string, until: number | null }[],
   can(method: "read" | "write", area: "shared" | "users" | "me", key?: string): boolean   // evaluated locally
 }
@@ -1476,7 +1496,7 @@ type Invite = { link: string, token: string, id: string, allow: string[], uses: 
 
 - **`db.open()`** is how every page starts. It takes an invite from the URL with `takeInvite()` unless `invite` is given, redeems it with `join` if there is one, then asks `access`. It never throws for `no_space` or `invite_invalid`. It returns `inside: false` or `inviteFailed: true`, so the page can show a plain message. A page opened by the space's owner, a member, or anyone in a public space gets `inside: true`.
 - **`createSpace`** makes the caller the owner and defaults to private. `public` takes `none`, `read`, `respond` or `all`. Show `ownerToken` to the person once and tell them to keep it. The client doesn't store it.
-- **`db.share()`** mints an access token and returns the link to send, built with `inviteLink(token, base)`. `base` defaults to the current page. It takes the server's defaults: `member`, 10 uses, 7 days. `allow` takes `"member"`, `"viewer"` or a list of scopes.
+- **`db.share()`** mints an access token (owners, and members who may invite) and returns the link to send, built with `inviteLink(token, base)`. `base` defaults to the current page. It takes the server's defaults: `member`, 10 uses, 7 days. `allow` takes `"member"`, `"viewer"` or a list of scopes.
 - `takeInvite` keeps other fragment parameters, so `#room=...&t=at_...` becomes `#room=...`. `inviteLink` keeps them too: `inviteLink(token)` on a page at `/chat/#room=x` gives `/chat/#room=x&t=at_...`.
 - `db.join` sends the stored visitor token if there is one, as the server requires. Use it directly only for tokens that don't come from the URL, such as one typed into a form.
 - `access().can()` applies the [access rule](#the-access-rule) to the answer locally, for showing and hiding controls.
@@ -1500,20 +1520,23 @@ cancel()                                    // optional cancellation
 
 Use `opensAt` a little in the future to start a round together, and `ifBefore: closesAt` to enforce its deadline. Plain-key `t` is server processing time; series `t` remains point time and may be supplied by the caller. A quiz should use plain answer keys when server timestamps matter.
 
-### Owner calls
-
-Every method needs the visitor to be an owner and throws `owner_only` otherwise.
+### Invites and owner calls
 
 ```ts
-db.owner.settings(patch: { public? } | { read?, write? }): Promise<Settings>
+db.tokens.create(opts?: { label?, allow?, uses?, until?, grantFor? }): Promise<{ id, token, by, ... }>
+db.tokens.list(): Promise<TokenInfo[]>          // owners: every token; members: their own
+db.tokens.update(id, { uses?, until? }): Promise<TokenInfo>
+db.tokens.revoke(id): Promise<void>
+```
+
+`db.tokens` and `db.share()` work for owners, and for members unless the space says `invite: "owners"` (`access().canInvite`). A member's token gives at most what they hold; without `allow` it gives exactly that. See [Invites from members](#invites-from-members).
+
+Every `db.owner` method needs the visitor to be an owner and throws `owner_only` otherwise.
+
+```ts
+db.owner.settings(patch: { public?, invite? } | { read?, write?, invite? }): Promise<Settings>
 db.owner.deleteSpace(): Promise<void>
 db.owner.rotateOwnerToken(): Promise<string>
-
-db.owner.tokens.create(opts?: { label?, allow?, uses?, until?, grantFor? }): Promise<{ id, token, ... }>
-db.owner.tokens.list(): Promise<TokenInfo[]>
-db.owner.tokens.update(id, { uses?, until? }): Promise<TokenInfo>
-db.owner.tokens.revoke(id): Promise<void>
-
 db.owner.grants.list(opts?: { user? }): Promise<Grant[]>
 db.owner.grants.add(user, opts?: { allow?, until?, owner? }): Promise<Grant>
 db.owner.grants.revoke(id): Promise<void>

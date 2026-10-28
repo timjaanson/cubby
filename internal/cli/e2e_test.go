@@ -77,8 +77,8 @@ func TestCLISharing(t *testing.T) {
 	if out, _ := cli(t, owner, "token", "ls", space); !strings.Contains(out, "used_up") || !strings.Contains(out, "anna") {
 		t.Fatalf("token ls: %q", out)
 	}
-	if _, code := cli(t, member, "token", "ls", space); code != 3 {
-		t.Fatalf("member token ls: %d", code)
+	if out, code := cli(t, member, "token", "ls", space); code != 0 || strings.Contains(out, "anna") {
+		t.Fatalf("member token ls shows only their own: %d %q", code, out)
 	}
 	out, _ = cli(t, owner, "grant", "ls", space)
 	var memberGrant string

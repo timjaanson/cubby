@@ -196,9 +196,16 @@ func TestInvites(t *testing.T) {
 	if s, _, b := c.req("POST", sp+"/tokens", `{"allow":"editor"}`, bearer(own.Token)...); s != 400 || errCode(b) != "invalid_scope" {
 		t.Fatalf("bad preset: %d %s", s, b)
 	}
-	// Members aren't owners.
-	if s, _, b := c.req("POST", sp+"/tokens", ``, m...); s != 403 || errCode(b) != "owner_only" {
+	// Members invite by default, and see only their own tokens.
+	if s, _, b := c.req("POST", sp+"/tokens", `{"label":"from member"}`, m...); s != 201 || !strings.Contains(b, `"allow":["*:rw"]`) {
 		t.Fatalf("member mint: %d %s", s, b)
+	}
+	if _, _, b := c.req("GET", sp+"/tokens", "", m...); strings.Count(b, `"id"`) != 1 || !strings.Contains(b, "from member") {
+		t.Fatalf("member list: %s", b)
+	}
+	// Owner-only routes stay owner-only.
+	if s, _, b := c.req("GET", sp+"/grants", "", m...); s != 403 || errCode(b) != "owner_only" {
+		t.Fatalf("member grants: %d %s", s, b)
 	}
 
 	// The list shows state and grant counts, never token values.

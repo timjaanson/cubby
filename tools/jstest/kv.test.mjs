@@ -41,17 +41,26 @@ await new Promise((res, rej) => {
 me = await stranger.open({ invite: inv.token })
 assert(!me.inside && me.inviteFailed, "used invite")
 
-// Members can't do owner things.
-err = await anna.owner.tokens.list().catch(e => e)
+// Members can't do owner things, but they can invite, within their own rights.
+err = await anna.owner.grants.list().catch(e => e)
 assert(err.code === "owner_only", "member owner call " + err.code)
+assert((await anna.access()).canInvite === true && me.canInvite === false, "member canInvite, stranger not")
+const fromAnna = await anna.share({ label: "ben", uses: 1, base: "https://page.test/board" })
+assert(fromAnna.link.includes("#t=at_") && fromAnna.allow.join() === "*:rw", "member share " + JSON.stringify(fromAnna))
+assert((await anna.tokens.list()).length === 1, "member sees own tokens")
+const ben = kv(space, opt("ben"))
+me = await ben.open({ invite: fromAnna.token })
+assert(me.inside && me.joined, "ben joins through anna")
 
 // Owner lists and removes Anna.
 const grants = await owner.owner.grants.list()
-const g = grants.find(g => !g.owner)
-assert(g && g.source === inv.id, "grants list")
+const g = grants.find(g => g.source === inv.id)
+const annaId = await anna.id()
+assert(g && g.user === annaId && grants.some(x => x.invitedBy === annaId), "grants list with chain " + JSON.stringify(grants))
 await owner.owner.grants.revokeUser(g.user)
 err = await anna.shared.get("item.1").catch(e => e)
 assert(err.code === "no_space", "removed member")
+assert((await ben.shared.get("item.1")).text === "milk", "ben stays after anna is removed")
 
 // Settings: open it up for reading.
 const st = await owner.owner.settings({ public: "read" })

@@ -81,6 +81,7 @@ func (s *Server) createSpace(c *reqCtx) error {
 		Public json.RawMessage `json:"public"`
 		Read   json.RawMessage `json:"read"`
 		Write  json.RawMessage `json:"write"`
+		Invite json.RawMessage `json:"invite"`
 	}
 	if err := decodeBody(c, &in); err != nil {
 		return err
@@ -94,7 +95,7 @@ func (s *Server) createSpace(c *reqCtx) error {
 	if in.Name != "" && !names.ValidSpace(in.Name) {
 		return apierr.InvalidSpace(names.SuggestFor(in.Name))
 	}
-	settings, err := access.ApplyInput(access.Private, in.Public, in.Read, in.Write)
+	settings, err := access.ApplyInput(access.Private, in.Public, in.Read, in.Write, in.Invite)
 	if err != nil {
 		return apierr.InvalidSettings(err.Error())
 	}
@@ -228,11 +229,12 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 		if err != nil {
 			return err
 		}
-		c.json(200, map[string]any{"id": id, "owner": rights.Owner, "settings": rights.Settings, "grants": grants, "usage": usage, "limits": s.spaceLimits(space)})
+		c.json(200, map[string]any{"id": id, "owner": rights.Owner, "canInvite": c.visitor != "" && rights.CanInvite(),
+			"settings": rights.Settings, "grants": grants, "usage": usage, "limits": s.spaceLimits(space)})
 		return nil
 	}
 
-	// Everything else is for owners.
+	// Everything else needs a visitor: tokens for anyone who may invite, the rest for owners.
 	if c.visitor == "" {
 		if c.tokErr != nil {
 			return c.tokErr
@@ -240,7 +242,14 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 		return apierr.MissingToken
 	}
 	if !rights.Owner {
-		return apierr.OwnerOnly
+		if len(rest) == 0 || rest[0] != "tokens" || !rights.CanInvite() {
+			return apierr.OwnerOnly
+		}
+	}
+	// Members see and change only the tokens they minted.
+	by := ""
+	if !rights.Owner {
+		by = c.visitor
 	}
 
 	switch {
@@ -280,12 +289,12 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 			if err := checkParams(c.r); err != nil {
 				return err
 			}
-			return s.mintToken(c, space)
+			return s.mintToken(c, space, rights)
 		case http.MethodGet, http.MethodHead:
 			if err := checkParams(c.r); err != nil {
 				return err
 			}
-			items, err := s.store.ListTokens(space)
+			items, err := s.store.ListTokens(space, by)
 			if err != nil {
 				return err
 			}
@@ -304,9 +313,9 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 		}
 		switch m {
 		case http.MethodPatch:
-			return s.patchToken(c, space, id)
+			return s.patchToken(c, space, id, by)
 		case http.MethodDelete:
-			if err := s.store.DeleteToken(space, id); err != nil {
+			if err := s.store.DeleteToken(space, id, by); err != nil {
 				return err
 			}
 			c.json(200, map[string]any{})
@@ -379,11 +388,12 @@ func (s *Server) patchSettings(c *reqCtx, space string, cur access.Settings) err
 		Public json.RawMessage `json:"public"`
 		Read   json.RawMessage `json:"read"`
 		Write  json.RawMessage `json:"write"`
+		Invite json.RawMessage `json:"invite"`
 	}
 	if err := decodeBody(c, &in); err != nil {
 		return err
 	}
-	st, err := access.ApplyInput(cur, in.Public, in.Read, in.Write)
+	st, err := access.ApplyInput(cur, in.Public, in.Read, in.Write, in.Invite)
 	if err != nil {
 		return apierr.InvalidSettings(err.Error())
 	}
@@ -400,7 +410,11 @@ const (
 	defaultTokenTTL  = 7 * 24 * time.Hour
 )
 
-func (s *Server) mintToken(c *reqCtx, space string) error {
+// exceedsRights: a member asked to hand out rights they don't hold.
+var exceedsRights = &apierr.Error{Status: 403, Code: "exceeds_rights",
+	Message: "An invite can only give rights you hold yourself. Leave allow out to give what you have."}
+
+func (s *Server) mintToken(c *reqCtx, space string, rights *access.Rights) error {
 	var in struct {
 		Label    string          `json:"label"`
 		Allow    json.RawMessage `json:"allow"`
@@ -418,8 +432,16 @@ func (s *Server) mintToken(c *reqCtx, space string) error {
 	if err != nil {
 		return scopeErr(err)
 	}
+	if !rights.Owner {
+		if in.Allow == nil {
+			allow = rights.OwnAllow() // an invite to have what the inviter has
+		}
+		if len(allow) == 0 || !rights.CanGive(allow) {
+			return exceedsRights
+		}
+	}
 	now := time.Now()
-	spec := store.TokenSpec{Label: in.Label, Allow: allow}
+	spec := store.TokenSpec{By: c.visitor, Label: in.Label, Allow: allow}
 
 	uses := int64(defaultTokenUses)
 	spec.Uses = &uses
@@ -467,7 +489,7 @@ func (s *Server) mintToken(c *reqCtx, space string) error {
 	return nil
 }
 
-func (s *Server) patchToken(c *reqCtx, space, id string) error {
+func (s *Server) patchToken(c *reqCtx, space, id, by string) error {
 	var in struct {
 		Uses  json.RawMessage `json:"uses"`
 		Until json.RawMessage `json:"until"`
@@ -496,7 +518,7 @@ func (s *Server) patchToken(c *reqCtx, space, id string) error {
 			ch.Until = &ms
 		}
 	}
-	info, err := s.store.UpdateToken(space, id, ch)
+	info, err := s.store.UpdateToken(space, id, by, ch)
 	if err != nil {
 		return err
 	}

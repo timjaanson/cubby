@@ -827,25 +827,27 @@ export function kv(space, opts = {}) {
         return accessFrom(await call("GET", "access", { auth: false }), { joined, inviteFailed })
       } catch (err) {
         if (err.code !== "no_space") throw err
-        return makeAccess({ inside: false, joined, inviteFailed, id: ident.current()?.id ?? null, owner: false, settings: null, grants: [] })
+        return makeAccess({ inside: false, joined, inviteFailed, id: ident.current()?.id ?? null, owner: false, canInvite: false, settings: null, grants: [] })
       }
     },
     // An invite link to send: this page (or base) with #t=at_... added.
     async share(o = {}) {
       const { base, ...rest } = o
-      const t = await db.owner.tokens.create(rest)
+      const t = await db.tokens.create(rest)
       return { link: inviteLink(t.token, base), token: t.token, id: t.id, allow: t.allow, uses: t.uses, until: t.until }
+    },
+    // Invites. Owners, and members unless the space says invite: "owners".
+    // Members see and change only their own, and give at most what they hold.
+    tokens: {
+      create: (o = {}) => call("POST", "tokens", { body: tokenBody(o, true) }),
+      list: async () => (await call("GET", "tokens")).items,
+      update: (id, o = {}) => call("PATCH", "tokens/" + encodeURIComponent(id), { body: tokenBody(o, false) }),
+      revoke: async id => { await call("DELETE", "tokens/" + encodeURIComponent(id)) },
     },
     owner: {
       settings: async patch => (await call("PATCH", "", { body: patch })).settings,
       deleteSpace: async () => { await call("DELETE", "") },
       rotateOwnerToken: async () => (await call("POST", "owner-token")).owner,
-      tokens: {
-        create: (o = {}) => call("POST", "tokens", { body: tokenBody(o, true) }),
-        list: async () => (await call("GET", "tokens")).items,
-        update: (id, o = {}) => call("PATCH", "tokens/" + encodeURIComponent(id), { body: tokenBody(o, false) }),
-        revoke: async id => { await call("DELETE", "tokens/" + encodeURIComponent(id)) },
-      },
       grants: {
         list: async (o = {}) => (await call("GET", "grants", { query: { user: o.user } })).items,
         add: (user, o = {}) => {
@@ -948,8 +950,8 @@ export async function createSpace(o = {}) {
   const fetchFn = f || globalThis.fetch.bind(globalThis)
   const ident = identity(server, tokenKey || "cubby:" + server, fetchFn)
   for (const k of Object.keys(fields)) {
-    if (!["label", "name", "public", "read", "write"].includes(k)) {
-      throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are label, name, public, read, write.`)
+    if (!["label", "name", "public", "read", "write", "invite"].includes(k)) {
+      throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are label, name, public, read, write, invite.`)
     }
   }
   let res

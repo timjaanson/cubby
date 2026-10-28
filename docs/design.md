@@ -134,7 +134,7 @@ space              "poll-cedar-pilot-mango-frost"     settings: read, write per 
 - **Visitor** is an anonymous identity, one per browser, script or device. Its visitor token (`vt_…`) goes in localStorage or a config file and is the only credential ever sent on a request.
 - **Settings** say what a visitor may do without a grant: `read` is `anyone` or `granted`, and `write` is `anyone` or `granted` for each area. The default is `granted` everywhere, a private space. The `public` shorthand names the useful combinations: `none`, `read`, `respond`, `all`. See [Who may do what](#who-may-do-what).
 - **Access token** (`at_…`) is an invite an owner mints. Redeeming it with `join` gives the visitor a **grant**, which is what later requests are checked against.
-- **Owner** is a visitor who may do everything in the space, including settings, invites and deleting. The **owner token** (`ot_…`) is the recovery key that makes another identity an owner.
+- **Owner** is a visitor who may do everything in the space, including settings, every invite and deleting. Members may mint invites too, within their own rights. The **owner token** (`ot_…`) is the recovery key that makes another identity an owner.
 - **shared/** is the space's common data.
 - **users/{id}/** is each visitor's public data: a vote, a name, a score, a message. Everyone who can read the space can read it, nobody else can change it. `users/*/vote` lists every visitor's `vote` at once.
 - **me/** is the visitor's private data in this space.
@@ -163,7 +163,7 @@ Visitors always add their own part in `users/{id}/`, which nobody else can chang
 Sharing is the step every private space needs, so it's made short:
 
 - **In a page:** `db.share({ label: "Anna" })` returns a link with the invite in its fragment, `page#t=at_…`. The page that opens it starts with `db.open()`, which redeems the invite and says whether the visitor is in.
-- **Ready-made:** `<cubby-share space="…">` from `/share.js` is a panel for owners: invite one person or a group, copy or share the link, show a QR code, see and remove members, change who can see the space, and keep the recovery key.
+- **Ready-made:** `<cubby-share space="…">` from `/share.js` is a panel for owners and members: invite one person or a group, copy or share the link, show a QR code, see and remove members, change who can see the space, and keep the recovery key.
 - **From a shell:** `cubby token new <space> --label anna --link https://…/page/`.
 - **For coding agents:** kv.js opens with a short guide comment, and [agents.md](agents.md) has the longer version: what to ask the user, which `public` value fits, and how to wire invites.
 
@@ -202,15 +202,16 @@ In a space with `public` set to `read`, `respond` or `all`, reads need no token,
 
 ### Invites and grants
 
-An owner mints an access token, hands it over, usually as a link with `#t=at_…`, and the recipient redeems it once:
+An owner, or any member, mints an access token, hands it over, usually as a link with `#t=at_…`, and the recipient redeems it once:
 
 ```
-POST /v1/{space}/tokens  {"label": "anna"}      → {"token": "at_…", "uses": 10, "until": …}    owner
+POST /v1/{space}/tokens  {"label": "anna"}      → {"token": "at_…", "uses": 10, "until": …}    owner or member
 POST /v1/{space}/join    {"token": "at_…"}      → the grant, plus a new visitor token if you had none
 ```
 
 - **Defaults clean up after themselves.** A token with no options is a full member (`*:rw`), redeemable by 10 visitors within 7 days. Whichever runs out first ends it. Unlimited uses or no end are possible but have to be asked for.
 - **The token is the invite, the grant is the membership.** Token limits only decide who can still join. A grant lasts until revoked, or for `grantFor` after joining if the token says so.
+- **Members invite too.** By default anyone in the space can pass it on, with at most the rights they hold. Their invitees stay if the inviter is later removed, and owners see who invited whom. `invite: "owners"` keeps invites to owners.
 - **Grants stack.** A visitor can hold several, from several tokens or direct grants, and rights are their union. Revoking one leaves the others.
 - **Scopes** are `AREA[/TARGET]:r|w|rw`, like `shared/status.*:w` for a script that writes status keys and nothing else.
 - **Owners manage everything** with plain requests: list and revoke tokens, list, add and revoke grants, change settings, rotate the owner token, delete the space. A direct grant to a visitor ID they can already see, such as a voter in `users/*/`, needs no token.
@@ -497,6 +498,8 @@ To show a list first and follow it after, pass the list itself: `watch("game.*",
 | Generated names are four random words; any name of 16+ characters is accepted | A random alphanumeric suffix, any name, or names derived from the page URL | Words are easy to read out and type, and 4 of 4096 give 48 bits. Short names collide by accident. URL-derived names tie the store to how pages are hosted. A per-address limit on distinct missing spaces makes guessing slow. |
 | Token in localStorage, sent as a header | Cookie | A cookie from another domain counts as third-party. Safari and Brave block it, Firefox partitions it. |
 | Scopes as `area/target:rights`, within one space | Roles | Uses the same prefix patterns as the API, and an owner sees all of a grant's access in one line. |
+| Members may invite by default, within their own rights | Only owners invite; or members invite with any rights | Passing a link on is what people do anyway. Without it, pages kept an owner's unlimited token on every device so anyone could show a QR code. Capping at the minter's rights makes it delegation, not escalation. |
+| Invitees stay when their inviter is removed | Revoking a member's whole invite tree | Grants already outlive their tokens, and nobody expects a friend-of-a-friend to vanish. The removed member's unused invites end, since they no longer hold what those hand out. |
 | Opaque random tokens, server state | JWT | Tokens are redeemed once and turned into a grant row, so stateless verification buys nothing. JWT would add 250 to 400 bytes per link or QR code, readable contents, frozen claims and known pitfalls. Revoking is deleting a row. Signed owner keys are in Later if a server should never hold owner power. |
 | Value is text, JSON detected by parsing | Arbitrary bytes with client content type | Arbitrary content types make the server free hosting for phishing pages. `fetch` sends `text/plain` for JSON strings anyway. |
 | Raw value as the body | `{ value, version }` wrapper | People would PUT the wrapper back and end up with nested wrappers. |
