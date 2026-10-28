@@ -46,6 +46,34 @@ async page => {
     return { rtt: timing.rtt, error: Math.abs(now - Date.now()) }
   })
   if (clock.error > 1000) throw Error('Browser clock offset incorrect')
+  // A member gets the panel too: invites and their own open links, nothing an owner manages.
+  const space = await page.evaluate(async base => {
+    const { kv } = await import(base + '/kv.js')
+    const space = document.querySelector('cubby-share').getAttribute('space')
+    const { token } = await window.testDB.tokens.create({ uses: 1 })
+    const key = 'member-check-' + Date.now() // a new visitor every run
+    const me = await kv(space, { server: base, tokenKey: key }).open({ invite: token })
+    if (!me.canInvite) throw Error('member canInvite')
+    localStorage.setItem('cubby:' + base, localStorage.getItem(key)) // the panel's visitor, from the next page load
+    return space
+  }, base)
+  await page.goto(base + '/browser-check')
+  await page.evaluate(async ([base, space]) => {
+    await import(base + '/share.js')
+    const el = document.createElement('cubby-share')
+    el.setAttribute('server', base)
+    el.setAttribute('space', space)
+    document.body.append(el)
+  }, [base, space])
+  await page.getByRole('button', { name: 'Share', exact: true }).click()
+  await page.getByRole('button', { name: 'Create personal link', exact: true }).click()
+  await page.getByRole('button', { name: 'Copy', exact: true }).waitFor()
+  const memberPanel = await page.evaluate(() => {
+    const root = document.querySelector('cubby-share').shadowRoot
+    const heads = [...root.querySelectorAll('h3')].map(h => h.textContent)
+    return { heads, link: root.querySelector('input.link')?.value || '' }
+  })
+  if (memberPanel.heads.includes('People') || memberPanel.heads.includes('Who can see this') || !memberPanel.link.includes('#t=at_')) throw Error('member panel ' + JSON.stringify(memberPanel))
   if (errors.length) throw Error(errors.join('\n'))
-  return { recoveryOrdering: 'passed both orders', recoveryDismissal: 'passed', inviteCreation: 'passed', clock: 'passed' }
+  return { recoveryOrdering: 'passed both orders', recoveryDismissal: 'passed', inviteCreation: 'passed', clock: 'passed', memberPanel: 'passed' }
 }

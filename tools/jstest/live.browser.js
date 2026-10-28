@@ -62,7 +62,8 @@ async page => {
     const stopB = b.users.onPulse('cursor', p => { if (!p.mine) onB.push(p) })
     await sleep(200)
     const t2 = performance.now()
-    for (let i = 0; i < 30; i++) { a.user().pulse('cursor', { x: i }); b.user().pulse('cursor', { x: i }) }
+    // maxRate 0: every one of a burst must arrive, past the client throttle.
+    for (let i = 0; i < 30; i++) { a.user().pulse('cursor', { x: i }, { maxRate: 0 }); b.user().pulse('cursor', { x: i }, { maxRate: 0 }) }
     await until(() => onA.length === 30 && onB.length === 30, `pulses ${onA.length}/${onB.length}`)
     const pulseMs = performance.now() - t2
     if (await a.shared.get('cursor') !== null) throw Error('pulse was stored')

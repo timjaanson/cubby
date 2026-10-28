@@ -9,12 +9,12 @@ Needs Go 1.26 or newer. No C compiler: SQLite is pure Go, so every binary is sta
 ```sh
 go test -race ./...
 go vet ./...
-sh tools/jstest/run.sh   # kv.js, live mode and the QR encoder against a fresh local server (needs Node 22+)
+sh tools/jstest/run.sh   # kv.js, live mode, pulses, rooms, presence and the QR encoder against a fresh local server (needs Node 22+)
 ./build.sh          # writes dist/cubby-macos, dist/cubby-linux-amd64, dist/cubby-linux-arm64
 go build .           # just for this machine, writes ./cubby
 ```
 
-Browser checks run in real engines with [playwright-cli](https://github.com/microsoft/playwright-cli), against a server on port 28991. `tools/jstest/live.browser.js` covers live mode in Chromium and WebKit, `tools/jstest/share.browser.js` the share panel. Each file's first lines say how to run it.
+Browser checks run in real engines with [playwright-cli](https://github.com/microsoft/playwright-cli), against a server on port 28991. `tools/jstest/live.browser.js` covers live mode in Chromium and WebKit, `tools/jstest/presence.browser.js` a closed tab leaving presence, `tools/jstest/share.browser.js` the share panel for owners and members. Each file's first lines say how to run it.
 
 ## Code layout
 
