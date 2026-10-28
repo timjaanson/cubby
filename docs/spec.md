@@ -824,7 +824,7 @@ See [Series](#11-series).
 |---|---|
 | `GET /kv.js` | the JS client as an ES module |
 | `GET /share.js` | the share component as an ES module |
-| `GET /health` | 200 `{"ok": true, "version": "v0.13.0"}` |
+| `GET /health` | 200 `{"ok": true, "version": "vX.Y.Z"}` |
 | `OPTIONS` anything | the CORS preflight response |
 | `/v1/anon`, `/v1/whoami`, `/v1/spaces` | see [Visitors](#3-visitors) and [Create a space](#create-a-space) |
 | `/v1/{space}` and its `access`, `join`, `tokens`, `grants`, `owner-token` | see [Paths](#paths) |

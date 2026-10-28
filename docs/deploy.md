@@ -16,7 +16,7 @@ Installing it, putting it behind a reverse proxy, and looking after its data. Us
 With Go 1.26 or newer, on any OS:
 
 ```sh
-go install github.com/timjaanson/cubby@latest      # or @v0.13.0 for an exact version
+go install github.com/timjaanson/cubby@latest      # or @vX.Y.Z for an exact version
 ```
 
 Or build static binaries with `./build.sh` in a checkout, and copy the one for the machine onto its `PATH` as `cubby`:
@@ -249,9 +249,9 @@ Run it on the server machine, as the server's user or root. Pass `--data DIR` if
 Install the new binary and restart the service. Stored data carries over unless the release notes say otherwise. Live connections close with code 1001 on shutdown, and the JS client reconnects at once and resumes its watches.
 
 ```sh
-go install github.com/timjaanson/cubby@v0.13.0 && sudo install -m 755 ~/go/bin/cubby /usr/local/bin/cubby
+go install github.com/timjaanson/cubby@vX.Y.Z && sudo install -m 755 ~/go/bin/cubby /usr/local/bin/cubby
 sudo systemctl restart cubby
-curl -s localhost:28229/health          # {"ok":true,"version":"v0.13.0"}
+curl -s localhost:28229/health          # {"ok":true,"version":"vX.Y.Z"}
 ```
 
 Name the version right after a release: the Go module proxy can take a while to notice a new `@latest`.
