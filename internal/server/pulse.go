@@ -213,11 +213,17 @@ func (s *Server) pulseSend(c *reqCtx, t store.Target) error {
 	if isJSON && jsonDepth(body) > 64 {
 		return &apierr.Error{Status: 400, Code: "json_too_deep", Message: "JSON may be nested at most 64 levels."}
 	}
-	if err := s.rate(s.lim.pulsesPerVisitor, c.visitor, 1, "rate_limited"); err != nil {
-		return err
+	if c.will != willFire {
+		if err := s.rate(s.lim.pulsesPerVisitor, c.visitor, 1, "rate_limited"); err != nil {
+			return err
+		}
+		if err := s.rate(s.lim.pulsesPerIP, c.ip, 1, "rate_limited"); err != nil {
+			return err
+		}
 	}
-	if err := s.rate(s.lim.pulsesPerIP, c.ip, 1, "rate_limited"); err != nil {
-		return err
+	if c.will == willRegister {
+		c.json(200, map[string]any{})
+		return nil
 	}
 	now := time.Now()
 	ms := now.UnixMilli()

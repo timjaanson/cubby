@@ -32,6 +32,7 @@ const (
 	liveWriteWait       = 10 * time.Second // a client that can't take a frame this long is gone
 	liveReadLimit       = 256 << 10        // a full series batch fits
 	liveMaxWatches      = 20
+	liveMaxWills        = 8
 )
 
 // liveAuthWait is a variable so tests can shorten it.
@@ -47,8 +48,15 @@ const (
 var liveHeaders = []string{"ETag", "KV-By", "KV-Time", "KV-Expires", "RateLimit", "RateLimit-Policy", "Retry-After", "Allow"}
 
 type liveSet struct {
-	mu    sync.Mutex
-	conns map[*liveConn]struct{}
+	mu      sync.Mutex
+	conns   map[*liveConn]struct{}
+	closing bool // shutting down: last wills don't fire
+}
+
+func (ls *liveSet) shuttingDown() bool {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	return ls.closing
 }
 
 func (ls *liveSet) add(l *liveConn) {
@@ -70,6 +78,7 @@ func (ls *liveSet) remove(l *liveConn) {
 // reconnect at once. http.Server.Shutdown doesn't see hijacked connections.
 func (s *Server) CloseLive() {
 	s.live.mu.Lock()
+	s.live.closing = true
 	conns := make([]*liveConn, 0, len(s.live.conns))
 	for l := range s.live.conns {
 		conns = append(conns, l)
@@ -100,6 +109,13 @@ type liveConn struct {
 	visitor string
 	tokErr  *apierr.Error
 	watches map[string]*liveWatch
+	wills   map[string]liveWill // by path
+}
+
+// liveWill is a pulse the server sends when the connection ends.
+type liveWill struct {
+	visitor string
+	body    []byte
 }
 
 type liveWatch struct {
@@ -168,7 +184,7 @@ func (s *Server) liveRoute(c *reqCtx, space string) error {
 	// gets its own.
 	ctx, cancel := context.WithCancel(context.Background())
 	l := &liveConn{s: s, conn: conn, ctx: ctx, cancel: cancel, ip: c.ip, space: space,
-		addr: s.clientIP(c.r).String(), visitor: c.visitor, watches: map[string]*liveWatch{}}
+		addr: s.clientIP(c.r).String(), visitor: c.visitor, watches: map[string]*liveWatch{}, wills: map[string]liveWill{}}
 	s.live.add(l)
 	defer s.live.remove(l)
 	l.run(c.visitor != "")
@@ -186,6 +202,7 @@ func (l *liveConn) run(settled bool) {
 	defer func() {
 		l.cancel()
 		l.conn.Close(websocket.StatusNormalClosure, "")
+		l.fireWills()
 	}()
 	l.conn.SetReadLimit(liveReadLimit)
 	go l.keepalive()
@@ -354,8 +371,10 @@ func (l *liveConn) handle(data []byte) {
 		l.send(liveOut{ID: m.ID, Status: 200, Body: json.RawMessage(`{}`)})
 	case m.Op == "stop":
 		l.stop(m)
+	case m.Op == "will":
+		l.will(m)
 	case m.Op != "":
-		l.sendErr(m.ID, badMessage("op is auth, ping or stop."))
+		l.sendErr(m.ID, badMessage("op is auth, ping, stop or will."))
 	case m.Method != "":
 		l.request(m)
 	default:
@@ -435,6 +454,90 @@ func (l *liveConn) stop(m liveIn) {
 	l.mu.Unlock()
 	if m.ID != nil {
 		l.send(liveOut{ID: m.ID, Status: 200, Body: json.RawMessage(`{}`)})
+	}
+}
+
+// will registers, replaces or clears the pulse sent for this visitor when
+// the connection ends. Registering checks what sending would check, and
+// takes one pulse from the budget.
+func (l *liveConn) will(m liveIn) {
+	if m.Path == "" || !strings.HasSuffix(m.Path, "/pulse") {
+		l.sendErr(m.ID, badMessage("will takes path, a pulse path like users/{id}/here/pulse, and body or text. Without either it clears the will."))
+		return
+	}
+	if m.Body == nil && m.Text == nil {
+		l.mu.Lock()
+		delete(l.wills, m.Path)
+		l.mu.Unlock()
+		l.send(liveOut{ID: m.ID, Status: 200, Body: json.RawMessage(`{}`)})
+		return
+	}
+	if m.Body != nil && m.Text != nil {
+		l.sendErr(m.ID, badMessage("Give body (a JSON value) or text, not both."))
+		return
+	}
+	body := []byte(m.Body)
+	if m.Text != nil {
+		body = []byte(*m.Text) // as on HTTP, a value is JSON if it parses
+	}
+	l.mu.Lock()
+	_, replacing := l.wills[m.Path]
+	full := !replacing && len(l.wills) >= liveMaxWills
+	visitor, tokErr := l.visitor, l.tokErr
+	l.mu.Unlock()
+	if full {
+		l.sendErr(m.ID, &apierr.Error{Status: 429, Code: "too_many_wills", Message: "A connection holds at most 8 wills. Clear one first."})
+		return
+	}
+	rec, err := l.pulseRoute(m.Path, body, visitor, tokErr, willRegister)
+	if err != nil {
+		l.sendErr(m.ID, badMessage("path isn't a valid path."))
+		return
+	}
+	if rec.status != 200 {
+		l.send(liveOut{ID: m.ID, Status: rec.status, Body: rec.body.Bytes()})
+		return
+	}
+	l.mu.Lock()
+	l.wills[m.Path] = liveWill{visitor: visitor, body: body}
+	l.mu.Unlock()
+	l.send(liveOut{ID: m.ID, Status: 200, Body: json.RawMessage(`{}`)})
+}
+
+// pulseRoute runs POST path through route as visitor, the way an HTTP
+// pulse would go.
+func (l *liveConn) pulseRoute(path string, body []byte, visitor string, tokErr *apierr.Error, mode willMode) (*recorder, error) {
+	area, _, _ := strings.Cut(path, "/")
+	if area != "shared" && area != "me" && area != "users" || strings.ContainsAny(path, "?#") {
+		return nil, errors.New("bad path")
+	}
+	r, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://live/v1/"+l.space+"/"+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	rec := &recorder{h: http.Header{}}
+	c := &reqCtx{w: &statusWriter{ResponseWriter: rec, status: 200}, r: r, ip: l.ip, visitor: visitor, tokErr: tokErr, will: mode}
+	if err := l.s.route(c); err != nil {
+		c.fail(err)
+	}
+	return rec, nil
+}
+
+// fireWills sends what's registered once the connection is gone. Access is
+// checked again, as for any pulse. A server shutdown sends nothing.
+func (l *liveConn) fireWills() {
+	l.mu.Lock()
+	wills := l.wills
+	l.wills = nil
+	l.mu.Unlock()
+	if len(wills) == 0 || l.s.live.shuttingDown() {
+		return
+	}
+	for path, w := range wills {
+		rec, err := l.pulseRoute(path, w.body, w.visitor, nil, willFire)
+		if l.s.log != nil && err == nil {
+			l.s.log.Printf("WS will %s %d %s %s", path, rec.status, l.addr, shortHash(w.visitor))
+		}
 	}
 }
 

@@ -34,7 +34,8 @@
 // Cursors, drags, reactions? Pulses are values that are never stored:
 //   db.user().pulse("cursor", { x, y })              // to whoever listens now
 //   db.users.onPulse("cursor", p => draw(p.user, p.value))
-// Anything a late joiner needs still goes in a stored key.
+// Anything a late joiner needs still goes in a stored key. Who's here:
+//   db.users.presence("here", { value: { name } })   // .peers, .onJoin, .onLeave
 //
 // Never put an access token (at_...) or owner token (ot_...) in page source.
 // Anyone who can load the page could use it. Invite links are for sending to people.
@@ -200,6 +201,9 @@ function identity(server, tokenKey, fetchFn, fixedToken) {
   return ident
 }
 
+// Marks kv.js's own pulses, whose throttling is expected and not worth a warning.
+const QUIET = Symbol("quiet")
+
 // Pulses dropped by the client throttle, or refused by the server with 429.
 // One console.warn per 10 seconds at most, for all keys together: the first
 // right away, then a summary of what happened in between.
@@ -312,7 +316,7 @@ export function kv(space, opts = {}) {
 
   // Per path: when the last send went out, and the value waiting for the next slot.
   const throttles = new Map()
-  function throttledPulse(path, body, rate) {
+  function throttledPulse(path, body, rate, report = true) {
     if (!(rate > 0) || rate === Infinity) return sendPulse(path, body)
     const gap = 1000 / rate
     let t = throttles.get(path)
@@ -323,7 +327,7 @@ export function kv(space, opts = {}) {
     }
     if (t.waiting) {
       t.waiting.resolve(false)
-      pulseReport.count(path, "client", rate)
+      if (report) pulseReport.count(path, "client", rate)
     }
     return new Promise((resolve, reject) => {
       t.waiting = { body, resolve, reject }
@@ -443,11 +447,95 @@ export function kv(space, opts = {}) {
         const body = JSON.stringify(value)
         if (body === undefined) throw new KvError(0, "invalid_value", "That value can't be sent as JSON.")
         const path = (await pathOf(key)) + "/pulse"
-        return throttledPulse(path, body, o.maxRate ?? pulseRate)
+        return throttledPulse(path, body, o.maxRate ?? pulseRate, !o[QUIET])
       },
       onPulse: (target, onPulse, o) => listenPulses(pathOf, needsAuth, target, onPulse, o),
+      // A last will: a pulse the server sends for you when your live
+      // connection ends without you clearing it, such as a closed tab. Only
+      // with live: true; over HTTP it's kept and does nothing, so the same
+      // code works either way. Resolves with a function that clears it.
+      async will(key, value) {
+        checkKey(key)
+        checkWrite()
+        const body = JSON.stringify(value)
+        if (body === undefined) throw new KvError(0, "invalid_value", "That value can't be sent as JSON.")
+        const path = (await pathOf(key)) + "/pulse"
+        if (!live) return () => {}
+        const res = await live.setWill((await ident.get()).token, path, body)
+        if (res && !res.ok) throw await fail(res)
+        return () => live.clearWill(path)
+      },
     }
     return a
+  }
+
+  // Who else is here, from pulses on users/{id}/{key}: a heartbeat every
+  // interval with your value, a leave pulse on stop() and pagehide, and a
+  // last will with the same leave on a live connection, so a closed tab
+  // leaves at once. A peer silent for timeout counts as gone, which is how
+  // leaving shows over HTTP. peers never includes you.
+  function presence(key, o = {}) {
+    checkKey(key)
+    const interval = o.interval ?? 2000
+    const timeout = o.timeout ?? interval * 3
+    const warn = o.onError || (err => console.warn("cubby presence:", err))
+    const hasWin = typeof window !== "undefined" && typeof window.addEventListener === "function"
+    const mine = db.user()
+    let value = o.value ?? null, stopped = false, clearWill = null
+    const peers = new Map()
+    const h = {
+      peers,
+      onJoin: null, onLeave: null, onChange: null,
+      get value() { return value },
+      set(v) { value = v; beat() },
+      stop,
+    }
+    const call = (fn, ...args) => { try { fn?.(...args) } catch (err) { warn(err) } }
+    const changed = () => call(h.onChange, peers)
+    const leave = id => {
+      if (!peers.delete(id)) return
+      call(h.onLeave, id)
+      changed()
+    }
+    // The helper's own sends coalesce on purpose, so they aren't reported.
+    const beat = () => { if (!stopped) mine.pulse(key, { v: value }, { [QUIET]: true }).catch(warn) }
+    const stopListen = db.users.onPulse(key, p => {
+      if (p.mine || !p.user || stopped) return
+      const v = p.value
+      if (v && typeof v === "object" && v.left === true) return leave(p.user)
+      if (!v || typeof v !== "object" || !("v" in v)) return // not a presence pulse
+      const now = Date.now(), cur = peers.get(p.user)
+      if (!cur) {
+        peers.set(p.user, { value: v.v, since: now, seen: now })
+        call(h.onJoin, p.user, v.v)
+        changed()
+        beat() // so the newcomer sees us now, not on our next heartbeat
+      } else {
+        cur.seen = now
+        if (JSON.stringify(cur.value) !== JSON.stringify(v.v)) { cur.value = v.v; changed() }
+      }
+    }, { onError: o.onError })
+    const beatTimer = setInterval(beat, interval)
+    const sweepTimer = setInterval(() => {
+      const now = Date.now()
+      for (const [id, p] of peers) if (now - p.seen > timeout) leave(id)
+    }, Math.min(1000, interval / 2))
+    const goodbye = () => mine.pulse(key, { left: true }, { maxRate: 0 }).catch(() => {})
+    if (hasWin) window.addEventListener("pagehide", goodbye)
+    mine.will(key, { left: true }).then(c => { if (stopped) c(); else clearWill = c }, warn)
+    beat()
+    function stop() {
+      if (stopped) return
+      stopped = true
+      clearInterval(beatTimer)
+      clearInterval(sweepTimer)
+      stopListen()
+      clearWill?.()
+      if (hasWin) window.removeEventListener("pagehide", goodbye)
+      goodbye()
+      peers.clear()
+    }
+    return h
   }
 
   async function list(pathOf, auth, target, o = {}) {
@@ -876,6 +964,7 @@ export function kv(space, opts = {}) {
       list: (target, o) => list(async t => `users/*/${t}`, false, target, o),
       watch: (target, onChange, o) => watch(async t => `users/*/${t}`, false, target, onChange, o),
       onPulse: (target, onPulse, o) => listenPulses(async t => `users/*/${t}`, false, target, onPulse, o),
+      presence: (key, o) => presence(key, o),
     },
     id: async () => (await ident.get()).id,
     // status: "http" without live (or after falling back), else "connecting",
@@ -1113,6 +1202,7 @@ function makeLive(url, WS) {
   let backoff = 0, notBefore = 0, retryTimer = null, pingTimer = null, hiddenTimer = null
   let paused = false // hidden long enough that the socket was closed
   const pending = new Map(), subs = new Map(), waiters = new Set(), openers = new Set()
+  const wills = new Map() // path -> { token, body }, registered again on every open
 
   const api = { onStatus: null, get status() { return status } }
   const setStatus = next => {
@@ -1147,6 +1237,7 @@ function makeLive(url, WS) {
       sentToken = undefined
       setStatus("open")
       schedulePing()
+      for (const [path, w] of wills) sendWill(path, w).catch(err => console.warn("cubby will:", err))
       settle()
       for (const fn of [...openers]) fn()
     }
@@ -1242,6 +1333,15 @@ function makeLive(url, WS) {
     sock.send(JSON.stringify({ id: nextId++, op: "auth", token: t }))
   }
 
+  function sendWill(path, w) {
+    authAs(w.token)
+    return send(id => {
+      let m = `{"id":${id},"op":"will","path":${JSON.stringify(path)}`
+      if (w.body !== undefined) m += `,"body":${w.body}`
+      return m + "}"
+    }, LIVE_REQUEST_WAIT).then(frameResponse)
+  }
+
   if (hasDoc) {
     document.addEventListener("visibilitychange", () => {
       clearTimeout(hiddenTimer)
@@ -1273,6 +1373,19 @@ function makeLive(url, WS) {
     isOpen: () => status === "open" && sock?.readyState === 1,
     ensure: connect,
     onOpen(fn) { openers.add(fn); return () => openers.delete(fn) },
+    // A last will: the server sends it as a pulse when this socket ends.
+    // Kept here and registered again whenever a socket opens. Resolves with
+    // the server's answer, or null when no socket is open yet.
+    async setWill(token, path, body) {
+      wills.set(path, { token, body })
+      connect()
+      if (status !== "open") return null
+      return sendWill(path, { token, body })
+    },
+    clearWill(path) {
+      if (!wills.delete(path) || status !== "open") return
+      sendWill(path, { token: sentToken }).catch(() => {})
+    },
     // Resolves true once open, false if it isn't open within ms.
     ready(ms) {
       if (status === "open") return Promise.resolve(true)

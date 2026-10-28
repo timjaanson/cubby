@@ -1,82 +1,6 @@
 # Plans
 
-This file keeps agreed work that isn't built yet, deferred work, open candidates, what was decided against and why, and a short record of what was built from earlier plans. Built features have their contracts in [spec.md](spec.md).
-
-## Agreed, not built
-
-Agreed 2026-10-28, after building a marble maze demo on live connections and pulses. Each page there needed the same glue: a room link, a hand-made presence map, and its own pulse throttle. The server parts stay generic. Nothing on the server knows about rooms or presence.
-
-Suggested order: pulse throttle, then delegated invites with the room helper, then last will with the presence helper.
-
-### Pulse throttle in kv.js (client only)
-
-Pulses for a key are rate limited in the client by default, so a page that pulses on every `pointermove` doesn't run into the server's 60/s limit and 429s.
-
-- Per area and key, at most `maxRate` sends per second. Default 20. Set per call with `pulse(key, value, { maxRate })`, or for the client with `kv(space, { pulseRate })`. `maxRate: 0` turns the throttle off for that call.
-- Latest value wins. A pulse that arrives while the key is waiting for its next slot replaces the waiting one. The newest value is always sent once the slot opens, so the last cursor position or tilt is never lost, only the ones in between.
-- `pulse()` resolves `true` when its value was sent, and `false` when a newer value replaced it before sending.
-- Discrete events that must all arrive (reactions, button presses) either stay under the rate or use `maxRate: 0` and take the server limit. The docs say so.
-- Warnings: one `console.warn` per 10 seconds at most, for all keys together. The first throttling in a quiet period warns at once, then the client collects counts and prints one summary per window, such as `cubby: throttled pulses in the last 10 s: users/u_.../cursor 412 (limit 20/s), shared/confetti 3. Pass { maxRate } to change.` Server 429s on pulses are counted and reported in the same line. Nothing is logged while nothing is throttled.
-
-### Delegated invites (server and client)
-
-Members can invite other people, never with more rights than they hold themselves.
-
-- A new space setting, `invite`: `"owners"` (default, as today) or `"members"`. Owners change it like the other settings. `createSpace({ invite: "members" })` sets it at creation.
-- With `"members"`, any visitor holding a grant may `POST /v1/{space}/tokens`. The token's `allow` must be covered by the minter's own grants. Rights from `public` settings don't count, since everyone has them anyway. A member's token can't outlast the minter's grant: `until` and `grantFor` are capped at the grant's `until`. Otherwise it's an ordinary token, with the usual defaults (10 uses, 7 days).
-- Members list and revoke only the tokens they minted. Owners see and revoke all of them, each with `by`, the minter.
-- Chains are visible. A grant's `source` names the token, and the token names its minter, so an owner can follow who invited whom. `GET /grants` gains `invitedBy` for each grant, from that link.
-- Revoking a member keeps everyone they invited. Their grants stand on their own, as grants already outlive their tokens. The revoked member's unredeemed tokens are revoked with them, since they no longer hold the rights those tokens hand out. Owners revoke invitees separately if they want to.
-- Switching `invite` back to `"owners"` stops members minting and revokes their unredeemed tokens. Existing grants stay.
-- Members' tokens count towards the existing 1000 tokens per space.
-- kv.js: `db.share()` works for members when the space allows it. `Access` gains `canInvite`. The share panel shows the invite part to members.
-
-### Room helper in kv.js (client only, uses delegated invites)
-
-One call for the usual "a page is a room, its link lets others in" setup:
-
-```js
-const room = await openRoom("marble", { live: true })
-// room.db       the kv() client for the room's space
-// room.me       the Access from db.open()
-// room.created  true if this call created the space
-// await room.link()  a reusable invite link for this room, minted once per device and remembered
-```
-
-- Reads the space from the URL fragment (`#s=...`, parameter configurable) or the space remembered in localStorage for that label, and creates one with `invite: "members"` when there's neither and `create` isn't `false`.
-- Calls `db.open()`, which redeems `#t=...`, then rewrites the fragment to `#s=<space>` so a reload stays in the room.
-- `room.link()` mints a token with `uses: null, until: null` on first use and keeps it in localStorage per device and space. Any member's device can do this, so nobody keeps someone else's token.
-- `room.me.inside === false` means the room is gone or the link is bad. The page decides what to show. `room.forget()` clears the remembered space, for a "start a new room" button.
-
-### Last-will pulses (server, live connections only)
-
-A pulse the server sends for a client when its live connection ends without the client clearing it. Borrowed from MQTT's last will. The server doesn't know what it means.
-
-- On a live connection: `{"op":"will","path":"users/u_.../here/pulse","body":{...}}` registers or replaces the will for that path. The same message without `body` clears it. At most 8 wills per connection.
-- The path and body follow the rules for sending a pulse, and are checked at registration: write access to the key, 4 KB. Registering costs one pulse from the pulse budget. Sending it costs nothing.
-- It fires when the connection closes for any reason other than a server shutdown: tab closed, network gone, ping timeout, the client closing after five minutes hidden. Access is checked again before sending, and a will the visitor may no longer send is dropped.
-- A server shutdown doesn't fire wills. The window is lost on restart anyway, and clients reconnect.
-- Over HTTP there is no connection to lose, so there is no will.
-- It's a plain pulse. It never touches stored data, which keeps the rules below intact.
-- kv.js: `area.will(key, value)` returns a function that clears it. The client keeps its wills and registers them again whenever its socket opens. On HTTP it keeps them and does nothing, so page code is the same either way.
-
-### Presence helper in kv.js (client, uses last will when available)
-
-```js
-const here = db.users.presence("here", { value: { name: "Mac" } })
-here.peers                 // Map: visitor id -> { value, since, seen }, without me
-here.onJoin = (id, value) => {}
-here.onLeave = (id) => {}
-here.onChange = (peers) => {}   // after any join, leave or value change
-here.set({ name: "Mac", busy: true })   // sent at once, through the throttle
-here.stop()                // sends a leave pulse, clears the will, stops listening
-```
-
-- Built on pulses to `users/{me}/{key}`. A heartbeat every `interval` (default 2 s) with the current value, a value change sent at once, and a leave pulse on `stop()` and on `pagehide`.
-- Registers a will with the leave pulse. On a live connection a closed tab leaves within about one round trip.
-- A peer silent for `timeout` (default three intervals, 6 s) counts as gone. Over HTTP that's the only way to notice a leave, and it's fine, so page code doesn't change between transports.
-- The helper owns the pulse format, `{"v": value}` for presence and `{"left": true}` for leaving. Other pulses on the same key are ignored, so pages use their own keys for fast data.
-- Peers appear on their next heartbeat, so a new page sees everyone within one interval. Starting listeners from the beginning of the pulse window was considered and isn't needed for this.
+Nothing is agreed and waiting to be built. This file keeps deferred work, open candidates, what was decided against and why, and a short record of what was built from earlier plans. Built features have their contracts in [spec.md](spec.md).
 
 ## Deferred lease helpers
 
@@ -113,3 +37,13 @@ Released in v0.12.0. One WebSocket per space at `/v1/{space}/live`, carrying dat
 ## Done: pulses
 
 Released in v0.13.0. The messages that aren't stored are called pulses: `POST {key}/pulse` sends, `GET {key or pattern}/pulse` listens (long poll over HTTP, a stream on a live connection). Same keys, areas and rights as stored data. Own rate limits (60/s per visitor, burst 120; 300/s per IP), 4 KB each. A per-space in-memory window (10 s, 1024 pulses, 256 KB) with a server-wide sequence lets HTTP listeners and reconnecting sockets catch up, and reports `missed` instead of blocking. kv.js `pulse()` and `onPulse()`, CLI `pulse` and `pulses`. Senders get their own pulses back, marked `mine`. Contract: [spec.md](spec.md#12-pulses).
+
+## Done: throttle, delegated invites, rooms, last will, presence
+
+Agreed and built 2026-10-28, after a marble maze demo on live connections and pulses showed the glue every live page was writing for itself. Contracts in [spec.md](spec.md).
+
+- **Pulse throttle** in kv.js: 20 per second per key by default, newest value wins, one console warning per 10 seconds for all keys together. `maxRate` per call, `pulseRate` per client, `0` to turn it off.
+- **Delegated invites**: the `invite` setting, `members` by default, `owners` to restrict. A member's token gives at most what they hold, defaults to exactly that, and works only while they could still mint it. Invitees stay when their inviter is removed; the inviter's open tokens end as `revoked`. `by` on tokens, `invitedBy` on grants. kv.js moved tokens from `db.owner.tokens` to `db.tokens`. Differences from the plan: the default is `members`, and a member's token isn't capped at their grant's end. Instead redeeming checks the minter's rights, which also covers expiry.
+- **`openRoom`** in kv.js: find or create the room, open it, keep `#s=` in the address, and `link()` a reusable invite per visitor, checked before reuse.
+- **Last will** on live connections: `op: "will"`, up to 8 per connection, checked and charged like a pulse at registration, sent on any close except a server shutdown, with access checked again. kv.js `area.will()` registers again after reconnects and is a no-op over HTTP.
+- **Presence** in kv.js: `db.users.presence(key, { value })` with `peers`, `onJoin`, `onLeave`, `onChange`. Heartbeats every 2 s, a will and a pagehide pulse for leaving, and a 6 s timeout, which is how leaving shows over HTTP.

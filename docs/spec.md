@@ -936,7 +936,7 @@ Messages are JSON text frames. A data message is an HTTP request in an envelope:
 - `method` is GET, PUT, DELETE or POST. `path` is what follows `/v1/{space}/` in the HTTP route, without a query string. `query` holds the route's parameters as strings, numbers or booleans, the same ones the route takes over HTTP. Unknown fields anywhere are refused with `bad_message`, and unknown parameters with `invalid_parameter`, as on HTTP.
 - `body` is a JSON value, stored byte for byte as sent. `text` is a string stored as text. Only PUT and POST take one.
 - `id` is a number or a string, and every reply carries it back. Replies may arrive in any order.
-- `op` messages are `auth`, `ping` (answers `200 {}`) and `stop` (`watch` names the watch's id; a reply only if it has its own `id`).
+- `op` messages are `auth`, `ping` (answers `200 {}`), `stop` (`watch` names the watch's id; a reply only if it has its own `id`) and `will` (see [Last will](#last-will)).
 
 Replies are the HTTP response in an envelope:
 
@@ -1122,6 +1122,22 @@ Pulses aren't stored, but each space keeps the most recent ones in memory for a 
 - Sending is the same request in the envelope. On one connection, pulses arrive at the server in the order they were sent.
 - A listener sends its first frame at once, then one whenever matching pulses arrive, without the 50 ms wait. It takes `after` to resume, no `timeout`, and runs until `stop`. It counts towards the 20 watches per connection.
 - Access is checked again before each frame, as for watches.
+
+### Last will
+
+A live connection can leave pulses for the server to send when the connection ends, borrowed from MQTT's last will. A page uses it to say "I'm gone" when its tab closes or its network drops, which it can't send itself.
+
+```
+→ {"id":7,"op":"will","path":"users/u_k7m2x9q4p1r8t3w6/here/pulse","body":{"left":true}}
+← {"id":7,"status":200,"body":{}}
+→ {"id":8,"op":"will","path":"users/u_k7m2x9q4p1r8t3w6/here/pulse"}        clears it
+```
+
+- `path` is a pulse path, `{area}/{key}/pulse`, and `body` or `text` the value, as for sending. One will per path: registering again replaces it, and leaving out the value clears it. At most 8 per connection; another answers 429 `too_many_wills`.
+- Registering checks everything sending would: the right to send there as the current visitor, size, encoding. It takes one pulse from the [pulse budget](#sending), and sending it later costs nothing.
+- It's sent when the connection ends for any reason except a server shutdown: the client closed it, the network dropped, a ping went unanswered, the tab was closed. It goes out as the visitor who registered it, after checking access again, so a visitor who lost the right to send there sends nothing.
+- A server shutdown sends no wills. The pulse window doesn't survive a restart either, and clients reconnect.
+- Nothing about a will is stored. HTTP has no connection to lose, so there's no will over HTTP.
 
 ## 13. Limits and quotas
 
@@ -1391,7 +1407,7 @@ Optional. Served at `/kv.js` as an ES module with no dependencies. Every method 
 
 ### Guide comment
 
-Many pages using cubby are written by coding agents for people who don't know what a space or a token is. kv.js starts with a comment that tells the reader, human or agent, how to do the safe thing. It's part of the contract, kept under 40 lines, and its text is:
+Many pages using cubby are written by coding agents for people who don't know what a space or a token is. kv.js starts with a comment that tells the reader, human or agent, how to do the safe thing. It's part of the contract, kept under 50 lines, and its text is:
 
 ```js
 // cubby client. A guide for whoever writes code with this, person or coding agent.
@@ -1408,6 +1424,8 @@ Many pages using cubby are written by coding agents for people who don't know wh
 // Creating a space (once from a shell with `cubby new`, or per room in the page):
 //   const { space, ownerToken } = await createSpace()
 //   Show ownerToken to the user once. It's their recovery key. Never store it in code.
+// A page that is a room, shared by its link? openRoom("board") creates or finds
+// the space, opens it and gives await room.link(). Members can share it too.
 //
 // Sharing with specific people, the usual case:
 //   const { link } = await db.share({ label: "Anna" })       // member, 10 uses, 7 days
@@ -1419,6 +1437,17 @@ Many pages using cubby are written by coding agents for people who don't know wh
 //   createSpace({ public: "read" })     anyone reads, invited people write: status pages
 //   createSpace({ public: "respond" })  anyone reads and adds their own entry: polls, RSVPs
 //   createSpace({ public: "all" })      anyone with the name reads and writes
+//
+// Lots of live interaction (a shared board, a quiz, game state)? Use
+//   kv(SPACE, { live: true })
+// Same API and results; data and watches go over one WebSocket, falling back
+// to HTTP by itself. Write limits stay the same.
+//
+// Cursors, drags, reactions? Pulses are values that are never stored:
+//   db.user().pulse("cursor", { x, y })              // to whoever listens now
+//   db.users.onPulse("cursor", p => draw(p.user, p.value))
+// Anything a late joiner needs still goes in a stored key. Who's here:
+//   db.users.presence("here", { value: { name } })   // .peers, .onJoin, .onLeave
 //
 // Never put an access token (at_...) or owner token (ot_...) in page source.
 // Anyone who can load the page could use it. Invite links are for sending to people.
@@ -1574,7 +1603,7 @@ Defaults are the server's: a token with no options is a full member, 10 uses, 7 
 db.shared: Area
 db.me: Area
 db.user(id?: string): Area      // no id: your own; another visitor's id: writes throw not_yours, delete works for owners
-db.users: { list(target, opts?), watch(target, onChange, opts?), onPulse(target, onPulse, opts?) }    // across all visitors
+db.users: { list(target, opts?), watch(target, onChange, opts?), onPulse(target, onPulse, opts?), presence(key, opts?) }    // across all visitors
 db.id(): Promise<string>        // your visitor ID, gets a token if needed
 ```
 
@@ -1591,6 +1620,7 @@ update(key, fn: (current: any | null) => any, opts?: { retries?: number, ttl?: n
 list(target, opts?: { limit?: number, order?: "asc" | "desc" }): Promise<List>
 watch(target, onChange: (change: Change) => void, opts?: WatchOptions): () => void
 pulse(key, value, opts?: { maxRate?: number }): Promise<boolean>    // not stored; see Pulses. false: replaced before sending
+will(key, value): Promise<() => void>                                // a pulse sent when the live connection ends; resolves a clear function
 onPulse(target, onPulse: (pulse: Pulse) => void, opts?: { onMissed?: () => void, onError?: (err: KvError) => void }): () => void
 
 type Entry  = { key, value, version, by, mine: boolean, user?, t?, expires? }
@@ -1637,6 +1667,27 @@ type WatchOptions = {
   - The socket closes on `pagehide`, so the page can enter the back/forward cache, and after 5 minutes hidden. It reopens when needed after `pageshow` or when visible.
   - If the socket fails twice before ever opening (a proxy that blocks WebSockets, Chrome's Local Network Access rules for a public page calling a local server, an older server), the client stays on HTTP for that `kv()` without an error.
   - `db.live.status` is `"http"` (live off, or fell back), `"connecting"`, `"open"`, `"closed"` (not needed right now, or between retries) or `"offline"`. Assign `db.live.onStatus` to hear changes. Pages don't need either.
+
+### Last will and presence
+
+```ts
+const clear = await db.user().will("here", { left: true })   // sent for you when your connection ends
+clear()                                                       // not any more
+
+const here = db.users.presence("here", { value: { name: "Anna" }, interval?: 2000, timeout?: 6000 })
+here.peers        // Map: visitor id -> { value, since, seen }, never yourself
+here.onJoin = (id, value) => {}
+here.onLeave = id => {}
+here.onChange = peers => {}   // after any join, leave or value change
+here.set(value)   // sent at once
+here.stop()       // leave now
+```
+
+- **`will`** registers a [last will](#last-will) on the live connection. The client keeps it and registers it again whenever a socket opens, so it survives reconnects. Errors such as `not_yours` reject at registration. Without `live: true`, or while the client is on HTTP, it's kept and does nothing, so the same code runs either way.
+- **`presence`** is built from pulses to `users/{you}/{key}`: your value every `interval`, a leave pulse on `stop()` and on `pagehide`, and a will with the same leave. Over a live connection a closed tab leaves within a round trip. A peer that's silent for `timeout` counts as gone, which is how leaving shows over HTTP. The page code is the same either way.
+- When a peer joins, you send your value at once, so a newcomer sees everyone within a round trip rather than an interval.
+- Its pulses are `{"v": value}` and `{"left": true}`. Other pulses on the same key are ignored, so keep fast data like cursors on keys of their own.
+- Values are whatever JSON you pass, kept small: they go out every interval. Anything a late joiner needs from before they came belongs in a stored key.
 
 ### Pulse throttle
 

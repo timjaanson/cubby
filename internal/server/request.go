@@ -31,7 +31,17 @@ type reqCtx struct {
 	live        *liveConn
 	liveID      json.RawMessage
 	liveStarted bool // a watch took over the reply
+	will        willMode
 }
+
+// willMode is how a pulse request serves a last will.
+type willMode int
+
+const (
+	willNone     willMode = iota
+	willRegister          // check everything and charge, but don't send
+	willFire              // send, without charging: registering paid for it
+)
 
 func (c *reqCtx) header() http.Header { return c.w.Header() }
 

@@ -122,6 +122,7 @@ db.me.pulse("sync", { tab: "settings" })     // to your own other tabs and devic
 ```
 
 - **Nothing is kept.** `get`, `list` and `watch` never see a pulse, and it doesn't touch a stored key of the same name. Someone who opens the page a second later doesn't get it.
+- **Who's here.** `db.users.presence("here", { value: { name } })` keeps `peers` with everyone else on the page, with `onJoin`, `onLeave` and `onChange`. On a live connection a closed tab leaves within a round trip, through a last will the server sends for it. Over HTTP a peer leaves after 6 seconds of silence. The same code works either way.
 - **Throttled in the client.** kv.js sends at most 20 pulses a second per key and replaces a waiting value with a newer one, so the latest always arrives. `pulse(key, value, { maxRate })` or `kv(space, { pulseRate })` changes it, `0` turns it off for events that must all arrive. When it drops anything, it says so in one console warning per 10 seconds.
 - **Fast and cheap.** Pulses have their own budget, 60 a second per visitor with bursts of 120, apart from the 120 writes a minute. On a live connection they arrive within one round trip, in the order they were sent. A pulse is at most 4 KB.
 - **Same rights as the key.** Sending needs write access to the key, listening needs read access. Under `users/{id}/` only that visitor sends, so a cursor can't be faked.

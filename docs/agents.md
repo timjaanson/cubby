@@ -115,6 +115,8 @@ Leases use `ifVersion: 0` to acquire, the acquired version to renew the same hol
 
 For pages with a lot of live interaction, such as a shared board, a quiz or a game state that changes every second or so, use `kv(SPACE, { live: true })`. Everything works the same, but data goes over one WebSocket, watches are pushed, and each change costs no request. It falls back to HTTP by itself. Don't use it for a page that reads once and writes rarely. Live mode doesn't raise write limits: still 120 writes per minute per visitor.
 
+For "who's here", use `const here = db.users.presence("here", { value: { name } })` and render from `here.peers` in `here.onChange`. Don't build presence from stored keys or your own heartbeat map. It leaves at once on a closed tab with `live: true` and after a few seconds over HTTP.
+
 For cursors, drags, reactions and game inputs, use pulses: `db.user().pulse("cursor", pos)` and `db.users.onPulse("cursor", p => ...)`. They're never stored, so anything a late joiner needs (the final position, the score) still goes in a stored key. kv.js sends at most 20 pulses a second per key and keeps the newest value, so pulsing on every `pointermove` is fine. For events that must all arrive (taps, reactions), pass `{ maxRate: 0 }` and stay under the server's 60 per second per visitor.
 
 For a synchronized reveal, call `db.clock.sync()` and schedule with `db.clock.at(serverMilliseconds, callback)`. Set an opening time a little ahead to allow HTTP watches to deliver it. Enforce closing times with `{ifBefore: closesAt}` on set, delete or add. A late write returns `too_late`, status 412. Plain keys have a server-generated `t`; a series point's time may be caller-supplied. Clock sync does not guarantee precise browser execution.
