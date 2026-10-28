@@ -2,11 +2,11 @@
 
 A self-hosted key-value store in a single binary, for shared and per-visitor state in web pages, scripts and anything else that can make an HTTP request. One request to create a space, and no visible login.
 
-Status: v0.10.0 is built: series, and the access model with owners, private-by-default spaces, invites and grants. Differences between the build and these docs are listed in [development.md](development.md#differences-from-the-design-docs). v0.10.0 replaced open and locked spaces without any migration, so data from earlier versions doesn't carry over.
+Status: v0.13.0 is built: series, the access model with owners, private-by-default spaces, invites and grants (v0.10), expiring keys, leases, limits and a shared clock (v0.11), live connections (v0.12) and pulses (v0.13). Differences between the build and these docs are listed in [development.md](development.md#differences-from-the-design-docs). v0.10.0 replaced open and locked spaces without any migration, so data from before v0.10 doesn't carry over. Later versions keep existing data.
 
 - This file explains the model and how a client uses it.
 - [spec.md](spec.md) is the detailed contract, including the CLI, plus ideas kept for later.
-- [scenarios.md](scenarios.md) has five complete examples: a page using raw HTTP, two pages using the JS client, shell scripts using the CLI and `curl`, and a sensor board with a chart page.
+- [scenarios.md](scenarios.md) has six complete examples: a page using raw HTTP, two pages using the JS client, shell scripts using the CLI and `curl`, a sensor board with a chart page, and a private family list shared through invite links.
 
 ## What it is for
 
@@ -17,7 +17,7 @@ Two things set it apart from hosted services like Firebase:
 
 Typical uses: a page made of HTML and JS, hosted anywhere, that needs to remember something, like a shared note, a poll, a chat room or a visitor's settings. Or a script that publishes a status for a page to show, or waits for a signal to act on. Or a sensor board that sends readings every minute for a page to chart. The author creates a space with one request, or the page creates one per room, and then reads and writes keys. Nothing is configured on the server and nobody clicks "sign in".
 
-Hosted services do realtime, offline support and scale better. This trades those for owning the whole thing and needing nothing but HTTP.
+Hosted services scale further and do offline support better. This trades those for owning the whole thing and needing nothing but HTTP. A WebSocket per space is optional and only makes live pages faster.
 
 **Spaces are private by default.** Only the creator and the people they invite can read or write, and to everyone else the space looks like it doesn't exist. Most pages are made for people who know each other: a family, friends, a team. Many are written by coding agents for people who don't know what a token is, so the safe choice is the one that needs no thought. Opening a space to anyone who has its name takes one explicit word, `public`, which the creator or the agent has to write down.
 

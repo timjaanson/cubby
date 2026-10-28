@@ -824,7 +824,7 @@ See [Series](#11-series).
 |---|---|
 | `GET /kv.js` | the JS client as an ES module |
 | `GET /share.js` | the share component as an ES module |
-| `GET /health` | 200 `{"ok": true, "version": "v0.8.1"}` |
+| `GET /health` | 200 `{"ok": true, "version": "v0.13.0"}` |
 | `OPTIONS` anything | the CORS preflight response |
 | `/v1/anon`, `/v1/whoami`, `/v1/spaces` | see [Visitors](#3-visitors) and [Create a space](#create-a-space) |
 | `/v1/{space}` and its `access`, `join`, `tokens`, `grants`, `owner-token` | see [Paths](#paths) |
@@ -2026,7 +2026,7 @@ Everything held in memory has a bound, and nothing in it has to survive a restar
 
 ## 20. Later
 
-Ideas from the design discussion that were left out to keep the first version small. Each is an addition, and none changes the API above. Items that are agreed and planned, with their design, are in [plans.md](plans.md).
+Ideas from the design discussion that were left out to keep the first version small. Each is an addition, and none changes the API above. Deferred helpers and candidates that already have a design sketch are in [plans.md](plans.md).
 
 ### Abuse protection
 
@@ -2124,5 +2124,5 @@ Who it's for: machines where the binary can't run but `curl` or `wget` can, such
 ### Smaller additions
 
 - Append with a server-chosen key, so clients don't build `msg.{time}.{random}` themselves.
-- Watching several targets in one request.
+- Watching several targets in one HTTP request. A [live connection](#live-connection) already carries up to 20 watches.
 - Batch reads of several specific keys.
