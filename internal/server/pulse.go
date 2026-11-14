@@ -36,7 +36,7 @@ const (
 
 type pulse struct {
 	seq    int64
-	area   string // "s", "m:{id}" or "u:{id}", as store.Target.Area
+	area   string // as stored: "s", "u:{id}" or "i:{recipient}:{sender}"
 	key    string
 	by     string
 	value  []byte
@@ -48,6 +48,8 @@ type pulse struct {
 type pulseJSON struct {
 	Key   string          `json:"key"`
 	User  string          `json:"user,omitempty"`
+	From  string          `json:"from,omitempty"`
+	To    string          `json:"to,omitempty"`
 	By    string          `json:"by"`
 	Value json.RawMessage `json:"value"`
 	T     int64           `json:"t"`
@@ -58,6 +60,7 @@ func (p *pulse) json() pulseJSON {
 	if strings.HasPrefix(p.area, "u:") {
 		out.User = p.area[2:]
 	}
+	out.To, out.From, _ = store.SplitTo(p.area)
 	return out
 }
 
@@ -176,14 +179,10 @@ func (h *pulseHub) listen(delta int) {
 }
 
 // pulseMatch selects the pulses a target covers: one key or a prefix, in one
-// area or across users/*/.
+// area or across several.
 func pulseMatch(t store.Target) func(*pulse) bool {
 	return func(p *pulse) bool {
-		if t.AllUsers {
-			if !strings.HasPrefix(p.area, "u:") {
-				return false
-			}
-		} else if p.area != t.Area {
+		if !t.Match(p.area) {
 			return false
 		}
 		if t.Pattern {

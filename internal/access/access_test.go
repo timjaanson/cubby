@@ -26,8 +26,8 @@ func TestPublicShorthand(t *testing.T) {
 	if Private.Public() != "none" {
 		t.Fatal("default isn't private")
 	}
-	s, err := ApplyInput(presets["all"], nil, nil, raw(`{"me": "granted"}`), nil)
-	if err != nil || s.Public() != "custom" || !s.WriteShared || s.WriteMe {
+	s, err := ApplyInput(presets["all"], nil, nil, raw(`{"to": "granted"}`), nil)
+	if err != nil || s.Public() != "custom" || !s.WriteShared || s.WriteTo {
 		t.Fatalf("custom: %+v %v", s, err)
 	}
 	if _, err := ApplyInput(Private, raw(`"read"`), raw(`"anyone"`), nil, nil); err == nil {
@@ -40,7 +40,7 @@ func TestPublicShorthand(t *testing.T) {
 		t.Fatal("unknown preset accepted")
 	}
 	b, _ := json.Marshal(presets["respond"])
-	if string(b) != `{"public":"respond","read":"anyone","write":{"me":"anyone","shared":"granted","users":"anyone"},"invite":"members"}` {
+	if string(b) != `{"public":"respond","read":"anyone","write":{"shared":"granted","to":"anyone","users":"anyone"},"invite":"members"}` {
 		t.Fatalf("json: %s", b)
 	}
 }
@@ -51,7 +51,7 @@ func TestScopes(t *testing.T) {
 		op    Op
 		want  bool
 	}{
-		{"*:rw", Op{Area: "me", Key: "x", Write: true}, true},
+		{"*:rw", Op{Area: "to", Rcpt: "u_x", Key: "x", Write: true}, true},
 		{"shared:r", Op{Area: "shared", Key: "x"}, true},
 		{"shared:r", Op{Area: "shared", Key: "x", Write: true}, false},
 		{"shared/env.*:w", Op{Area: "shared", Key: "env.temp", Write: true}, true},
@@ -85,7 +85,7 @@ func TestScopes(t *testing.T) {
 	if a, _ := ParseAllow(raw(`"viewer"`)); len(a) != 2 {
 		t.Fatalf("viewer %v", a)
 	}
-	if a, err := ParseAllow(raw(`["shared/*:rw", "me:rw"]`)); err != nil || a[0] != "shared:rw" {
+	if a, err := ParseAllow(raw(`["shared/*:rw", "to/me:rw"]`)); err != nil || a[0] != "shared:rw" {
 		t.Fatalf("list %v %v", a, err)
 	}
 	if _, err := ParseAllow(raw(`"editor"`)); err == nil {
@@ -132,7 +132,7 @@ func TestParseTime(t *testing.T) {
 }
 
 func TestSettingsJSONRoundTrip(t *testing.T) {
-	for _, s := range []Settings{{}, {Read: true}, {Read: true, WriteUsers: true, WriteMe: true}, {Read: true, WriteShared: true}} {
+	for _, s := range []Settings{{}, {Read: true}, {Read: true, WriteUsers: true, WriteTo: true}, {Read: true, WriteShared: true}} {
 		b, err := json.Marshal(s)
 		if err != nil {
 			t.Fatal(err)
@@ -204,7 +204,7 @@ func TestCanGive(t *testing.T) {
 	if r.CanInvite() || (&Rights{}).CanInvite() || !(&Rights{Owner: true, Settings: Settings{InviteOwners: true}}).CanInvite() {
 		t.Fatal("invite owners")
 	}
-	if got := (&Rights{Grants: []Grant{{Allow: []string{"shared:r"}}, {Allow: []string{"shared:r", "me:rw"}}}}).OwnAllow(); len(got) != 2 {
+	if got := (&Rights{Grants: []Grant{{Allow: []string{"shared:r"}}, {Allow: []string{"shared:r", "to/me:rw"}}}}).OwnAllow(); len(got) != 2 {
 		t.Fatalf("own allow %v", got)
 	}
 }

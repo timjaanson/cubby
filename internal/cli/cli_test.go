@@ -9,8 +9,11 @@ func TestCLIPaths(t *testing.T) {
 		"/v1/poll-cedar-pilot-mango/shared/q":               "/v1/poll-cedar-pilot-mango/shared/q",
 		"poll-cedar-pilot-mango/shared/msg.*":               "/v1/poll-cedar-pilot-mango/shared/msg.*",
 		"poll-cedar-pilot-mango/users/*/vote":               "/v1/poll-cedar-pilot-mango/users/*/vote",
-		"poll-cedar-pilot-mango/users/me/vote":              "/v1/poll-cedar-pilot-mango/users/u_aaaaaaaaaaaaaaaa/vote",
-		"poll-cedar-pilot-mango/me/a:b":                     "/v1/poll-cedar-pilot-mango/me/a:b",
+		"poll-cedar-pilot-mango/users/me/vote":              "/v1/poll-cedar-pilot-mango/users/me/vote",
+		"poll-cedar-pilot-mango/to/me/a:b":                  "/v1/poll-cedar-pilot-mango/to/me/a:b",
+		"poll-cedar-pilot-mango/to/owners/x":                "/v1/poll-cedar-pilot-mango/to/owners/x",
+		"poll-cedar-pilot-mango/inbox/*/x.*":                "/v1/poll-cedar-pilot-mango/inbox/*/x.*",
+		"poll-cedar-pilot-mango/inbox/owners/*/x":           "/v1/poll-cedar-pilot-mango/inbox/owners/*/x",
 		"poll-cedar-pilot-mango/users/u_bbbbbbbbbbbbbbbb/x": "/v1/poll-cedar-pilot-mango/users/u_bbbbbbbbbbbbbbbb/x",
 	}
 	for in, want := range good {
@@ -24,7 +27,7 @@ func TestCLIPaths(t *testing.T) {
 		"poll-cedar-pilot-mango/shared/..", "poll-cedar-pilot-mango/shared/.", "poll-cedar-pilot-mango/shared/watch",
 		"poll-cedar-pilot-mango/shared/a b", "poll-cedar-pilot-mango/shared/", "poll-cedar-pilot-mango/users/../x",
 		"poll-cedar-pilot-mango/users/bob/x", "poll/shared/x", "../poll-cedar-pilot-mango/shared/x",
-		"poll-cedar-pilot-mango/shared/a/b", "poll-cedar-pilot-mango/other/x", "poll-cedar-pilot-mango/me/café",
+		"poll-cedar-pilot-mango/shared/a/b", "poll-cedar-pilot-mango/other/x", "poll-cedar-pilot-mango/me/x", "poll-cedar-pilot-mango/to/bob/x", "poll-cedar-pilot-mango/to/me/café",
 	} {
 		if _, err := c.parsePath(in); err == nil {
 			t.Errorf("parsePath(%q) accepted", in)

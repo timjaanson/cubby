@@ -1,7 +1,6 @@
 package store
 
 import (
-	"strings"
 	"time"
 
 	"github.com/timjaanson/cubby/internal/config"
@@ -13,9 +12,10 @@ type CleanupReport struct {
 	Spaces     int `json:"spaces"`
 }
 
-// dropVisitorRows removes a visitor's data and grants from one space. Their
-// users/ keys become tombstones so watchers see them go; me/ rows just
-// disappear.
+// dropVisitorRows removes a visitor's data, grants and ban from one space:
+// their users/ keys, what they sent under to/ and what was sent to them. All
+// of it becomes tombstones, so watchers on the other side see it go; their
+// own to/me/ slots go too.
 func (s *Store) dropVisitorRows(space, id string) error {
 	sp, err := s.Acquire(space)
 	if err != nil || sp == nil {
@@ -33,29 +33,37 @@ func (s *Store) dropVisitorRows(space, id string) error {
 	if err != nil {
 		return err
 	}
-	rows, err := tx.Query(`SELECT area, key, size, value IS NOT NULL FROM kv WHERE area IN (?, ?)`, "u:"+id, "m:"+id)
+	const mine = `(area = ? OR (area >= 'i:' AND area < 'i;' AND (substr(area, 1, ?) = ? OR substr(area, ?) = ?)))`
+	in := "i:" + id + ":"
+	mineArgs := []any{"u:" + id, len(in), in, -(len(id) + 1), ":" + id}
+	rows, err := tx.Query(`SELECT area, key, size, value IS NOT NULL, writer FROM kv WHERE `+mine, mineArgs...)
 	if err != nil {
 		return err
 	}
 	type row struct {
-		area, key string
-		size      int64
-		live      bool
+		area, key, writer string
+		size              int64
+		live              bool
 	}
 	var rs []row
 	for rows.Next() {
 		var r row
-		rows.Scan(&r.area, &r.key, &r.size, &r.live)
+		rows.Scan(&r.area, &r.key, &r.size, &r.live, &r.writer)
 		rs = append(rs, r)
 	}
 	rows.Close()
 	now := nowS()
 	seq, bytesD, keysD, changed := m.seq, int64(0), 0, false
+	others := map[string]int64{} // usage given back by other writers: what they sent to this visitor
 	for _, r := range rs {
 		if r.live {
 			keysD--
 		}
-		if strings.HasPrefix(r.area, "u:") && r.live {
+		if r.live && r.writer != id {
+			others[r.writer] += r.size
+			tx.Exec(`UPDATE usage SET bytes = max(0, bytes - ?) WHERE writer = ?`, r.size, r.writer)
+		}
+		if r.live {
 			seq++
 			bytesD += int64(len(r.key)) - r.size
 			tx.Exec(`UPDATE kv SET value = NULL, version = ?, size = ?, updated_at = ?, series = 0, t = ?, n = 0, expires=0, expired=0 WHERE area = ? AND key = ?`, seq, len(r.key), now, NowMs(), r.area, r.key)
@@ -66,11 +74,12 @@ func (s *Store) dropVisitorRows(space, id string) error {
 		}
 	}
 	var pointBytes int64
-	tx.QueryRow(`SELECT coalesce(sum(length(key) + length(value)), 0) FROM points WHERE area IN (?, ?)`, "u:"+id, "m:"+id).Scan(&pointBytes)
-	tx.Exec(`DELETE FROM points WHERE area IN (?, ?)`, "u:"+id, "m:"+id)
+	tx.QueryRow(`SELECT coalesce(sum(length(key) + length(value)), 0) FROM points WHERE `+mine, mineArgs...).Scan(&pointBytes)
+	tx.Exec(`DELETE FROM points WHERE `+mine, mineArgs...)
 	bytesD -= pointBytes
 	tx.Exec(`DELETE FROM usage WHERE writer = ?`, id)
 	tx.Exec(`DELETE FROM grants WHERE visitor = ?`, id)
+	tx.Exec(`DELETE FROM bans WHERE visitor = ?`, id)
 	for k, v := range map[string]any{"seq": seq, "bytes": m.bytes + bytesD, "keys": m.keys + keysD} {
 		setMeta(tx, k, v)
 	}
@@ -78,6 +87,9 @@ func (s *Store) dropVisitorRows(space, id string) error {
 		return err
 	}
 	sp.dropAccess()
+	for w, b := range others {
+		s.adjustVisitor(w, -b)
+	}
 	s.mu.Lock()
 	if st := s.stats[space]; st != nil {
 		st.bytes += bytesD
@@ -97,7 +109,8 @@ func (s *Store) Cleanup() (rep CleanupReport, err error) {
 	secs := func(d config.Duration) int64 { return int64(time.Duration(d).Seconds()) }
 	s.Rescan()
 
-	// 1. Visitors past their idle time, with their users/ and me/ data.
+	// 1. Visitors past their idle time, with their users/ data and what they
+	// sent and received under to/.
 	rows, err := s.srv.Query(`SELECT id FROM visitors WHERE last_seen_at < ? OR (stored = 0 AND last_seen_at < ?)`,
 		now-secs(r.VisitorIdleTTL), now-secs(r.EmptyVisitorIdleTTL))
 	if err != nil {

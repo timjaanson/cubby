@@ -115,14 +115,14 @@ func cmdAdmin(args []string) int {
 					read = "anyone"
 				}
 				switch {
-				case st.WriteShared && st.WriteUsers && st.WriteMe:
+				case st.WriteShared && st.WriteUsers && st.WriteTo:
 					write = "anyone"
-				case st.WriteShared || st.WriteUsers || st.WriteMe:
+				case st.WriteShared || st.WriteUsers || st.WriteTo:
 					var parts []string
 					for _, a := range []struct {
 						n  string
 						on bool
-					}{{"shared", st.WriteShared}, {"users", st.WriteUsers}, {"me", st.WriteMe}} {
+					}{{"shared", st.WriteShared}, {"users", st.WriteUsers}, {"to", st.WriteTo}} {
 						v := "granted"
 						if a.on {
 							v = "anyone"

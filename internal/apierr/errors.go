@@ -94,3 +94,17 @@ func NotSeries(key string) *Error {
 	return &Error{Status: 409, Code: "not_series", Extra: map[string]any{"key": key},
 		Message: key + " is a plain key, not a series. Read it with GET " + key + ", replace it with PUT."}
 }
+
+// Banned answers every request a banned visitor makes in the space. until is
+// in ms, 0 for a ban without end.
+func Banned(until int64) *Error {
+	var u any
+	if until != 0 {
+		u = until
+	}
+	return &Error{Status: 403, Code: "banned", Message: "This visitor is banned from this space.", Extra: map[string]any{"until": u}}
+}
+
+// NotSender is a write to someone else's to/ slot.
+var NotSender = &Error{Status: 403, Code: "not_yours",
+	Message: "Only the sender writes their to/ slot. A recipient can delete what was sent to them under inbox/."}

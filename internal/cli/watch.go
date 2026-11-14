@@ -40,7 +40,7 @@ func (c *client) watch(f *flags) error {
 	resync := false
 	var resyncSeen map[string]bool
 	backoff := time.Second
-	needToken := p.area == "me"
+	needToken := p.needsToken()
 
 	for {
 		u := p.url() + "/watch"
@@ -91,26 +91,35 @@ func (c *client) watch(f *flags) error {
 		changes := out.Changes
 		if resync {
 			for _, ch := range changes {
-				resyncSeen[ch.User+"/"+ch.Key] = true
+				resyncSeen[ch.party(p.area)+"/"+ch.Key] = true
 			}
 			if !out.More {
 				for k := range known {
 					if !resyncSeen[k] {
 						u, key, _ := strings.Cut(k, "/")
-						changes = append(changes, item{Key: key, User: u, Deleted: true, Version: out.Version})
+						gone := item{Key: key, Deleted: true, Version: out.Version}
+						switch {
+						case p.area == "users/*":
+							gone.User = u
+						case p.area == "to/*":
+							gone.To = u
+						case strings.HasPrefix(p.area, "inbox/"):
+							gone.From = u
+						}
+						changes = append(changes, gone)
 					}
 				}
 				resync = false
 			}
 		}
 		for _, ch := range changes {
-			id := ch.User + "/" + ch.Key
+			id := ch.party(p.area) + "/" + ch.Key
 			if ch.Deleted {
 				delete(known, id)
 			} else {
 				known[id] = true
 			}
-			c.emit(ch, f)
+			c.emit(ch, f, p.area)
 		}
 		from, haveFrom = out.Version, true
 		if state != "" {
@@ -142,7 +151,7 @@ func rawValue(v json.RawMessage) []byte {
 	return v
 }
 
-func (c *client) emit(ch item, f *flags) {
+func (c *client) emit(ch item, f *flags, area string) {
 	if cmd := f.str("exec"); cmd != "" {
 		e := exec.Command("sh", "-c", cmd)
 		if !ch.Deleted {
@@ -156,6 +165,9 @@ func (c *client) emit(ch item, f *flags) {
 		e.Env = append(os.Environ(), "KV_KEY="+ch.Key, "KV_VERSION="+strconv.FormatInt(ch.Version, 10), "KV_DELETED="+del)
 		if ch.User != "" {
 			e.Env = append(e.Env, "KV_USER="+ch.User)
+		}
+		if ch.From != "" {
+			e.Env = append(e.Env, "KV_FROM="+ch.From, "KV_TO="+ch.To)
 		}
 		if ch.T != 0 {
 			e.Env = append(e.Env, "KV_TIME="+strconv.FormatInt(ch.T, 10))
@@ -171,5 +183,5 @@ func (c *client) emit(ch item, f *flags) {
 		}
 		return
 	}
-	printItem(ch, f.bool("json"))
+	printItem(ch, f.bool("json"), area)
 }

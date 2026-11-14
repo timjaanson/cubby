@@ -245,6 +245,7 @@ func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err err
 	if !del {
 		s.adjustVisitor(r.Writer, newSize)
 		s.noteVisitorSpace(r.Writer, r.Space)
+		s.noteRecipient(r.Area, r.Space)
 	}
 	return writeResult{Version: version, Created: !live, Changed: true, T: nowMS, Expires: expires}, nil
 }

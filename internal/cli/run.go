@@ -35,12 +35,14 @@ Client (talks to --server or $CUBBY_SERVER, default http://localhost:28229; a ba
 Sharing (owners invite, others join):
   cubby token new <space> [--label L] [--link URL]   mint an invite: member, 10 uses, 7 days
   cubby join <space> <token or link>                 redeem an invite on this machine
-  cubby access <space> | settings <space> | token ls|set|rm | grant ls|add|rm | owner-token | drop
+  cubby access <space> | settings <space> | token ls|set|rm | grant ls|add|rm | ban ls|add|rm
+  cubby owner-token <space> | drop <space>
 
 Paths mirror the URL after /v1/:
   poll-cedar-pilot-mango/shared/question     poll-cedar-pilot-mango/users/me/vote
   'poll-cedar-pilot-mango/shared/msg.*'      'poll-cedar-pilot-mango/users/*/vote'
-  poll-cedar-pilot-mango/me/draft
+  poll-cedar-pilot-mango/to/me/draft         poll-cedar-pilot-mango/to/owners/answer
+  'poll-cedar-pilot-mango/inbox/*/answer'    'poll-cedar-pilot-mango/inbox/owners/*/answer'
 
 Run 'cubby help <command>' for flags, or see the README.
 `

@@ -202,6 +202,8 @@ type itemJSON struct {
 	Deleted bool            `json:"deleted,omitempty"`
 	Version int64           `json:"version"`
 	User    string          `json:"user,omitempty"`
+	From    string          `json:"from,omitempty"`
+	To      string          `json:"to,omitempty"`
 	By      string          `json:"by"`
 	T       *int64          `json:"t,omitempty"`
 	Expires int64           `json:"expires,omitempty"`
@@ -209,7 +211,7 @@ type itemJSON struct {
 }
 
 func toItem(e store.Entry) itemJSON {
-	it := itemJSON{Key: e.Key, Version: e.Version, User: e.User, By: e.Writer, Expires: e.Expires, Expired: e.Expired}
+	it := itemJSON{Key: e.Key, Version: e.Version, User: e.User, From: e.From, To: e.To, By: e.Writer, Expires: e.Expires, Expired: e.Expired}
 	if e.T != 0 {
 		t := e.T
 		it.T = &t
@@ -249,8 +251,9 @@ func (s *Server) list(c *reqCtx, t store.Target) error {
 	}
 	after := q.Get("after")
 	if after != "" {
-		k, u, hasUser := strings.Cut(after, "/")
-		if !names.KeyRe.MatchString(k) || (hasUser && (!t.AllUsers || !names.ValidVisitor(u))) {
+		k, u, hasParty := strings.Cut(after, "/")
+		partyOK := names.ValidVisitor(u) || t.Across == store.Sent && u == "owners"
+		if !names.KeyRe.MatchString(k) || (hasParty && (!t.Many() || !partyOK)) {
 			return apierr.BadParam("after", "after takes the next value from a previous list.")
 		}
 	}

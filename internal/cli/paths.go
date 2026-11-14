@@ -10,7 +10,7 @@ import (
 )
 
 type kvPath struct {
-	space, area string // area is "shared", "me", "users/<id>" or "users/*"
+	space, area string // "shared", "users/<id|me|*>", "to/<rcpt|*>", "inbox/<sender|*>" or "inbox/owners/<sender|*>"
 	name        string // key or pattern
 }
 
@@ -26,6 +26,12 @@ func (p kvPath) url() string {
 	}
 	return "/v1/" + strings.Join(append(segs, esc(p.name)), "/")
 }
+
+// needsToken: the path means something only for a known visitor.
+func (p kvPath) needsToken() bool {
+	return p.area == "users/me" || strings.HasPrefix(p.area, "to/") || strings.HasPrefix(p.area, "inbox/")
+}
+
 func (p kvPath) isPattern() bool {
 	return strings.HasSuffix(p.name, "*")
 }
@@ -34,7 +40,7 @@ func (c *client) parsePath(s string) (kvPath, error) {
 	s = strings.TrimPrefix(s, "/")
 	s = strings.TrimPrefix(s, "v1/")
 	seg := strings.Split(s, "/")
-	bad := &cliError{code: 5, err: "bad_path", msg: fmt.Sprintf("%q isn't a path like space/shared/key, space/users/me/key or space/me/key", s)}
+	bad := &cliError{code: 5, err: "bad_path", msg: fmt.Sprintf("%q isn't a path like space/shared/key, space/users/me/key, space/to/me/key or space/inbox/*/key", s)}
 	if len(seg) < 3 {
 		return kvPath{}, bad
 	}
@@ -42,21 +48,50 @@ func (c *client) parsePath(s string) (kvPath, error) {
 	if !names.ValidSpace(p.space) {
 		return kvPath{}, &cliError{code: 5, err: "invalid_space", msg: fmt.Sprintf("%q isn't a valid space name. Try %s.", p.space, names.SuggestFor(p.space))}
 	}
+	party := func(id, what string, extra ...string) error {
+		ok := id == "me" || id == "*" || names.ValidVisitor(id)
+		for _, e := range extra {
+			ok = ok || id == e
+		}
+		if !ok {
+			return &cliError{code: 5, err: "invalid_key", msg: fmt.Sprintf("%q isn't a %s. Use an ID like u_k7m2x9q4p1r8t3w6, me, or *.", id, what)}
+		}
+		return nil
+	}
 	switch seg[1] {
-	case "shared", "me":
+	case "shared":
 		if len(seg) != 3 {
 			return kvPath{}, bad
 		}
 		p.area, p.name = seg[1], seg[2]
-	case "users":
+	case "users", "to":
 		if len(seg) != 4 {
 			return kvPath{}, bad
 		}
-		id := seg[2]
-		if id != "me" && id != "*" && !names.ValidVisitor(id) {
-			return kvPath{}, &cliError{code: 5, err: "invalid_key", msg: fmt.Sprintf("%q isn't a visitor ID. Use an ID like u_k7m2x9q4p1r8t3w6, me, or *.", id)}
+		var err error
+		if seg[1] == "users" {
+			err = party(seg[2], "visitor ID")
+		} else {
+			err = party(seg[2], "recipient", "owners")
 		}
-		p.area, p.name = "users/"+id, seg[3]
+		if err != nil {
+			return kvPath{}, err
+		}
+		p.area, p.name = seg[1]+"/"+seg[2], seg[3]
+	case "inbox":
+		area := "inbox/"
+		if len(seg) == 5 && seg[2] == "owners" {
+			area, seg = "inbox/owners/", append(seg[:2:2], seg[3:]...)
+		}
+		if len(seg) != 4 {
+			return kvPath{}, bad
+		}
+		if err := party(seg[2], "sender"); err != nil {
+			return kvPath{}, err
+		}
+		p.area, p.name = area+seg[2], seg[3]
+	case "me":
+		return kvPath{}, &cliError{code: 5, err: "bad_path", msg: "There's no me/ area any more. Private keys are under to/me/, as in " + p.space + "/to/me/" + strings.Join(seg[2:], "/") + "."}
 	default:
 		return kvPath{}, bad
 	}
@@ -64,13 +99,6 @@ func (c *client) parsePath(s string) (kvPath, error) {
 	// silently address a different key.
 	if !names.ValidKey(p.name) && !names.ValidPattern(p.name) {
 		return kvPath{}, &cliError{code: 5, err: "invalid_key", msg: fmt.Sprintf("%q isn't a valid key. Keys are 1 to 128 of A-Z a-z 0-9 . _ : - and can't be \".\", \"..\", \"watch\", \"series\" or \"pulse\". Patterns end in *.", p.name)}
-	}
-	if p.area == "users/me" {
-		id, err := c.visitorID()
-		if err != nil {
-			return kvPath{}, err
-		}
-		p.area = "users/" + id
 	}
 	return p, nil
 }

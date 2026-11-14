@@ -384,10 +384,10 @@ func TestSeriesUsersAndMe(t *testing.T) {
 	if st, _, _ := c.req("GET", sp+"/users/"+id+"/weight/series", ""); st != 200 {
 		t.Fatalf("public read: %d", st)
 	}
-	if st, _, b := c.req("POST", sp+"/me/sleep/series", "7.5", auth...); st != 201 {
+	if st, _, b := c.req("POST", sp+"/to/me/sleep/series", "7.5", auth...); st != 201 {
 		t.Fatalf("me/: %d %s", st, b)
 	}
-	if st, _, _ := c.req("GET", sp+"/me/sleep/series", ""); st != 401 {
+	if st, _, _ := c.req("GET", sp+"/to/me/sleep/series", ""); st != 401 {
 		t.Fatalf("me/ without token: %d", st)
 	}
 	if st, _, b := c.req("POST", sp+"/users/*/weight/series", "1", auth...); st != 400 {

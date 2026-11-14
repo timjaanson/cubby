@@ -5,6 +5,7 @@
 #   pulse.test.mjs pulses, over HTTP and live
 #   room.test.mjs openRoom: rooms, remembered spaces, member links
 #   presence.test.mjs last wills and presence, over live and HTTP
+#   inbox.test.mjs to/, inbox/ and bans
 #   qr.test.mjs   share.js's QR encoder, decoded back with jsQR
 # Needs Go, Node 20+ and npm. Nothing here goes into the binary.
 set -eu
@@ -27,4 +28,5 @@ S=$S MOD="$tmp/kv.mjs" node live.test.mjs
 S=$S MOD="$tmp/kv.mjs" node pulse.test.mjs
 S=$S MOD="$tmp/kv.mjs" node room.test.mjs
 S=$S MOD="$tmp/kv.mjs" node presence.test.mjs
+S=$S MOD="$tmp/kv.mjs" node inbox.test.mjs
 MOD="$tmp/share.mjs" node qr.test.mjs

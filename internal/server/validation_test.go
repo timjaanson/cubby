@@ -128,7 +128,7 @@ func TestHTTPTokens(t *testing.T) {
 // FuzzRoute throws arbitrary paths and queries at the router. Nothing may
 // answer 500 or panic, and no file may appear outside spaces/.
 func FuzzRoute(f *testing.F) {
-	for _, s := range []string{"/v1/poll-cedar-pilot-mango/shared/x", "/v1/poll-cedar-pilot-mango/users/*/v", "/v1/a/../b", "/v1/%2e%2e/x/y", "/v1/cedar-pilot-mango-frost/me/x/watch?version=0&timeout=1"} {
+	for _, s := range []string{"/v1/poll-cedar-pilot-mango/shared/x", "/v1/poll-cedar-pilot-mango/users/*/v", "/v1/a/../b", "/v1/%2e%2e/x/y", "/v1/cedar-pilot-mango-frost/to/me/x/watch?version=0&timeout=1"} {
 		f.Add("PUT", s)
 		f.Add("GET", s)
 	}

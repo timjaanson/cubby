@@ -361,6 +361,41 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 		}
 		return methodErr("GET, HEAD, POST, DELETE")
 
+	case rest[0] == "bans" && len(rest) == 1:
+		if m != http.MethodGet && m != http.MethodHead {
+			return methodErr("GET, HEAD")
+		}
+		if err := checkParams(c.r); err != nil {
+			return err
+		}
+		items, err := s.store.Bans(space)
+		if err != nil {
+			return err
+		}
+		c.json(200, map[string]any{"items": items})
+		return nil
+
+	case rest[0] == "bans" && len(rest) == 2:
+		user := rest[1]
+		if !names.ValidVisitor(user) {
+			return apierr.BadParam("user", "A ban names a visitor ID like u_k7m2x9q4p1r8t3w6.")
+		}
+		if err := checkParams(c.r); err != nil {
+			return err
+		}
+		switch m {
+		case http.MethodPut:
+			return s.ban(c, space, user)
+		case http.MethodDelete:
+			lifted, err := s.store.Unban(space, user)
+			if err != nil {
+				return err
+			}
+			c.json(200, map[string]any{"lifted": lifted})
+			return nil
+		}
+		return methodErr("PUT, DELETE")
+
 	case rest[0] == "grants" && len(rest) == 2:
 		if m != http.MethodDelete {
 			return methodErr("DELETE")
@@ -559,5 +594,39 @@ func (s *Server) addGrant(c *reqCtx, space string) error {
 		return err
 	}
 	c.json(201, g)
+	return nil
+}
+
+// ban bans a visitor, or replaces their ban, and closes their live
+// connections to the space. Nothing they stored or hold is touched.
+func (s *Server) ban(c *reqCtx, space, user string) error {
+	var in struct {
+		Until json.RawMessage `json:"until"`
+	}
+	if err := decodeBody(c, &in); err != nil {
+		return err
+	}
+	var until *int64
+	if in.Until != nil && !isNull(in.Until) {
+		ms, err := access.ParseTime(in.Until, time.Now())
+		if err != nil {
+			return apierr.BadParam("until", "until: "+err.Error()+".")
+		}
+		until = &ms
+	}
+	b, created, err := s.store.Ban(space, user, c.visitor, until)
+	if err != nil {
+		return err
+	}
+	var u int64
+	if until != nil {
+		u = *until
+	}
+	s.closeBanned(space, user, u)
+	status := 200
+	if created {
+		status = 201
+	}
+	c.json(status, b)
 	return nil
 }

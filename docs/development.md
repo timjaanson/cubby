@@ -9,7 +9,7 @@ Needs Go 1.26 or newer. No C compiler: SQLite is pure Go, so every binary is sta
 ```sh
 go test -race ./...
 go vet ./...
-sh tools/jstest/run.sh   # kv.js, live mode, pulses, rooms, presence and the QR encoder against a fresh local server (needs Node 22+)
+sh tools/jstest/run.sh   # kv.js, live mode, pulses, rooms, presence, to/ and inbox/, bans and the QR encoder against a fresh local server (needs Node 22+)
 ./build.sh          # writes dist/cubby-macos, dist/cubby-linux-amd64, dist/cubby-linux-arm64
 go build .           # just for this machine, writes ./cubby
 ```

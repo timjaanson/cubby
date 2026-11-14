@@ -252,6 +252,7 @@ func (s *Store) AddPoints(ctx context.Context, r PointsReq) (res pointsResult, e
 		s.adjustVisitor(mv.writer, mv.delta)
 	}
 	s.noteVisitorSpace(r.Writer, r.Space)
+	s.noteRecipient(r.Area, r.Space)
 	res.T = t
 	return res, nil
 }

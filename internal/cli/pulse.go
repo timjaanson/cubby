@@ -42,6 +42,8 @@ func (c *client) pulse(f *flags) error {
 type pulseItem struct {
 	Key   string          `json:"key"`
 	User  string          `json:"user,omitempty"`
+	From  string          `json:"from,omitempty"`
+	To    string          `json:"to,omitempty"`
 	By    string          `json:"by"`
 	Value json.RawMessage `json:"value"`
 	T     int64           `json:"t"`
@@ -60,7 +62,7 @@ func (c *client) pulses(f *flags) error {
 		if after != "" {
 			u += "?after=" + after
 		}
-		resp, b, err := c.do("GET", u, nil, reqOpts{needToken: p.area == "me"})
+		resp, b, err := c.do("GET", u, nil, reqOpts{needToken: p.needsToken()})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cubby: %v, retrying in %s\n", err, backoff)
 			time.Sleep(backoff)
@@ -95,13 +97,13 @@ func (c *client) pulses(f *flags) error {
 			fmt.Fprintln(os.Stderr, "cubby: some pulses were missed")
 		}
 		for _, pl := range out.Pulses {
-			emitPulse(pl, f)
+			emitPulse(pl, f, p.area)
 		}
 		after = strconv.FormatInt(out.Seq, 10)
 	}
 }
 
-func emitPulse(pl pulseItem, f *flags) {
+func emitPulse(pl pulseItem, f *flags, area string) {
 	if cmd := f.str("exec"); cmd != "" {
 		e := exec.Command("sh", "-c", cmd)
 		e.Stdin = bytes.NewReader(rawValue(pl.Value))
@@ -109,6 +111,9 @@ func emitPulse(pl pulseItem, f *flags) {
 		e.Env = append(os.Environ(), "KV_KEY="+pl.Key, "KV_BY="+pl.By, "KV_TIME="+strconv.FormatInt(pl.T, 10))
 		if pl.User != "" {
 			e.Env = append(e.Env, "KV_USER="+pl.User)
+		}
+		if pl.From != "" {
+			e.Env = append(e.Env, "KV_FROM="+pl.From, "KV_TO="+pl.To)
 		}
 		if err := e.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "cubby: warning: command for %s failed: %v\n", pl.Key, err)
@@ -120,8 +125,8 @@ func emitPulse(pl pulseItem, f *flags) {
 		fmt.Println(string(b))
 		return
 	}
-	if pl.User != "" {
-		fmt.Printf("%s\t%s\t%s\n", pl.User, pl.Key, compactJSON(pl.Value))
+	if pt := partyOf(area, pl.User, pl.From, pl.To); pt != "" {
+		fmt.Printf("%s\t%s\t%s\n", pt, pl.Key, compactJSON(pl.Value))
 	} else {
 		fmt.Printf("%s\t%s\n", pl.Key, compactJSON(pl.Value))
 	}

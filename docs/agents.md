@@ -94,6 +94,12 @@ curl -s -X POST -d '{"token": "at_..."}' https://SERVER/v1/homelab-.../join     
 
 Store the returned `vt_...` as the device's or CI's secret (`CUBBY_TOKEN` for the CLI). Give each machine its own narrow token, so revoking one doesn't affect the others.
 
+## Hidden answers, private messages, moderation
+
+- **Something only one person should see** (a quiz answer to the host, a dealt card, a role, a direct message) goes under `db.to(recipient)`, never `db.user()`, which everyone can read. The recipient reads `db.inbox`. `db.to("owners")` reaches the owners, who read `db.inbox.owners`.
+- **A visitor's private state** is `db.to("me")`. There's no `db.me` any more.
+- **Moderation** is `db.owner.bans.add(id)`, then deleting their `users/` entries. A ban deletes nothing on its own.
+
 ## Errors you'll see
 
 | Code | Meaning | Do |
@@ -104,12 +110,14 @@ Store the returned `vt_...` as the device's or CI's secret (`CUBBY_TOKEN` for th
 | `owner_only` | an owner action by a non-owner | only the owner can share or change settings |
 | `not_yours` | writing another visitor's `users/{id}/` | write your own `db.user()` |
 | `invalid_token` | the stored visitor is gone, for example after a year unused | kv.js gets a new one by itself; the person needs a new invite |
+| `banned` | an owner banned this visitor from the space; `until` says how long | show it; `db.open()` returns `banned: { until }` instead of throwing |
+| `no_visitor` | `db.to(id)` with an ID nobody has | check where the ID came from |
 
 ## Limits, presence, leases and deadlines
 
 Ask `await db.limits()` for `{limits, usage}` rather than budgeting against defaults. The latest data-write response is available through `db.writeBudget`, with visitor, IP and bytes buckets. It is only a snapshot. Handle 429 using `err.retryAfter` in seconds. kv.js does not queue or coalesce writes, coordinate tabs, or retry failed writes automatically.
 
-Presence belongs in `db.user().set("here", value, {ttl: 30})`, renewed every 15 to 20 seconds. Watch it through `db.users.watch("here", ...)`. `db.me` is private. Expiry sends a delete with `expired: true` and preserves the last writer as `by`. Identical-value renewals do not wake watchers; watch entries may hold an old `expires` value. A set without TTL clears expiry.
+Presence belongs in `db.user().set("here", value, {ttl: 30})`, renewed every 15 to 20 seconds. Watch it through `db.users.watch("here", ...)`. `db.to("me")` is private. Expiry sends a delete with `expired: true` and preserves the last writer as `by`. Identical-value renewals do not wake watchers; watch entries may hold an old `expires` value. A set without TTL clears expiry.
 
 Leases use `ifVersion: 0` to acquire, the acquired version to renew the same holder value with TTL, and that version to delete. A failed renewal means stop. No automatic lock helper is provided. This cannot prevent an actor from continuing external work after a long stall. See the [lease contract](spec.md#expiring-keys-and-leases).
 

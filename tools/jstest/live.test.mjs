@@ -56,9 +56,11 @@ const before = dataFetches
   assert(err.code === "too_late" && err.details.t > 0, "deadline")
   assert(await db.shared.delete("t") === true && await db.shared.delete("t") === false, "delete")
   assert(await db.shared.update("count", n => (n || 0) + 1) === 1, "update")
-  await db.me.set("pref", "dark")
+  await db.to("me").set("pref", "dark")
   await db.user().set("name", "Tim")
-  assert(await db.me.get("pref") === "dark" && await http.me.get("pref") === "dark", "me area")
+  assert(await db.to("me").get("pref") === "dark" && await http.inbox.from("me").get("pref") === "dark", "to/me")
+  const inboxItems = (await db.inbox.list("*")).items
+  assert(inboxItems.length === 1 && inboxItems[0].from === inboxItems[0].to && inboxItems[0].mine, "own note in inbox " + JSON.stringify(inboxItems))
   assert(await db.user().get("name") === "Tim" && (await db.users.list("name")).items.length === 1, "users area")
 }
 assert(dataFetches === before, `data requests used HTTP while open: ${dataFetches - before}`)

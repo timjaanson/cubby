@@ -17,7 +17,7 @@ type Settings struct {
 	Read        bool
 	WriteShared bool
 	WriteUsers  bool
-	WriteMe     bool
+	WriteTo     bool // sending under to/
 	// InviteOwners: only owners mint access tokens. The default, false, lets
 	// every member invite others with rights they hold themselves.
 	InviteOwners bool
@@ -27,8 +27,8 @@ type Settings struct {
 var presets = map[string]Settings{
 	"none":    {},
 	"read":    {Read: true},
-	"respond": {Read: true, WriteUsers: true, WriteMe: true},
-	"all":     {Read: true, WriteShared: true, WriteUsers: true, WriteMe: true},
+	"respond": {Read: true, WriteUsers: true, WriteTo: true},
+	"all":     {Read: true, WriteShared: true, WriteUsers: true, WriteTo: true},
 }
 
 // Private is the default for new spaces.
@@ -48,18 +48,18 @@ func (s Settings) Public() string {
 // Valid: an unreadable space can't take writes from anyone, since an open
 // write would tell a stranger the space exists.
 func (s Settings) Valid() bool {
-	return s.Read || !(s.WriteShared || s.WriteUsers || s.WriteMe)
+	return s.Read || !(s.WriteShared || s.WriteUsers || s.WriteTo)
 }
 
-// WriteAnyone reports the write setting of one area: "shared", "users" or "me".
+// WriteAnyone reports the write setting of one area: "shared", "users" or "to".
 func (s Settings) WriteAnyone(area string) bool {
 	switch area {
 	case "shared":
 		return s.WriteShared
 	case "users":
 		return s.WriteUsers
-	case "me":
-		return s.WriteMe
+	case "to":
+		return s.WriteTo
 	}
 	return false
 }
@@ -88,7 +88,7 @@ func (s Settings) Invite() string {
 
 func (s Settings) MarshalJSON() ([]byte, error) {
 	return json.Marshal(settingsJSON{Public: s.Public(), Read: word(s.Read),
-		Write:  map[string]string{"shared": word(s.WriteShared), "users": word(s.WriteUsers), "me": word(s.WriteMe)},
+		Write:  map[string]string{"shared": word(s.WriteShared), "users": word(s.WriteUsers), "to": word(s.WriteTo)},
 		Invite: s.Invite()})
 }
 
@@ -99,7 +99,7 @@ func (s *Settings) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	*s = Settings{Read: j.Read == "anyone", WriteShared: j.Write["shared"] == "anyone",
-		WriteUsers: j.Write["users"] == "anyone", WriteMe: j.Write["me"] == "anyone", InviteOwners: j.Invite == "owners"}
+		WriteUsers: j.Write["users"] == "anyone", WriteTo: j.Write["to"] == "anyone", InviteOwners: j.Invite == "owners"}
 	return nil
 }
 
@@ -115,7 +115,7 @@ func (s Settings) Encode() string {
 	if s.InviteOwners {
 		inv = 'o'
 	}
-	return string([]byte{b(s.Read), b(s.WriteShared), b(s.WriteUsers), b(s.WriteMe), inv})
+	return string([]byte{b(s.Read), b(s.WriteShared), b(s.WriteUsers), b(s.WriteTo), inv})
 }
 
 // Decode reads Encode's form. Anything unreadable is private. The four-letter
@@ -124,7 +124,7 @@ func Decode(v string) Settings {
 	if len(v) != 4 && len(v) != 5 {
 		return Private
 	}
-	return Settings{Read: v[0] == 'a', WriteShared: v[1] == 'a', WriteUsers: v[2] == 'a', WriteMe: v[3] == 'a',
+	return Settings{Read: v[0] == 'a', WriteShared: v[1] == 'a', WriteUsers: v[2] == 'a', WriteTo: v[3] == 'a',
 		InviteOwners: len(v) == 5 && v[4] == 'o'}
 }
 
@@ -187,9 +187,9 @@ func applyAccess(base Settings, public, read, write json.RawMessage) (Settings, 
 		if json.Unmarshal(write, &all) == nil {
 			switch all {
 			case "anyone":
-				s.WriteShared, s.WriteUsers, s.WriteMe = true, true, true
+				s.WriteShared, s.WriteUsers, s.WriteTo = true, true, true
 			case "granted":
-				s.WriteShared, s.WriteUsers, s.WriteMe = false, false, false
+				s.WriteShared, s.WriteUsers, s.WriteTo = false, false, false
 			default:
 				return base, SettingsError(`write is "anyone", "granted", or an object like {"shared": "granted"}.`)
 			}
@@ -207,10 +207,10 @@ func applyAccess(base Settings, public, read, write json.RawMessage) (Settings, 
 					s.WriteShared = v == "anyone"
 				case "users":
 					s.WriteUsers = v == "anyone"
-				case "me":
-					s.WriteMe = v == "anyone"
+				case "to":
+					s.WriteTo = v == "anyone"
 				default:
-					return base, SettingsError(fmt.Sprintf("write has no area %q. Areas are shared, users and me.", area))
+					return base, SettingsError(fmt.Sprintf("write has no area %q. Areas are shared, users and to.", area))
 				}
 			}
 		}
@@ -221,9 +221,11 @@ func applyAccess(base Settings, public, read, write json.RawMessage) (Settings, 
 	return s, nil
 }
 
-// Scope is one entry of a grant's allow list: AREA[/TARGET]:RIGHTS.
+// Scope is one entry of a grant's allow list: AREA[/TARGET]:RIGHTS, and
+// for to/ TO[/RECIPIENT[/TARGET]]:RIGHTS.
 type Scope struct {
-	Area    string // "shared", "users", "me" or "*"
+	Area    string // "shared", "users", "to" or "*"
+	Rcpt    string // to/ only: "" for any recipient, "me", "owners" or a visitor ID
 	Prefix  string // the target: a key, or a prefix when Pattern
 	Pattern bool
 	R, W    bool
@@ -258,10 +260,25 @@ func ParseScope(s string) (Scope, error) {
 	}
 	area, target, hasTarget := strings.Cut(body, "/")
 	switch area {
-	case "shared", "users", "me", "*":
+	case "shared", "users", "*":
 		sc.Area = area
+	case "to":
+		sc.Area = area
+		if hasTarget {
+			rcpt, rest, more := strings.Cut(target, "/")
+			switch {
+			case rcpt == "*":
+			case rcpt == "me" || rcpt == "owners" || names.ValidVisitor(rcpt):
+				sc.Rcpt = rcpt
+			default:
+				return sc, fmt.Errorf("%q: after to/ comes a recipient (me, owners, a visitor ID or *), then the target, like to/owners/answer:w", s)
+			}
+			target, hasTarget = rest, more
+		}
+	case "me":
+		return sc, fmt.Errorf("%q: me/ is now to/me/, so the scope is to/me%s", s, strings.TrimPrefix(s, "me"))
 	default:
-		return sc, fmt.Errorf("%q: the area is shared, users, me or *", s)
+		return sc, fmt.Errorf("%q: the area is shared, users, to or *", s)
 	}
 	if !hasTarget || target == "*" {
 		sc.Pattern = true
@@ -293,6 +310,13 @@ func (sc Scope) String() string {
 		r = "rw"
 	case sc.W:
 		r = "w"
+	}
+	if sc.Area == "to" && (sc.Rcpt != "" || t != "") {
+		rc := sc.Rcpt
+		if rc == "" {
+			rc = "*"
+		}
+		t = "/" + rc + t
 	}
 	return sc.Area + t + ":" + r
 }
@@ -342,7 +366,9 @@ func NormalizeAllow(list []string) ([]string, error) {
 
 // Op is what a request wants to do.
 type Op struct {
-	Area    string // "shared", "users" or "me"
+	Area    string // "shared", "users" or "to"
+	Rcpt    string // to/ only: a visitor ID, "owners", or "*" for every recipient
+	Self    string // the requesting visitor, for scopes naming to/me
 	Key     string // the key, or the prefix of a pattern
 	Pattern bool
 	Write   bool
@@ -355,6 +381,9 @@ func (sc Scope) Covers(op Op) bool {
 		return false
 	}
 	if op.Write && !sc.W || !op.Write && !sc.R {
+		return false
+	}
+	if sc.Rcpt != "" && sc.Rcpt != op.Rcpt && !(sc.Rcpt == "me" && op.Self != "" && op.Rcpt == op.Self) {
 		return false
 	}
 	if !sc.Pattern {
@@ -380,20 +409,28 @@ type Rights struct {
 	Settings Settings
 	Owner    bool
 	Grants   []Grant // live grants only
+	// Banned: an owner banned this visitor from the space. Nothing else
+	// counts while it lasts. Owners are never banned.
+	Banned      bool
+	BannedUntil int64 // ms, 0 for no end
 }
 
 // CanRead reports whether the space shows itself to this visitor at all:
 // readable by anyone, or the visitor holds some grant. A write-only grant
 // still makes the space visible, so a sensor's writes don't count as misses.
 func (r *Rights) Visible() bool {
-	return r.Settings.Read || r.Owner || len(r.Grants) > 0
+	return !r.Banned && (r.Settings.Read || r.Owner || len(r.Grants) > 0)
 }
 
-// Allows applies settings, ownership and grants. The fixed rules (users/{id}
-// only by {id}, me/ always your own, writes need a visitor) are the caller's.
+// Allows applies settings, ownership, bans and grants. The fixed rules
+// (users/{id} only by {id}, a to/ slot only by its sender, inbox/ always your
+// own, writes need a visitor) are the caller's.
 func (r *Rights) Allows(op Op) bool {
 	if r.Owner {
 		return true
+	}
+	if r.Banned {
+		return false
 	}
 	if op.Write && r.Settings.WriteAnyone(op.Area) || !op.Write && r.Settings.Read {
 		return true
@@ -409,7 +446,9 @@ func (r *Rights) Allows(op Op) bool {
 }
 
 // CanInvite reports whether this visitor may mint access tokens: owners
-// always, members when the space lets members invite.
+// always, members when the space lets members invite. A ban doesn't change
+// it, so lifting the ban restores exactly what was there; the routes and
+// redeeming check the ban themselves.
 func (r *Rights) CanInvite() bool {
 	return r.Owner || !r.Settings.InviteOwners && len(r.Grants) > 0
 }
@@ -430,7 +469,10 @@ func (r *Rights) CanGive(allow []string) bool {
 			if w && !sc.W || !w && !sc.R {
 				continue
 			}
-			op := Op{Area: sc.Area, Key: sc.Prefix, Pattern: sc.Pattern, Write: w}
+			op := Op{Area: sc.Area, Rcpt: sc.Rcpt, Key: sc.Prefix, Pattern: sc.Pattern, Write: w}
+			if sc.Area == "to" && sc.Rcpt == "" || sc.Area == "*" {
+				op.Rcpt = "*" // any recipient: only a scope for any recipient covers it
+			}
 			held := false
 			for _, g := range r.Grants {
 				for _, gs := range g.Scopes {

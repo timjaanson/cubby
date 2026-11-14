@@ -37,6 +37,12 @@
 // Anything a late joiner needs still goes in a stored key. Who's here:
 //   db.users.presence("here", { value: { name } })   // .peers, .onJoin, .onLeave
 //
+// db.user() is public to everyone in the space. For one reader, send it:
+//   db.to("owners").set("answer", 3)     // quiz answers, contact forms: db.inbox.owners
+//   db.to(playerId).set("hand", cards)   // only that player reads it, in db.inbox
+//   db.to("me").set("draft", text)       // private to you
+// Moderation: db.owner.bans.add(id). A banned visitor's open() has banned: { until }.
+//
 // Never put an access token (at_...) or owner token (ot_...) in page source.
 // Anyone who can load the page could use it. Invite links are for sending to people.
 //
@@ -71,6 +77,11 @@ const VISITOR_RE = /^u_[a-z2-7]{16}$/
 // "watch", "series" and "pulse" can follow a key in a path, so they aren't keys.
 const validKey = k => typeof k === "string" && KEY_RE.test(k) && k !== "watch" && k !== "series" && k !== "pulse" && k !== "." && k !== ".."
 const validTarget = t => validKey(t) || (typeof t === "string" && PATTERN_RE.test(t))
+
+function checkVisitor(id) {
+  if (typeof id === "string" && VISITOR_RE.test(id)) return
+  throw new KvError(0, "invalid_key", `${JSON.stringify(id)} isn't a visitor ID. IDs look like u_k7m2x9q4p1r8t3w6.`)
+}
 
 // Checked before any request. Keys go into the URL, where "#", "?", "/" or
 // ".." would silently address something else.
@@ -267,7 +278,7 @@ export function kv(space, opts = {}) {
       if (qs) url += "?" + qs
       const headers = {}
       if (!read && cur?.token) headers.Authorization = "Bearer " + cur.token
-      const dataPath = path.startsWith("shared/") || path.startsWith("me/") || path.startsWith("users/")
+      const dataPath = /^(shared|users|to|inbox)\//.test(path)
       // With live on, data requests go over the socket while it's open and
       // over HTTP otherwise. The answers are the same either way.
       const viaLive = live && dataPath && live.isOpen()
@@ -556,7 +567,8 @@ export function kv(space, opts = {}) {
     }
   }
 
-  const entryId = e => (e.user || "") + "/" + e.key
+  // One entry across users/*/, inbox/*/ or to/*/: its parties and its key.
+  const entryId = e => JSON.stringify([e.user || "", e.from || "", e.to || "", e.key])
 
   // from:
   //   0 (default)   every existing key first, then changes
@@ -668,8 +680,8 @@ export function kv(space, opts = {}) {
       if (resync instanceof Set) {
         for (const id of [...known]) {
           if (resync.has(id)) continue
-          const slash = id.indexOf("/")
-          deliver({ key: id.slice(slash + 1), user: id.slice(0, slash) || undefined, deleted: true, version: body.version })
+          const [user, from, to, key] = JSON.parse(id)
+          deliver({ key, user: user || undefined, from: from || undefined, to: to || undefined, deleted: true, version: body.version })
         }
       }
       if (stopped) return
@@ -872,6 +884,23 @@ export function kv(space, opts = {}) {
 
   const myArea = async () => "users/" + (await ident.get()).id
 
+  // The recipient's side of to/: read and delete only. prefix is "" or "owners/".
+  function inboxOf(prefix) {
+    const all = async t => `inbox/${prefix}*/${t}`
+    const box = {
+      list: (target, o) => list(all, true, target, o),
+      watch: (target, onChange, o) => watch(all, true, target, onChange, o),
+      onPulse: (target, onPulse, o) => listenPulses(all, true, target, onPulse, o),
+      from(sender) {
+        if (sender !== "me") checkVisitor(sender)
+        const a = area(`inbox/${prefix}${sender}`, { needsAuth: true })
+        return { getEntry: a.getEntry, get: a.get, delete: a.delete, series: a.series, list: a.list, watch: a.watch, onPulse: a.onPulse }
+      },
+    }
+    if (!prefix) box.owners = inboxOf("owners/")
+    return box
+  }
+
   // JSON calls on the space itself: join, access, settings, tokens, grants.
   async function call(method, path, { body, auth = true, query } = {}) {
     const res = await request(method, path, { body: body === undefined ? undefined : JSON.stringify(body), auth, query })
@@ -909,15 +938,16 @@ export function kv(space, opts = {}) {
           await db.join(invite)
           joined = true
         } catch (err) {
-          if (err.code !== "invite_invalid") throw err
-          inviteFailed = true
+          if (err.code !== "invite_invalid" && err.code !== "banned") throw err
+          inviteFailed = err.code === "invite_invalid"
         }
       }
       try {
         return accessFrom(await call("GET", "access", { auth: false }), { joined, inviteFailed })
       } catch (err) {
-        if (err.code !== "no_space") throw err
-        return makeAccess({ inside: false, joined, inviteFailed, id: ident.current()?.id ?? null, owner: false, canInvite: false, settings: null, grants: [] })
+        if (err.code !== "no_space" && err.code !== "banned") throw err
+        const banned = err.code === "banned" ? { until: err.details.until ?? null } : null
+        return makeAccess({ inside: false, banned, joined, inviteFailed, id: ident.current()?.id ?? null, owner: false, canInvite: false, settings: null, grants: [] })
       }
     },
     // An invite link to send: this page (or base) with #t=at_... added.
@@ -950,16 +980,46 @@ export function kv(space, opts = {}) {
         revoke: async id => { await call("DELETE", "grants/" + encodeURIComponent(id)) },
         revokeUser: async user => { await call("DELETE", "grants", { query: { user } }) },
       },
+      // A ban shuts a visitor out of this space: every request they make
+      // answers 403 banned, and their live connections close. It deletes
+      // and revokes nothing; unban() restores exactly what they had.
+      bans: {
+        list: async () => (await call("GET", "bans")).items,
+        add: (user, o = {}) => {
+          checkVisitor(user)
+          return call("PUT", "bans/" + user, { body: o.until === undefined ? {} : { until: timeValue(o.until) } })
+        },
+        remove: async user => {
+          checkVisitor(user)
+          return (await call("DELETE", "bans/" + user)).lifted
+        },
+      },
     },
     shared: area("shared"),
-    me: area("me", { needsAuth: true }),
     user(id) {
       if (id === undefined) return area(myArea)
-      if (typeof id !== "string" || !VISITOR_RE.test(id)) {
-        throw new KvError(0, "invalid_key", `${JSON.stringify(id)} isn't a visitor ID. IDs look like u_k7m2x9q4p1r8t3w6.`)
-      }
+      checkVisitor(id)
       return area("users/" + id, { other: id })
     },
+    // What you send one recipient: a visitor ID, "me" (private to you) or
+    // "owners". One slot per recipient, sender and key, so senders never
+    // overwrite each other. Only the recipient reads it, in their inbox, and
+    // you read back what you sent.
+    to(recipient) {
+      if (recipient !== "me" && recipient !== "owners") checkVisitor(recipient)
+      return area("to/" + recipient, { needsAuth: true })
+    },
+    // Everything you sent, across recipients. Items carry to.
+    sent: {
+      list: (target, o) => list(async t => `to/*/${t}`, true, target, o),
+      watch: (target, onChange, o) => watch(async t => `to/*/${t}`, true, target, onChange, o),
+      onPulse: (target, onPulse, o) => listenPulses(async t => `to/*/${t}`, true, target, onPulse, o),
+    },
+    // What others sent you. Items carry from and to. Your own to("me")
+    // entries are here too, from you. inbox.from(id) reads one sender's and
+    // can delete; inbox.owners is mail to the owners group, for owners.
+    inbox: inboxOf(""),
+    id: async () => (await ident.get()).id,
     users: {
       list: (target, o) => list(async t => `users/*/${t}`, false, target, o),
       watch: (target, onChange, o) => watch(async t => `users/*/${t}`, false, target, onChange, o),
@@ -1007,13 +1067,23 @@ function tokenBody(o, creating) {
 }
 
 // A scope is AREA[/TARGET]:RIGHTS. covers mirrors the server's rule.
-function covers(scope, method, area, key) {
+// area is "shared", "users", or "to/{recipient}" (a visitor ID, "me" or
+// "owners"); a scope on to/ names its recipient first, as in to/owners/answer:w.
+function covers(scope, method, area, key, self) {
   const [body, rights] = scope.split(":")
   if (!rights || !rights.includes(method === "write" ? "w" : "r")) return false
   const slash = body.indexOf("/")
   const sArea = slash < 0 ? body : body.slice(0, slash)
-  const target = slash < 0 ? "*" : body.slice(slash + 1)
-  if (sArea !== "*" && sArea !== area) return false
+  let target = slash < 0 ? "*" : body.slice(slash + 1)
+  const [want, rcpt = "*"] = area.split("/")
+  if (sArea !== "*" && sArea !== want) return false
+  if (sArea === "to") {
+    const s2 = target.indexOf("/")
+    const sRcpt = s2 < 0 ? target : target.slice(0, s2)
+    target = s2 < 0 ? "*" : target.slice(s2 + 1)
+    const r = rcpt === "me" ? self : rcpt
+    if (sRcpt !== "*" && sRcpt !== rcpt && !(sRcpt === "me" && r === self)) return false
+  }
   if (key === undefined) return target === "*"
   if (target.endsWith("*")) return key.replace(/\*$/, "").startsWith(target.slice(0, -1))
   return !key.endsWith("*") && key === target
@@ -1026,8 +1096,8 @@ function makeAccess(a) {
     if (a.owner) return true
     const s = a.settings
     if (method === "read" && s?.read === "anyone") return true
-    if (method === "write" && s?.write?.[area] === "anyone") return true
-    return a.grants.some(g => g.owner || g.allow.some(sc => covers(sc, method, area, key)))
+    if (method === "write" && s?.write?.[area.split("/")[0]] === "anyone") return true
+    return a.grants.some(g => g.owner || g.allow.some(sc => covers(sc, method, area, key, a.id)))
   }
   return a
 }

@@ -147,8 +147,8 @@ type settingsOut struct {
 }
 
 func (s settingsOut) print() {
-	fmt.Printf("public\t%s\nread\t%s\nwrite.shared\t%s\nwrite.users\t%s\nwrite.me\t%s\ninvite\t%s\n",
-		s.Public, s.Read, s.Write["shared"], s.Write["users"], s.Write["me"], s.Invite)
+	fmt.Printf("public\t%s\nread\t%s\nwrite.shared\t%s\nwrite.users\t%s\nwrite.to\t%s\ninvite\t%s\n",
+		s.Public, s.Read, s.Write["shared"], s.Write["users"], s.Write["to"], s.Invite)
 }
 
 func (c *client) access(f *flags) error {
@@ -423,4 +423,45 @@ func (c *client) grantCmd(f *flags) error {
 		return usageCli("grant rm takes a space and a grant ID, or a space and --user ID")
 	}
 	return usageCli("grant ls|add|rm <space> ...")
+}
+
+func (c *client) banCmd(f *flags) error {
+	if len(f.args) < 2 {
+		return usageCli("ban ls|add|rm <space> ...")
+	}
+	sub := f.args[0]
+	space, err := spaceArg(f.args[1])
+	if err != nil {
+		return err
+	}
+	base := "/v1/" + space + "/bans"
+	switch sub {
+	case "ls":
+		var out struct {
+			Items []struct {
+				User, By string
+				Until    *int64
+			}
+		}
+		if err := c.call("GET", base, nil, 200, &out); err != nil {
+			return err
+		}
+		for _, b := range out.Items {
+			fmt.Printf("%s\t%s\t%s\n", b.User, fmtTime(b.Until), b.By)
+		}
+		return nil
+	case "add", "rm":
+		if len(f.args) != 3 || !names.ValidVisitor(f.args[2]) {
+			return usageCli("ban " + sub + " takes a space and a visitor ID")
+		}
+		if sub == "rm" {
+			return c.call("DELETE", base+"/"+f.args[2], nil, 200, nil)
+		}
+		body := map[string]any{}
+		if f.has("until") {
+			body["until"] = f.str("until")
+		}
+		return c.call("PUT", base+"/"+f.args[2], body, 201, nil)
+	}
+	return usageCli("ban ls|add|rm <space> ...")
 }

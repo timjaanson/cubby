@@ -5,7 +5,7 @@ Five complete pages, a set of shell scripts and a microcontroller sketch. Each p
 | Scenario | Settings | Client | Shows |
 |---|---|---|---|
 | [1. Shared note](#1-shared-note-raw-http) | `public: all`: a group edits one thing | raw `fetch`, plus `curl` | creating a space, reads without a token, getting a token for writes, conditional writes, delete, watching one key |
-| [2. Lunch poll](#2-lunch-poll-js-client) | `public: respond`: the author writes `shared/`, everyone votes | JS client | settings per area, votes in `users/`, reading across visitors, private `me/`, inviting a co-author |
+| [2. Lunch poll](#2-lunch-poll-js-client) | `public: respond`: the author writes `shared/`, everyone votes | JS client | settings per area, votes in `users/`, reading across visitors, private `to/me/`, inviting a co-author |
 | [3. Chat rooms](#3-chat-rooms-js-client) | `public: all`: a space per link | JS client | `createSpace` per room, the creator as owner, messages in `users/`, names, presence, `update` on shared settings |
 | [4. Home server status and deploys](#4-home-server-status-and-deploys-shell) | `public: read`: granted machines write | CLI, plus `curl` versions | access tokens for machines, a fixed identity for CI, publishing from cron, reacting with `watch --exec` |
 | [5. Room sensor](#5-room-sensor-raw-http-from-a-microcontroller) | `public: read`: the board writes | raw HTTP from C++ and `fetch` | a device redeeming once, series, adding to several in one request, live values, a 24-hour chart |
@@ -208,7 +208,7 @@ Use `--data-binary`, not `-d`. `-d` strips newlines from the body.
 
 ## 2. Lunch poll (JS client)
 
-The poll's question and options live in `shared/`, which only the author writes. Each visitor's vote is in their own `users/` area, where nobody else can change it. A visitor's display preference is in private `me/`.
+The poll's question and options live in `shared/`, which only the author writes. Each visitor's vote is in their own `users/` area, where nobody else can change it. A visitor's display preference is in private `to/me/`.
 
 ### One-time setup by the author
 
@@ -216,7 +216,7 @@ The poll's question and options live in `shared/`, which only the author writes.
 $ API=https://kv.example.com/v1
 $ curl -s -X POST $API/spaces -d '{"label": "lunch-poll", "public": "respond"}'
 {"space":"lunch-poll-orbit-lilac-tango-slate","owner":"ot_Hq3...keep this private","id":"u_k7m2x9q4p1r8t3w6",
- "token":"vt_Pw8...","settings":{"public":"respond","read":"anyone","write":{"shared":"granted","users":"anyone","me":"anyone"}}}
+ "token":"vt_Pw8...","settings":{"public":"respond","read":"anyone","write":{"shared":"granted","users":"anyone","to":"anyone"}}}
 $ T=vt_Pw8...
 
 $ curl -s -X PUT -H "Authorization: Bearer $T" \
@@ -300,10 +300,10 @@ db.users.watch("vote", change => {
   else votes.set(change.user, change.value)
 }, { onSync: render, onError: showError })
 
-$percent.checked = (await db.me.get("showPercent")) ?? false
+$percent.checked = (await db.to("me").get("showPercent")) ?? false
 $percent.addEventListener("change", async () => {
   render()
-  await db.me.set("showPercent", $percent.checked)
+  await db.to("me").set("showPercent", $percent.checked)
 })
 
 async function vote(option) {
@@ -368,7 +368,7 @@ function render() {
 - **Votes need no invite.** `write.users` is `anyone`, so every visitor can vote. An embedded access token in the page would protect nothing, since anyone could read it from the source.
 - **Votes for options that don't exist are ignored.** A visitor can write anything into their own `vote`, so the page shouldn't trust it blindly.
 - **One vote per visitor, not per person.** Clearing site data creates a new visitor who can vote again. Anonymous identities can't prevent that.
-- **This page gets a token on load,** because it needs the visitor's ID to highlight their vote and reads `me/`. A page that only displayed results wouldn't need one.
+- **This page gets a token on load,** because it needs the visitor's ID to highlight their vote and reads `to/me/`. A page that only displayed results wouldn't need one.
 
 ## 3. Chat rooms (JS client)
 
@@ -1064,21 +1064,24 @@ if (me.owner) {
 
 ## Other situations
 
-Short sketches, without full code, of how other pages would use settings, grants and the three areas.
+Short sketches, without full code, of how other pages would use settings, grants and the areas. The last column is `to/`: `to/me/` for private state, `to/owners/` or `to/{id}/` for one reader.
 
-| Page | `public` and grants | `shared/` | `users/{id}/` | `me/` |
+| Page | `public` and grants | `shared/` | `users/{id}/` | `to/` |
 |---|---|---|---|---|
-| Kanban board for a small team | `none`, each member invited | `card.{id}` per card, so moving one card doesn't conflict with editing another | `name` | `collapsed` columns |
+| Kanban board for a small team | `none`, each member invited | `card.{id}` per card, so moving one card doesn't conflict with editing another | `name` | `to/me/collapsed` columns |
 | Party playlist | `all` | `queue.{time}` per song anyone adds | `name` | |
 | Sign-up sheet for time slots | `respond`, organiser owns it | `slots`, the available times | `slot`, the time each person picked, so nobody can remove someone else | |
 | Turn-based game between friends | `none`, created per game by `createSpace`, the opponent gets a one-use invite | `board` and `turn`, written with `ifVersion` so two moves can't both land | `name` | |
 | Status page | `read`, the script holds `shared/status:w` | `status` | | |
-| Event schedule with RSVPs | `respond` | `schedule` from the organiser | `rsvp` per visitor | `reminders` |
-| Quiz | `respond` | `questions`, and `answers` once the author reveals them | `answer.{n}` per question | `progress` |
+| Event schedule with RSVPs | `respond` | `schedule` from the organiser | `rsvp` per visitor | `to/me/reminders` |
+| Quiz | `respond` | `questions`, and `answers` once the author reveals them | `score`, published by the host | `to/owners/answer.{n}` so nobody copies, `to/me/progress` |
+| Card game or Werewolf | `none`, players invited | `table`, `turn` | `name` | the host deals `to/{id}/hand` or `to/{id}/role`; players send moves `to/owners/move` |
+| Contact form | `respond` | `intro` | | `to/owners/msg.{time}`, read by owners under `inbox/owners/*/` |
+| Video call between two pages | `none` | | `here` presence | WebRTC offers and ICE candidates as pulses to `to/{peer}/rtc.*` |
 | Leaderboard someone could cheat on | `respond` | | `score`, reported by each player, read with `users/*/score` | |
 | Leaderboard that can't be faked | `read`, a trusted script holds `shared/scores:w` | `scores`, written only after the script checks results | | |
 | Plant watering log | `none`, the sensor holds `shared/moisture:w`, the household are members | series `moisture` from the sensor, series `watered` with a note per watering | | |
-| Personal habit tracker | `none`, one owner on several devices through the owner token | | | series `weight`, `sleep` |
+| Personal habit tracker | `none`, one owner on several devices through the owner token | | | series `to/me/weight`, `to/me/sleep` |
 | Team dashboard on a wall screen | `none`, editors as members, the screen with a one-use `viewer` invite | `widget.{id}` | | |
 
 Patterns that come up repeatedly:

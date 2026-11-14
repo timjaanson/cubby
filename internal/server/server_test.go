@@ -241,18 +241,18 @@ func TestAreas(t *testing.T) {
 		t.Fatalf("page 2: %s", body)
 	}
 
-	// me/ is private.
-	c.req("PUT", sp+"/me/draft", "secret", a...)
-	if _, _, body := c.req("GET", sp+"/me/draft", "", b...); !strings.Contains(body, "not_found") {
+	// to/me/ is private.
+	c.req("PUT", sp+"/to/me/draft", "secret", a...)
+	if _, _, body := c.req("GET", sp+"/to/me/draft", "", b...); !strings.Contains(body, "not_found") {
 		t.Fatalf("B sees A's me/: %s", body)
 	}
-	if _, _, body := c.req("GET", sp+"/me/draft", "", a...); body != "secret" {
+	if _, _, body := c.req("GET", sp+"/to/me/draft", "", a...); body != "secret" {
 		t.Fatalf("A's me/: %s", body)
 	}
-	if s, _, _ := c.req("GET", sp+"/me/draft", ""); s != 401 {
+	if s, _, _ := c.req("GET", sp+"/to/me/draft", ""); s != 401 {
 		t.Fatalf("me/ without token: %d", s)
 	}
-	if s, _, body := c.req("GET", sp+"/me/draft", "", "Authorization", "Bearer vt_nope"); s != 401 || errCode(body) != "invalid_token" {
+	if s, _, body := c.req("GET", sp+"/to/me/draft", "", "Authorization", "Bearer vt_nope"); s != 401 || errCode(body) != "invalid_token" {
 		t.Fatalf("bad token: %d %s", s, body)
 	}
 	if _, _, body := c.req("GET", "/v1/whoami", "", a...); !strings.Contains(body, idA) {

@@ -59,7 +59,7 @@ func TestPrivateByDefault(t *testing.T) {
 	gone := "/v1/gone-cedar-pilot-mango-frost"
 	for _, r := range []struct{ method, path, body string }{
 		{"GET", "/shared/k", ""}, {"GET", "/shared/*", ""}, {"GET", "/shared/*/watch?version=0", ""},
-		{"PUT", "/shared/k", "x"}, {"GET", "/me/k", ""}, {"GET", "/users/*/k", ""}, {"GET", "/shared/k/series", ""},
+		{"PUT", "/shared/k", "x"}, {"GET", "/to/me/k", ""}, {"GET", "/users/*/k", ""}, {"GET", "/shared/k/series", ""},
 		{"GET", "/access", ""}, {"GET", "/tokens", ""}, {"PATCH", "", `{"public":"all"}`}, {"DELETE", "", ""},
 	} {
 		for _, who := range [][]string{nil, bearer(stranger)} {
@@ -119,7 +119,7 @@ func TestPublicSettings(t *testing.T) {
 		if s, _, _ := c.req("PUT", sp+"/users/"+sid+"/x", `1`, bearer(stranger)...); s != want(k.users) {
 			t.Errorf("%s users write: %d", k.public, s)
 		}
-		if s, _, _ := c.req("PUT", sp+"/me/x", `1`, bearer(stranger)...); s != want(k.me) {
+		if s, _, _ := c.req("PUT", sp+"/to/me/x", `1`, bearer(stranger)...); s != want(k.me) {
 			t.Errorf("%s me write: %d", k.public, s)
 		}
 		if _, _, b := c.req("GET", sp+"/access", ""); !strings.Contains(b, `"public":"`+k.public+`"`) || !strings.Contains(b, `"id":null`) {
@@ -133,7 +133,7 @@ func TestPublicSettings(t *testing.T) {
 	if s, _, b := c.req("PATCH", sp, `{"public":"read"}`, bearer(stranger)...); s != 403 || errCode(b) != "owner_only" {
 		t.Fatalf("non-owner patch: %d %s", s, b)
 	}
-	if s, _, b := c.req("PATCH", sp, `{"write":{"me":"granted"}}`, bearer(own.Token)...); s != 200 || !strings.Contains(b, `"public":"custom"`) {
+	if s, _, b := c.req("PATCH", sp, `{"write":{"to":"granted"}}`, bearer(own.Token)...); s != 200 || !strings.Contains(b, `"public":"custom"`) {
 		t.Fatalf("patch: %d %s", s, b)
 	}
 	if s, _, b := c.req("PATCH", sp, `{"public":"none"}`, bearer(own.Token)...); s != 200 || !strings.Contains(b, `"public":"none"`) {
@@ -306,9 +306,9 @@ func TestStackingAndScopes(t *testing.T) {
 	if s, _, _ := c.req("PUT", sp+"/shared/notes.3", `3`, a...); s != 403 {
 		t.Fatalf("after removing all: %d", s)
 	}
-	// me/ in a space with granted writes needs a scope too.
-	if s, _, b := c.req("PUT", sp+"/me/x", `1`, a...); s != 403 || errCode(b) != "no_access" {
-		t.Fatalf("me/ without scope: %d %s", s, b)
+	// to/me/ in a space with granted writes needs a scope too.
+	if s, _, b := c.req("PUT", sp+"/to/me/x", `1`, a...); s != 403 || errCode(b) != "no_access" {
+		t.Fatalf("to/me/ without scope: %d %s", s, b)
 	}
 }
 

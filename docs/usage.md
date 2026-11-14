@@ -17,7 +17,10 @@ How to use a cubby server from a page, a shell or anything that speaks HTTP. Ins
 space                 notes-cedar-pilot-mango-frost    owners, settings, invites
 ├── shared/{key}      the space's common data
 ├── users/{id}/{key}  each visitor's public part; only that visitor writes it
-└── me/{key}          each visitor's private data
+└── to/{id}/{key}     sent to one visitor; they read it as inbox/{sender}/{key}
+
+me stands for your own ID anywhere one goes: users/me/, to/me/ (private to you), inbox/me/.
+to/owners/{key} reaches every owner, who read it under inbox/owners/{sender}/{key}.
 ```
 
 - A visitor is an anonymous identity with a visitor token (`vt_...`), the only credential a request ever carries. The CLI and the JS client get one by themselves when they need it.
@@ -27,7 +30,7 @@ space                 notes-cedar-pilot-mango-frost    owners, settings, invites
 |---|---|---|
 | `none`, the default | owners and invited people | owners and invited people |
 | `read` | anyone with the name | owners and invited people |
-| `respond` | anyone with the name | invited people in `shared/`; everyone their own `users/` and `me/` |
+| `respond` | anyone with the name | invited people in `shared/`; everyone their own `users/` and `to/` |
 | `all` | anyone with the name | anyone with the name |
 
 - Owners invite people with access tokens (`at_...`), usually sent as a link with `#t=at_...`. Redeeming one with `join` gives that visitor a grant. By default an invite makes a full member, works for 10 people and expires after 7 days. Members can invite too, with at most the rights they hold, unless the space says `invite: "owners"`. The owner token (`ot_...`) is the owner's recovery key.
@@ -118,7 +121,8 @@ addEventListener("pointermove", e => db.user().pulse("cursor", { x: e.clientX, y
 const stop = db.users.onPulse("cursor", p => { if (!p.mine) drawCursor(p.user, p.value) })
 
 db.shared.pulse("confetti", { by: "Anna" })  // to everyone listening on shared/confetti
-db.me.pulse("sync", { tab: "settings" })     // to your own other tabs and devices
+db.to("me").pulse("sync", { tab: "settings" })   // to your own other tabs and devices
+db.to(peerId).pulse("rtc.offer", offer)          // only peerId hears it, on db.inbox.onPulse("rtc.*", ...)
 ```
 
 - **Nothing is kept.** `get`, `list` and `watch` never see a pulse, and it doesn't touch a stored key of the same name. Someone who opens the page a second later doesn't get it.
@@ -128,6 +132,40 @@ db.me.pulse("sync", { tab: "settings" })     // to your own other tabs and devic
 - **Same rights as the key.** Sending needs write access to the key, listening needs read access. Under `users/{id}/` only that visitor sends, so a cursor can't be faked.
 - **Best effort, honestly.** The server keeps the last 10 seconds in memory, so a listener between two HTTP requests or reconnecting a socket catches up. If a listener falls further behind, it gets `onMissed` instead of the old pulses. A restart drops them all.
 - **Without the JS client:** `POST /v1/{space}/shared/confetti/pulse` sends, `GET .../confetti/pulse?after=SEQ` long-polls (pass `seq` back as `after`), and on a WebSocket the same requests stream. From a shell: `cubby pulse space/shared/doorbell ding` and `cubby pulses 'space/shared/*'`. Details in the [spec](spec.md#12-pulses).
+
+## Values for one reader
+
+`users/{id}/` is public to everyone in the space. For something one person should see, send it under `to/`:
+
+```js
+await db.to("owners").set("answer.3", "B")          // quiz answer, only the owners read it
+await db.to(playerId).set("hand", ["7H", "QS"])     // a dealt card, only that player reads it
+await db.to("me").set("draft", text)                // private to you
+
+const { items } = await db.inbox.list("answer.*")   // what others sent you: items have from and to
+db.inbox.watch("hand", c => show(c.value))           // a card arrives
+await db.inbox.from(senderId).delete("hand")         // the recipient can delete it
+
+const answers = await db.inbox.owners.list("answer.*")   // owners: what was sent to the owners
+const sent = await db.sent.list("*")                     // what you sent, items have to
+```
+
+- **One slot per sender.** Bob and Cara both sending `answer.3` to the owners fill two slots. Bob sending it again replaces his own.
+- **Your own sends echo back**, like every write: `to("me")` entries appear in your inbox, from you, and `c.mine` is true for anything you wrote.
+- **Pulses work too.** `db.to(peerId).pulse("rtc.offer", offer)` reaches only `peerId`'s `db.inbox.onPulse(...)`. That's enough for WebRTC signaling.
+- **In a public space**, `respond` and `all` let anyone send. In a private one, `to/owners/*:w` is a scope for a contact form: send to the owners, nothing else.
+- Plain HTTP: `PUT /v1/{space}/to/{id|me|owners}/{key}` sends, `GET /v1/{space}/inbox/*/{key}` reads. [The contract](spec.md#to-and-inbox).
+
+## Bans
+
+```js
+await db.owner.bans.add(visitorId, { until: "1d" })   // or no until for no end
+await db.owner.bans.remove(visitorId)
+```
+
+A banned visitor gets 403 `banned` for every request in the space and their live connections close. `db.open()` returns `{ inside: false, banned: { until } }`. Nothing they stored is deleted and no grant is revoked, so removing the ban restores exactly what they had. Delete their messages separately, with `db.user(id).delete(key)` as an owner. From a shell: `cubby ban add <space> <id> --until 1d`.
+
+To let one person mute another, keep a list in `db.to("me")` and skip those senders in the page. The server has no per-person block.
 
 ## Expiry, limits and timing
 

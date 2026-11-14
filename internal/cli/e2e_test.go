@@ -186,3 +186,55 @@ func TestCLIWriteDoesNotRetryRateLimit(t *testing.T) {
 		t.Fatalf("write retried count=%d err=%v", count, err)
 	}
 }
+
+func TestCLIToInboxAndBans(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.DataDir = t.TempDir()
+	cfg.Server.RateLimits = new(bool)
+	st, err := store.Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(server.New(cfg, st, nil))
+	t.Cleanup(func() { ts.Close(); st.Close() })
+	t.Setenv("CUBBY_SERVER", ts.URL)
+	t.Setenv("CUBBY_TOKEN", "")
+	owner, guest := t.TempDir(), t.TempDir()
+
+	out, _ := cli(t, owner, "new", "quiz", "--public", "respond")
+	space := strings.Split(out, "\n")[0]
+	if _, code := cli(t, guest, "set", space+"/to/owners/answer", "42"); code != 0 {
+		t.Fatal("send to owners")
+	}
+	guestID, _ := cli(t, guest, "whoami")
+	if out, _ := cli(t, owner, "ls", space+"/inbox/owners/*/answer"); out != guestID+"\tanswer\t42" {
+		t.Fatalf("owners' inbox: %q", out)
+	}
+	if out, _ := cli(t, guest, "get", space+"/to/owners/answer"); out != "42" {
+		t.Fatalf("read back: %q", out)
+	}
+	if _, code := cli(t, guest, "set", space+"/to/me/draft", "secret"); code != 0 {
+		t.Fatal("to/me")
+	}
+	if out, _ := cli(t, guest, "get", space+"/inbox/me/draft"); out != "secret" {
+		t.Fatalf("inbox/me: %q", out)
+	}
+	if _, code := cli(t, guest, "get", space+"/me/draft"); code != 5 {
+		t.Fatalf("old me/ path: %d", code)
+	}
+	if _, code := cli(t, owner, "ban", "add", space, guestID, "--until", "1h"); code != 0 {
+		t.Fatal("ban add")
+	}
+	if out, _ := cli(t, owner, "ban", "ls", space); !strings.HasPrefix(out, guestID+"\t") {
+		t.Fatalf("ban ls: %q", out)
+	}
+	if _, code := cli(t, guest, "set", space+"/to/owners/answer", "43"); code != 3 {
+		t.Fatalf("banned write: %d", code)
+	}
+	if _, code := cli(t, owner, "ban", "rm", space, guestID); code != 0 {
+		t.Fatal("ban rm")
+	}
+	if _, code := cli(t, guest, "set", space+"/to/owners/answer", "43"); code != 0 {
+		t.Fatal("write after unban")
+	}
+}

@@ -26,6 +26,7 @@ type accessCache struct {
 	settings access.Settings
 	grants   map[string][]access.Grant // visitor -> grants, ended ones included
 	used     map[string]int64          // visitor -> last_used_at written, seconds
+	bans     map[string]int64          // visitor -> until in ms, 0 for no end; lapsed ones included
 }
 
 func (s *Store) loadAccess(sp *spaceDB) (*accessCache, error) {
@@ -38,7 +39,21 @@ func (s *Store) loadAccess(sp *spaceDB) (*accessCache, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &accessCache{settings: m.settings, grants: map[string][]access.Grant{}, used: map[string]int64{}}
+	c := &accessCache{settings: m.settings, grants: map[string][]access.Grant{}, used: map[string]int64{}, bans: map[string]int64{}}
+	brows, err := sp.db.Query(`SELECT visitor, coalesce(until, 0) FROM bans`)
+	if err != nil {
+		return nil, err
+	}
+	for brows.Next() {
+		var v string
+		var until int64
+		if err := brows.Scan(&v, &until); err != nil {
+			brows.Close()
+			return nil, err
+		}
+		c.bans[v] = until
+	}
+	brows.Close()
 	rows, err := sp.db.Query(`SELECT id, visitor, owner, allow, source, until, coalesce(last_used_at, 0) FROM grants`)
 	if err != nil {
 		return nil, err
@@ -96,6 +111,10 @@ func (s *Store) Rights(space, visitor string) (*access.Rights, error) {
 			r.Owner = true
 		}
 		r.Grants = append(r.Grants, g)
+	}
+	if until, ok := c.bans[visitor]; ok && !r.Owner && (until == 0 || until > now.UnixMilli()) {
+		r.Banned, r.BannedUntil = true, until
+		return r, nil
 	}
 	if len(r.Grants) > 0 {
 		s.markUsed(sp, c, visitor, now)
@@ -418,7 +437,7 @@ func (s *Store) Redeem(space, visitor, token string) (g GrantInfo, err error) {
 			}
 			var list []string
 			json.Unmarshal([]byte(allow), &list)
-			if !r.CanInvite() || !r.CanGive(list) {
+			if r.Banned || !r.CanInvite() || !r.CanGive(list) {
 				return apierr.InviteInvalid
 			}
 		}
@@ -572,7 +591,20 @@ func rightsTx(tx *sql.Tx, visitor string, now int64) (*access.Rights, error) {
 		r.Owner = r.Owner || g.Owner
 		r.Grants = append(r.Grants, g)
 	}
-	return r, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	if !r.Owner {
+		var until int64
+		err := tx.QueryRow(`SELECT coalesce(until, 0) FROM bans WHERE visitor = ? AND (until IS NULL OR until > ?)`, visitor, now).Scan(&until)
+		if err == nil {
+			r.Banned, r.BannedUntil = true, until
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+	}
+	return r, nil
 }
 
 // revokeUngivable ends the open tokens whose minter could no longer mint

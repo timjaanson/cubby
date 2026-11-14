@@ -145,7 +145,7 @@ func (c *client) series(f *flags) error {
 		if since != nil {
 			q.Set("since", strconv.FormatInt(*since, 10))
 		}
-		resp, b, err := c.do("GET", p.url()+"/series?"+q.Encode(), nil, reqOpts{needToken: p.area == "me"})
+		resp, b, err := c.do("GET", p.url()+"/series?"+q.Encode(), nil, reqOpts{needToken: p.needsToken()})
 		if err != nil {
 			return err
 		}

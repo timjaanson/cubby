@@ -326,13 +326,13 @@ func TestLiveAuth(t *testing.T) {
 	if f := w.call("1", `{"id":1,"op":"auth","token":"`+own+`"}`); f.Status != 200 {
 		t.Fatalf("auth after header: %d %s", f.Status, f.Body)
 	}
-	w.call("2", `{"id":2,"method":"PUT","path":"me/x","body":1}`)
-	w.send(`{"id":"me","method":"GET","path":"me/*/watch","query":{"version":0}}`)
+	w.call("2", `{"id":2,"method":"PUT","path":"to/me/x","body":1}`)
+	w.send(`{"id":"me","method":"GET","path":"to/me/*/watch","query":{"version":0}}`)
 	watchBody(t, w.reply(`"me"`))
 	w.send(`{"id":"sh","method":"GET","path":"shared/*/watch"}`)
 	watchBody(t, w.reply(`"sh"`))
 
-	// Switching visitor ends me/ watches only.
+	// Switching visitor ends watches that depend on who asks.
 	if f := w.call("3", `{"id":3,"op":"auth","token":"`+other+`"}`); !strings.Contains(string(f.Body), otherID) {
 		t.Fatalf("switch: %s", f.Body)
 	}

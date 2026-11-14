@@ -41,6 +41,7 @@ var liveAuthWait = liveAuthWaitDefault
 // Close codes besides the standard ones. 4000 + the HTTP status it matches.
 const (
 	closeAuthTimeout websocket.StatusCode = 4408
+	closeBanned      websocket.StatusCode = 4403
 )
 
 // Headers of an HTTP response that carry data. On a socket they go in the
@@ -72,6 +73,28 @@ func (ls *liveSet) remove(l *liveConn) {
 	ls.mu.Lock()
 	defer ls.mu.Unlock()
 	delete(ls.conns, l)
+}
+
+// closeBanned closes a banned visitor's live connections to a space. The
+// last frame is the same banned error any request would get. Their wills
+// are dropped: a banned visitor sends nothing more.
+func (s *Server) closeBanned(space, visitor string, until int64) {
+	s.live.mu.Lock()
+	var conns []*liveConn
+	for l := range s.live.conns {
+		if l.space == space && l.currentVisitor() == visitor {
+			conns = append(conns, l)
+		}
+	}
+	s.live.mu.Unlock()
+	for _, l := range conns {
+		l.mu.Lock()
+		l.wills = nil
+		l.mu.Unlock()
+		l.sendErr(nil, apierr.Banned(until))
+		l.conn.Close(closeBanned, "banned")
+		l.cancel()
+	}
 }
 
 // CloseLive closes every live connection with 1001 going away, so clients
@@ -120,7 +143,7 @@ type liveWill struct {
 
 type liveWatch struct {
 	cancel context.CancelFunc
-	me     bool // watches the caller's own me/ area
+	self   bool // what it watches depends on who asks: inbox/, to/, users/me/
 }
 
 type liveIn struct {
@@ -414,10 +437,10 @@ func (l *liveConn) auth(m liveIn) {
 	l.visitor, l.tokErr = visitor, tokErr
 	var ended []string
 	if changed {
-		// me/ meant the previous visitor's area. Those watches end; the
-		// client starts them again from their last version.
+		// inbox/, to/ and users/me/ meant the previous visitor's. Those
+		// watches end; the client starts them again from their last version.
 		for id, w := range l.watches {
-			if w.me {
+			if w.self {
 				w.cancel()
 				delete(l.watches, id)
 				ended = append(ended, id)
@@ -427,7 +450,7 @@ func (l *liveConn) auth(m liveIn) {
 	l.mu.Unlock()
 	for _, id := range ended {
 		l.sendErr(json.RawMessage(id), &apierr.Error{Status: 409, Code: "identity_changed",
-			Message: "This connection authenticated as another visitor, so its me/ watches ended. Start them again from their last version."})
+			Message: "This connection authenticated as another visitor, so its watches on inbox/, to/ and users/me/ ended. Start them again from their last version."})
 	}
 
 	if tokErr != nil {
@@ -508,7 +531,7 @@ func (l *liveConn) will(m liveIn) {
 // pulse would go.
 func (l *liveConn) pulseRoute(path string, body []byte, visitor string, tokErr *apierr.Error, mode willMode) (*recorder, error) {
 	area, _, _ := strings.Cut(path, "/")
-	if area != "shared" && area != "me" && area != "users" || strings.ContainsAny(path, "?#") {
+	if !liveArea(area) || strings.ContainsAny(path, "?#") {
 		return nil, errors.New("bad path")
 	}
 	r, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://live/v1/"+l.space+"/"+path, bytes.NewReader(body))
@@ -577,8 +600,8 @@ func (l *liveConn) request(m liveIn) {
 		err = badMessage("method is GET, PUT, DELETE or POST.")
 	}
 	area, _, _ := strings.Cut(m.Path, "/")
-	if err == nil && area != "shared" && area != "me" && area != "users" {
-		err = badMessage("path starts with shared/, me/ or users/, as in /v1/{space}/{path}. Everything else about a space is HTTP only.")
+	if err == nil && !liveArea(area) {
+		err = badMessage("path starts with shared/, users/, to/ or inbox/, as in /v1/{space}/{path}. Everything else about a space is HTTP only.")
 	}
 	if err == nil && strings.ContainsAny(m.Path, "?#") {
 		err = badMessage("path holds no query string; parameters go in query.")
@@ -683,7 +706,7 @@ func (l *liveConn) startWatch(c *reqCtx, t store.Target, from int64) error {
 		return &apierr.Error{Status: 429, Code: "too_many_watches", Message: "At most 20 watches run on one live connection."}
 	}
 	ctx, cancel := context.WithCancel(l.ctx)
-	w := &liveWatch{cancel: cancel, me: strings.HasPrefix(t.Area, "m:")}
+	w := &liveWatch{cancel: cancel, self: t.Self}
 	l.watches[key] = w
 	l.mu.Unlock()
 	c.liveStarted = true
@@ -706,7 +729,7 @@ func (l *liveConn) startPulses(c *reqCtx, t store.Target, h *pulseHub, cursor in
 		return &apierr.Error{Status: 429, Code: "too_many_watches", Message: "At most 20 watches and listeners run on one live connection."}
 	}
 	ctx, cancel := context.WithCancel(l.ctx)
-	w := &liveWatch{cancel: cancel, me: strings.HasPrefix(t.Area, "m:")}
+	w := &liveWatch{cancel: cancel, self: t.Self}
 	l.watches[key] = w
 	l.mu.Unlock()
 	c.liveStarted = true
@@ -828,4 +851,9 @@ func (l *liveConn) runWatch(ctx context.Context, w *liveWatch, id json.RawMessag
 func (l *liveConn) allowed(space string, op access.Op) bool {
 	rights, err := l.s.store.Rights(space, l.currentVisitor())
 	return err == nil && rights != nil && rights.Visible() && rights.Allows(op)
+}
+
+// liveArea: the data areas a live message may address.
+func liveArea(a string) bool {
+	return a == "shared" || a == "users" || a == "to" || a == "inbox"
 }

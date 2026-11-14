@@ -9,7 +9,8 @@ import (
 	"github.com/timjaanson/cubby/internal/apierr"
 )
 
-// migrateSpace adds metadata without changing values, versions or grants.
+// migrateSpace brings a space file up to date. Values and versions never
+// change; the me/ area moved to to/me/ in version 3.
 func migrateSpace(db *sql.DB) error {
 	var v int
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
@@ -21,7 +22,12 @@ func migrateSpace(db *sql.DB) error {
 		}
 	}
 	if v < 2 {
-		return migrateMinters(db)
+		if err := migrateMinters(db); err != nil {
+			return err
+		}
+	}
+	if v < 3 {
+		return migrateMeToTo(db)
 	}
 	return nil
 }

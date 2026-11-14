@@ -14,6 +14,12 @@ Written down so they aren't lost. Each needs a decision first.
 
 ## Decided against
 
+- **A `mine=false` filter on watches and pulses**, in the server or kv.js. Rejected 2026-11-14. Doing it right needs exceptions nobody would guess: expiry markers carry the original writer, snapshots must stay whole, and two tabs of one visitor would hide each other's edits. Pages write `if (!c.mine)` where they mean it.
+- **`to/all`.** With a slot per sender it is `users/{id}/` again, not `shared/`.
+- **Groups or teams inside a space.** A second permission system, membership, beside grants. Small groups are one `to/` write per member; larger ones are a space each, since visitor IDs are the same in every space and direct grants move people between them.
+- **A server-side block list per recipient.** The server would read stored data to decide access, which nothing else does. Pages keep a list in `to/me/` and skip those senders.
+- **Owners deleting in other visitors' inboxes.** There's no path that names both a sender and a recipient besides the two ends, and owners can't read the content anyway. A ban plus the recipient's own delete covers it.
+
 - **kv.js versioned mirror** (`db.shared.mirror(...)`). Rejected 2026-10-27. It is a large primitive for a narrow race. Pages handle it with specific checks instead: keep the version per key from the watch, including deletes, and ignore a write acknowledgement whose version is older than what the watch already delivered.
 
 ## Rules for any change
@@ -47,3 +53,12 @@ Agreed and built 2026-10-28, after a marble maze demo on live connections and pu
 - **`openRoom`** in kv.js: find or create the room, open it, keep `#s=` in the address, and `link()` a reusable invite per visitor, checked before reuse.
 - **Last will** on live connections: `op: "will"`, up to 8 per connection, checked and charged like a pulse at registration, sent on any close except a server shutdown, with access checked again. kv.js `area.will()` registers again after reconnects and is a no-op over HTTP.
 - **Presence** in kv.js: `db.users.presence(key, { value })` with `peers`, `onJoin`, `onLeave`, `onChange`. Heartbeats every 2 s, a will and a pagehide pulse for leaving, and a 6 s timeout, which is how leaving shows over HTTP.
+
+## Done: to/, inbox/ and bans
+
+Agreed and built 2026-11-14. Contracts in [spec.md](spec.md#to-and-inbox).
+
+- **`to/{recipient}/` and `inbox/{sender}/`**: one slot per recipient, sender and key, seen from both ends. Recipients are a visitor ID, `me` or `owners`; `to/*/` lists what you sent, `inbox/*/` what you got, `inbox/owners/` the owners' group mail. Items carry `from` and `to`. Pulses and wills work there, so two pages can signal each other directly.
+- **`me/` removed.** `to/me/` is the private slot, and a space migration (user_version 3) moved rows and `me` scopes there. `me` stands for your own ID in `users/me/`, `to/me/` and `inbox/me/`, on the server.
+- **Scopes** `to[/RECIPIENT[/TARGET]]:rw`, settings `write.to`. `respond` lets anyone send.
+- **Bans**: per visitor and space, owners only, explicit 403 `banned` on every request including reads in private spaces, live sockets closed with 4403, wills dropped. A ban deletes and revokes nothing.

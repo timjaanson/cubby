@@ -27,23 +27,24 @@ var commandFlags = map[string]struct {
 	"get":         {nil, []string{"json"}, "get <path> [--json]\n  Print the raw value. Exit 1 if it doesn't exist."},
 	"set":         {[]string{"if-version", "ttl", "if-before"}, []string{"create"}, "set <path> [value|-] [--if-version N] [--create] [--ttl 30s] [--if-before MS]\n  Write from the argument, or from stdin when it's missing or -. Prints the new version."},
 	"del":         {[]string{"if-version", "if-before"}, []string{"f", "force"}, "del <path> [--if-version N] [--if-before MS] [-f]\n  Delete. With -f a missing key isn't an error."},
-	"ls":          {[]string{"limit"}, []string{"json", "desc"}, "ls <path or pattern> [--limit N] [--desc] [--json]\n  One line per item: key<TAB>value, or user<TAB>key<TAB>value under users/*/."},
-	"watch":       {[]string{"from", "state", "exec"}, []string{"json", "once", "raw"}, "watch <path or pattern> [--from N|now] [--state FILE] [--exec CMD] [--once] [--raw] [--json]\n  Print current state, then changes. --exec runs CMD per change with the value on stdin\n  and KV_KEY, KV_VERSION, KV_DELETED, KV_USER set. --state FILE resumes after restarts."},
+	"ls":          {[]string{"limit"}, []string{"json", "desc"}, "ls <path or pattern> [--limit N] [--desc] [--json]\n  One line per item: key<TAB>value, or user<TAB>key<TAB>value under users/*/ (the sender\n  under inbox/*/, the recipient under to/*/)."},
+	"watch":       {[]string{"from", "state", "exec"}, []string{"json", "once", "raw"}, "watch <path or pattern> [--from N|now] [--state FILE] [--exec CMD] [--once] [--raw] [--json]\n  Print current state, then changes. --exec runs CMD per change with the value on stdin\n  and KV_KEY, KV_VERSION, KV_DELETED, KV_USER (or KV_FROM and KV_TO) set. --state FILE resumes after restarts."},
 	"add":         {[]string{"time", "if-before"}, nil, "add <path> [value|-] [--time MS] [--if-before MS]\n  Add a point to a series, from the argument or stdin. Prints the point's time.\nadd <prefix*> name=value ... [--time MS] [--if-before MS]\n  Add one point to each series prefix+name, all at one time. A value is JSON if it parses,\n  otherwise a string. Without name=value arguments, reads one JSON object from stdin."},
 	"series":      {[]string{"since", "limit"}, []string{"json"}, "series <path> [--since MS|24h|90m|7d] [--limit N] [--json]\n  Print a series' points oldest first, as t<TAB>value. Without --since, the newest 1000."},
 	"pulse":       {nil, nil, "pulse <path> [value|-]\n  Send a pulse: a value that isn't stored, delivered to whoever listens right now and\n  then gone. Nothing to read back later. For signals between running things."},
-	"pulses":      {[]string{"exec"}, []string{"json"}, "pulses <path or pattern> [--exec CMD] [--json]\n  Print pulses as they arrive, from now on: key<TAB>value, or user<TAB>key<TAB>value under\n  users/*/. --exec runs CMD per pulse with the value on stdin and KV_KEY, KV_BY,\n  KV_TIME, KV_USER set."},
+	"pulses":      {[]string{"exec"}, []string{"json"}, "pulses <path or pattern> [--exec CMD] [--json]\n  Print pulses as they arrive, from now on: key<TAB>value, or user<TAB>key<TAB>value under\n  users/*/. --exec runs CMD per pulse with the value on stdin and KV_KEY, KV_BY,\n  KV_TIME, KV_USER (or KV_FROM and KV_TO) set."},
 	"update":      {[]string{"exec"}, nil, "update <path> [--exec CMD]\n  Read, pipe through CMD (or open $EDITOR), write back with ifVersion, retry on conflict.\n  Example: cubby update space/shared/count --exec 'jq \"(. // 0) + 1\"'"},
-	"new":         {[]string{"label", "public", "read", "write", "invite"}, nil, "new [label | name] [--public none|read|respond|all] [--read R --write W] [--invite members|owners]\n  Create a space you own. Print its name, then its owner token: keep that one, it's\n  shown once and gets you back in from another machine. Spaces are private unless\n  --public says otherwise:\n    read      anyone reads, invited people write (status pages, sensor readings)\n    respond   anyone reads and adds their own users/ entry (polls, RSVPs)\n    all       anyone with the name reads and writes\n  With nothing, the name is four random words; a label gets the words added\n  (new poll -> poll-cedar-pilot-mango-frost); a full name of 16+ characters is used\n  as is and fails if taken."},
+	"new":         {[]string{"label", "public", "read", "write", "invite"}, nil, "new [label | name] [--public none|read|respond|all] [--read R --write W] [--invite members|owners]\n  Create a space you own. Print its name, then its owner token: keep that one, it's\n  shown once and gets you back in from another machine. Spaces are private unless\n  --public says otherwise:\n    read      anyone reads, invited people write (status pages, sensor readings)\n    respond   anyone reads, adds their own users/ entry and sends to/ (polls, RSVPs)\n    all       anyone with the name reads and writes\n  With nothing, the name is four random words; a label gets the words added\n  (new poll -> poll-cedar-pilot-mango-frost); a full name of 16+ characters is used\n  as is and fails if taken."},
 	"name":        {nil, nil, "name [label]\n  Print a new space name: four random words, after the label if given. No server needed."},
 	"whoami":      {nil, []string{"show-token"}, "whoami [--show-token]\n  Print your visitor ID, or with --show-token your visitor token, for curl:\n  curl -H \"Authorization: Bearer $(cubby whoami --show-token)\" ..."},
 	"url":         {nil, nil, "url <path>\n  Print the full URL for a path."},
 	"join":        {nil, nil, "join <space> <token or link>\n  Redeem an invite (at_...) or an owner token (ot_...) for this CLI's visitor. A link\n  like https://example.com/page/#t=at_... works too. Prints what you may now do."},
 	"access":      {nil, nil, "access <space>\n  What you may do in a space: owner, member or visitor, then one line per grant:\n  ID, until or -, scopes."},
-	"settings":    {[]string{"public", "read", "write", "invite"}, nil, "settings <space> [--public none|read|respond|all | --read R --write W] [--invite members|owners]\n  Print a space's settings, or change them (owners). --write takes anyone, granted, or\n  a list like shared=granted,me=anyone. --invite says who may mint invites: members\n  (the default, each within their own rights) or owners only."},
+	"settings":    {[]string{"public", "read", "write", "invite"}, nil, "settings <space> [--public none|read|respond|all | --read R --write W] [--invite members|owners]\n  Print a space's settings, or change them (owners). --write takes anyone, granted, or\n  a list like shared=granted,to=anyone. --invite says who may mint invites: members\n  (the default, each within their own rights) or owners only."},
 	"drop":        {nil, []string{"yes"}, "drop <space> [--yes]\n  Delete a space and everything in it (owners). Asks for the name again unless --yes."},
 	"owner-token": {nil, nil, "owner-token <space>\n  Rotate the space's owner token and print the new one (owners). Owners who joined\n  with the old one lose ownership; you keep yours."},
 	"token":       {[]string{"allow", "uses", "until", "grant-for", "label", "link"}, nil, "token new <space> [--allow SCOPE ...] [--uses N|unlimited] [--until T|never] [--grant-for D]\n          [--label L] [--link URL]\n  Mint an access token: an invite. Owners and, unless the space says --invite owners,\n  members can. Defaults: 10 uses, 7 days, and a full member from an owner, or the\n  inviter's own rights from a member. A member can't give more than they hold. --allow takes scopes like shared/status.*:w, or member or viewer. --until\n  takes 12h, 30d, 2027-01-31 or an RFC 3339 time. --link prints URL#t=TOKEN to send.\ntoken ls <space>\n  Your tokens, or every token for an owner. One line per token: ID, state, uses left, until, grants, label, scopes.\ntoken set <space> <id> [--uses N|unlimited] [--until T|never]\n  Change how often and how long it can still be redeemed. --uses 0 stops new ones.\ntoken rm <space> <id>\n  Revoke a token and every grant redeemed from it."},
+	"ban":         {[]string{"until"}, nil, "ban ls <space>\n  One line per ban: user, until or -, by.\nban add <space> <user> [--until T]\n  Ban a visitor from the space (owners): every request they make answers banned and\n  their live connections close. Deletes and revokes nothing. --until takes 12h, 30d,\n  2027-01-31 or an RFC 3339 time.\nban rm <space> <user>\n  Lift the ban. They get back exactly what they had."},
 	"grant":       {[]string{"allow", "until", "user"}, []string{"owner"}, "grant ls <space> [--user ID]\n  One line per grant: ID, user, owner or member, source, until, scopes.\ngrant add <space> <user> [--allow SCOPE ...] [--until T] [--owner]\n  Give a visitor rights directly, with no token. Prints the grant ID.\ngrant rm <space> <grant-id>\ngrant rm <space> --user ID\n  Revoke one grant, or everything a visitor holds in the space."},
 }
 
@@ -182,6 +183,8 @@ func (c *client) run(cmd string, f *flags) error {
 		return c.tokenCmd(f)
 	case "grant":
 		return c.grantCmd(f)
+	case "ban":
+		return c.banCmd(f)
 	case "url":
 		p, err := c.onePath(f, "url")
 		if err == nil {
@@ -210,7 +213,7 @@ func (c *client) fetch(p kvPath) (value []byte, isJSON bool, ver int64, err erro
 }
 
 func (c *client) fetchResponse(p kvPath) (*http.Response, []byte, error) {
-	resp, b, err := c.do("GET", p.url(), nil, reqOpts{needToken: p.area == "me"})
+	resp, b, err := c.do("GET", p.url(), nil, reqOpts{needToken: p.needsToken()})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -367,6 +370,8 @@ type item struct {
 	Deleted bool            `json:"deleted,omitempty"`
 	Version int64           `json:"version"`
 	User    string          `json:"user,omitempty"`
+	From    string          `json:"from,omitempty"`
+	To      string          `json:"to,omitempty"`
 	T       int64           `json:"t,omitempty"`
 	Expires int64           `json:"expires,omitempty"`
 	Expired bool            `json:"expired,omitempty"`
@@ -381,7 +386,24 @@ func compactJSON(v json.RawMessage) string {
 	return b.String()
 }
 
-func printItem(it item, asJSON bool) {
+// partyOf is the column that tells items apart on a path spanning several
+// areas: the user across users/*/, the sender across inbox/*/, the
+// recipient across to/*/. "" for a path in one area.
+func partyOf(area, user, from, to string) string {
+	switch {
+	case area == "users/*":
+		return user
+	case area == "inbox/*" || area == "inbox/owners/*":
+		return from
+	case area == "to/*":
+		return to
+	}
+	return ""
+}
+
+func (it item) party(area string) string { return partyOf(area, it.User, it.From, it.To) }
+
+func printItem(it item, asJSON bool, area string) {
 	if asJSON {
 		b, _ := json.Marshal(it)
 		fmt.Println(string(b))
@@ -391,8 +413,8 @@ func printItem(it item, asJSON bool) {
 	if !it.Deleted {
 		val = compactJSON(it.Value)
 	}
-	if it.User != "" {
-		fmt.Printf("%s\t%s\t%s\n", it.User, it.Key, val)
+	if pt := it.party(area); pt != "" {
+		fmt.Printf("%s\t%s\t%s\n", pt, it.Key, val)
 	} else {
 		fmt.Printf("%s\t%s\n", it.Key, val)
 	}
@@ -423,7 +445,7 @@ func (c *client) ls(f *flags) error {
 		if after != "" {
 			q.Set("after", after)
 		}
-		resp, b, err := c.do("GET", p.url()+"?"+q.Encode(), nil, reqOpts{needToken: p.area == "me"})
+		resp, b, err := c.do("GET", p.url()+"?"+q.Encode(), nil, reqOpts{needToken: p.needsToken()})
 		if err != nil {
 			return err
 		}
@@ -438,7 +460,7 @@ func (c *client) ls(f *flags) error {
 			return &cliError{code: 6, err: "bad_response", msg: err.Error()}
 		}
 		for _, it := range out.Items {
-			printItem(it, f.bool("json"))
+			printItem(it, f.bool("json"), p.area)
 			printed++
 		}
 		if out.Next == nil || (limit > 0 && printed >= limit) {

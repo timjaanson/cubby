@@ -67,7 +67,7 @@ func exitFor(code string, status int) int {
 		return 1
 	case "version_conflict", "too_late":
 		return 2
-	case "no_access", "owner_only", "not_yours", "invite_invalid", "missing_token", "invalid_token":
+	case "no_access", "owner_only", "not_yours", "invite_invalid", "missing_token", "invalid_token", "banned":
 		return 3
 	case "rate_limited", "space_limit", "too_many_watches", "visitor_quota_exceeded", "space_quota_exceeded", "server_full":
 		return 4

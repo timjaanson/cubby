@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS meta (
   v
 );
 CREATE TABLE IF NOT EXISTS kv (
-  area       TEXT NOT NULL,      -- 's', 'u:{id}', 'm:{id}'
+  area       TEXT NOT NULL,      -- 's', 'u:{id}', 'i:{recipient}:{sender}' (recipient is an id or 'owners')
   key        TEXT NOT NULL,
   value      BLOB,               -- NULL is a tombstone
   is_json    INTEGER NOT NULL,
@@ -79,4 +79,10 @@ CREATE TABLE IF NOT EXISTS grants (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS grants_by_visitor ON grants (visitor);
 CREATE UNIQUE INDEX IF NOT EXISTS grants_once ON grants (visitor, source) WHERE source <> 'direct';
+CREATE TABLE IF NOT EXISTS bans (
+  visitor    TEXT PRIMARY KEY,
+  until      INTEGER,                  -- ms, NULL: until lifted
+  by         TEXT NOT NULL,            -- the owner who banned
+  created_at INTEGER NOT NULL          -- ms
+) WITHOUT ROWID;
 `

@@ -15,7 +15,9 @@ type Entry struct {
 	Value   []byte // nil for a tombstone
 	IsJSON  bool
 	Version int64
-	User    string
+	User    string // across users/*/
+	From    string // under to/ and inbox/: the sender
+	To      string // under to/ and inbox/: the recipient, a visitor ID or "owners"
 	Writer  string // visitor who last wrote or deleted the key
 	Area    string
 	Series  bool
@@ -36,7 +38,8 @@ func (s *Store) Get(space, area, key string) (*Entry, error) {
 	if err := s.expire(sp); err != nil {
 		return nil, err
 	}
-	e := &Entry{Key: key}
+	e := &Entry{Key: key, Area: area}
+	e.fill(OneArea)
 	var t sql.NullInt64
 	err = sp.db.QueryRow(`SELECT value, is_json, version, writer, series, t, expires, expired FROM kv WHERE area = ? AND key = ? AND value IS NOT NULL`,
 		area, key).Scan(&e.Value, &e.IsJSON, &e.Version, &e.Writer, &e.Series, &t, &e.Expires, &e.Expired)
@@ -51,21 +54,106 @@ func (s *Store) Get(space, area, key string) (*Entry, error) {
 	return e, nil
 }
 
-// target selects keys in an area. allUsers means users/*/.
+// Across says which areas a target covers besides a single one.
+type Across int
+
+const (
+	OneArea  Across = iota
+	AllUsers        // users/*/
+	Inbox           // inbox/*/: every sender to Fixed, the recipient
+	Sent            // to/*/: every recipient of Fixed, the sender
+)
+
+// ToArea is the stored area of the slot a sender fills for a recipient: one
+// per recipient, sender and key. rcpt is a visitor ID or "owners".
+func ToArea(rcpt, sender string) string { return "i:" + rcpt + ":" + sender }
+
+// SplitTo returns the recipient and sender of a to/ area.
+func SplitTo(area string) (rcpt, sender string, ok bool) {
+	rest, ok := strings.CutPrefix(area, "i:")
+	if !ok {
+		return "", "", false
+	}
+	i := strings.LastIndexByte(rest, ':')
+	if i < 0 {
+		return "", "", false
+	}
+	return rest[:i], rest[i+1:], true
+}
+
+// Target selects keys in one area, or in several (Across).
 type Target struct {
-	Space    string
-	Area     string // ignored when allUsers
-	AllUsers bool
-	Key      string // exact key, or prefix when pattern
-	Pattern  bool
+	Space   string
+	Area    string // when Across is OneArea
+	Across  Across
+	Fixed   string // the recipient for Inbox, the sender for Sent
+	Key     string // exact key, or prefix when pattern
+	Pattern bool
+	// Self: what the target means depends on who asks (inbox/, to/,
+	// users/me/). A live watch on it ends when the connection changes
+	// identity.
+	Self bool
+}
+
+// Many reports whether the target spans several areas, so its items name
+// the user, sender or recipient they belong to.
+func (t Target) Many() bool { return t.Across != OneArea }
+
+// Match reports whether a stored area is in the target.
+func (t Target) Match(area string) bool {
+	switch t.Across {
+	case AllUsers:
+		return strings.HasPrefix(area, "u:")
+	case Inbox:
+		return strings.HasPrefix(area, "i:"+t.Fixed+":")
+	case Sent:
+		return strings.HasPrefix(area, "i:") && strings.HasSuffix(area, ":"+t.Fixed)
+	}
+	return area == t.Area
+}
+
+// AreaFor is the area of one party in a target spanning several: the user,
+// the sender (Inbox) or the recipient (Sent). Used for list cursors.
+func (t Target) AreaFor(party string) string {
+	switch t.Across {
+	case AllUsers:
+		return "u:" + party
+	case Inbox:
+		return ToArea(t.Fixed, party)
+	case Sent:
+		return ToArea(party, t.Fixed)
+	}
+	return t.Area
+}
+
+// Party is the inverse of AreaFor.
+func (t Target) Party(area string) string {
+	switch t.Across {
+	case AllUsers:
+		return strings.TrimPrefix(area, "u:")
+	case Inbox:
+		_, s, _ := SplitTo(area)
+		return s
+	case Sent:
+		r, _, _ := SplitTo(area)
+		return r
+	}
+	return ""
 }
 
 func (t Target) where() (string, []any) {
 	var b strings.Builder
 	var args []any
-	if t.AllUsers {
+	switch t.Across {
+	case AllUsers:
 		b.WriteString("area >= 'u:' AND area < 'u;'")
-	} else {
+	case Inbox:
+		b.WriteString("area >= ? AND area < ?")
+		args = append(args, "i:"+t.Fixed+":", "i:"+t.Fixed+";")
+	case Sent:
+		b.WriteString("area >= 'i:' AND area < 'i;' AND substr(area, ?) = ?")
+		args = append(args, -(len(t.Fixed) + 1), ":"+t.Fixed)
+	default:
 		b.WriteString("area = ?")
 		args = append(args, t.Area)
 	}
@@ -82,7 +170,7 @@ func (t Target) where() (string, []any) {
 	return b.String(), args
 }
 
-func scanEntries(rows *sql.Rows, allUsers bool) ([]Entry, error) {
+func scanEntries(rows *sql.Rows, across Across) ([]Entry, error) {
 	defer rows.Close()
 	var out []Entry
 	for rows.Next() {
@@ -92,12 +180,19 @@ func scanEntries(rows *sql.Rows, allUsers bool) ([]Entry, error) {
 			return nil, err
 		}
 		e.T = t.Int64
-		if allUsers {
-			e.User = strings.TrimPrefix(e.Area, "u:")
-		}
+		e.fill(across)
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// fill sets the parties an entry carries: user across users/*/, from and
+// to for every entry under to/ and inbox/.
+func (e *Entry) fill(across Across) {
+	if across == AllUsers {
+		e.User = strings.TrimPrefix(e.Area, "u:")
+	}
+	e.To, e.From, _ = SplitTo(e.Area)
 }
 
 // CurrentSeq is the space's counter.
@@ -142,9 +237,9 @@ func (s *Store) List(t Target, after string, limit int, desc bool) (items []Entr
 		cmp, ord = "<", "DESC"
 	}
 	if after != "" {
-		if ak, au, ok := strings.Cut(after, "/"); ok && t.AllUsers {
+		if ak, au, ok := strings.Cut(after, "/"); ok && t.Many() {
 			where += fmt.Sprintf(" AND (key %s ? OR (key = ? AND area %s ?))", cmp, cmp)
-			args = append(args, ak, ak, "u:"+au)
+			args = append(args, ak, ak, t.AreaFor(au))
 		} else {
 			where += fmt.Sprintf(" AND key %s ?", cmp)
 			args = append(args, after)
@@ -155,7 +250,7 @@ func (s *Store) List(t Target, after string, limit int, desc bool) (items []Entr
 	if err != nil {
 		return nil, "", 0, err
 	}
-	items, err = scanEntries(rows, t.AllUsers)
+	items, err = scanEntries(rows, t.Across)
 	if err != nil {
 		return nil, "", 0, err
 	}
@@ -163,8 +258,8 @@ func (s *Store) List(t Target, after string, limit int, desc bool) (items []Entr
 		items = items[:limit]
 		last := items[limit-1]
 		next = last.Key
-		if t.AllUsers {
-			next += "/" + last.User
+		if t.Many() {
+			next += "/" + t.Party(last.Area)
 		}
 	}
 	return items, next, m.seq, nil
@@ -204,7 +299,7 @@ func (s *Store) Changes(t Target, after int64, limit int) ([]Entry, int64, error
 	if err != nil {
 		return nil, 0, err
 	}
-	out, err := scanEntries(rows, t.AllUsers)
+	out, err := scanEntries(rows, t.Across)
 	return out, m.seq, err
 }
 

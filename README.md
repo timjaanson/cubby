@@ -71,7 +71,7 @@ Hello there
 space                 notes-cedar-pilot-mango-frost   one per app or room
 ├── shared/{key}      common data
 ├── users/{id}/{key}  each visitor's public part; only they write it
-└── me/{key}          each visitor's private data
+└── to/{id}/{key}     sent to one visitor, read in their inbox/; to/me/ is private, to/owners/ goes to the owners
 ```
 
 Keys group with dots (`msg.1791449600123`), and a pattern like `msg.*` lists or watches them all. Values are JSON or text up to 64 KB.

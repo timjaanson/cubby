@@ -87,13 +87,7 @@ func (s *Server) AdminHandler() http.Handler {
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		enc := json.NewEncoder(w)
 		err := s.store.Export(name, func(e store.Entry) error {
-			area := "shared"
-			switch {
-			case strings.HasPrefix(e.Area, "u:"):
-				area = "users/" + e.Area[2:]
-			case strings.HasPrefix(e.Area, "m:"):
-				area = "me:" + e.Area[2:]
-			}
+			area := adminArea(e.Area)
 			it := toItem(e)
 			line := map[string]any{"area": area, "key": e.Key, "value": it.Value, "version": e.Version, "writer": e.Writer}
 			line["t"] = e.T
@@ -163,8 +157,9 @@ func adminArea(a string) string {
 	switch {
 	case strings.HasPrefix(a, "u:"):
 		return "users/" + a[2:]
-	case strings.HasPrefix(a, "m:"):
-		return "me:" + a[2:]
+	}
+	if r, from, ok := store.SplitTo(a); ok {
+		return "to/" + r + " from " + from
 	}
 	return "shared"
 }

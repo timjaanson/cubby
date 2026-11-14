@@ -199,19 +199,25 @@ func (s *Server) route(c *reqCtx) error {
 	// unknown route is the same bare 404 whatever the name.
 	if len(seg) >= 2 {
 		switch seg[1] {
-		case "shared", "me":
+		case "shared":
 			if len(seg) < 3 {
 				return noRoute
 			}
-		case "users":
+		case "users", "to":
 			if len(seg) < 4 {
 				return noRoute
 			}
+		case "inbox":
+			if len(seg) < 4 || seg[2] == "owners" && len(seg) < 5 {
+				return noRoute
+			}
+		case "me":
+			return &apierr.Error{Status: 404, Code: "not_found", Message: "There's no me/ area. Your private keys are under to/me/, and inbox/me/ reads them too."}
 		case "access", "join", "owner-token", "live":
 			if len(seg) != 2 {
 				return noRoute
 			}
-		case "tokens", "grants":
+		case "tokens", "grants", "bans":
 			if len(seg) > 3 {
 				return noRoute
 			}
@@ -238,6 +244,11 @@ func (s *Server) route(c *reqCtx) error {
 	if err != nil {
 		return err
 	}
+	// A ban is said plainly, on every route, before anything else: the
+	// visitor was let in once, so the space's existence is no secret.
+	if rights != nil && rights.Banned {
+		return apierr.Banned(rights.BannedUntil)
+	}
 
 	// join decides about misses itself: it only costs one when it fails.
 	if len(seg) == 2 && seg[1] == "join" {
@@ -262,30 +273,80 @@ func (s *Server) route(c *reqCtx) error {
 		return apierr.NoSpace
 	}
 
-	if len(seg) == 1 || seg[1] == "access" || seg[1] == "tokens" || seg[1] == "grants" || seg[1] == "owner-token" {
+	if len(seg) == 1 || seg[1] == "access" || seg[1] == "tokens" || seg[1] == "grants" || seg[1] == "bans" || seg[1] == "owner-token" {
 		return s.spaceRoute(c, space, rights, seg[1:])
 	}
 	t := store.Target{Space: space}
 	op := access.Op{}
 	var rest []string
+	inbox := false // the recipient's side of to/: read and delete only
+	toRcpt := ""   // the visitor a to/ write goes to, checked to exist
+	badID := func(what string) error {
+		return &apierr.Error{Status: 400, Code: "invalid_key", Message: what}
+	}
 	switch seg[1] {
 	case "shared":
 		t.Area, op.Area, rest = "s", "shared", seg[2:]
-	case "me":
-		id, err := c.needVisitor()
+	case "users":
+		switch id := seg[2]; {
+		case id == "*":
+			t.Across = store.AllUsers
+		case id == "me":
+			me, err := c.needVisitor()
+			if err != nil {
+				return err
+			}
+			t.Area, t.Self = "u:"+me, true
+		case names.ValidVisitor(id):
+			t.Area = "u:" + id
+		default:
+			return badID("Not a visitor ID. IDs look like u_k7m2x9q4p1r8t3w6, or use me for your own.")
+		}
+		op.Area, rest = "users", seg[3:]
+	case "to":
+		me, err := c.needVisitor()
 		if err != nil {
 			return err
 		}
-		t.Area, op.Area, rest = "m:"+id, "me", seg[2:]
-	case "users":
-		if seg[2] == "*" {
-			t.AllUsers = true
-		} else if names.ValidVisitor(seg[2]) {
-			t.Area = "u:" + seg[2]
-		} else {
-			return &apierr.Error{Status: 400, Code: "invalid_key", Message: "Not a visitor ID. IDs look like u_k7m2x9q4p1r8t3w6."}
+		op.Area, op.Self, t.Self = "to", me, true
+		switch rc := seg[2]; {
+		case rc == "*":
+			t.Across, t.Fixed, op.Rcpt = store.Sent, me, "*"
+		case rc == "me" || rc == me:
+			t.Area, op.Rcpt = store.ToArea(me, me), me
+		case rc == "owners":
+			t.Area, op.Rcpt = store.ToArea(rc, me), rc
+		case names.ValidVisitor(rc):
+			t.Area, op.Rcpt, toRcpt = store.ToArea(rc, me), rc, rc
+		default:
+			return badID("After to/ comes the recipient: a visitor ID, me, owners, or * to list what you sent.")
 		}
-		op.Area, rest = "users", seg[3:]
+		rest = seg[3:]
+	case "inbox":
+		me, err := c.needVisitor()
+		if err != nil {
+			return err
+		}
+		inbox = true
+		op.Area, op.Self, op.Rcpt, t.Self = "to", me, me, true
+		rcpt, i := me, 2
+		if seg[2] == "owners" {
+			if !rights.Owner {
+				return apierr.OwnerOnly
+			}
+			rcpt, op.Rcpt, i = "owners", "owners", 3
+		}
+		switch from := seg[i]; {
+		case from == "*":
+			t.Across, t.Fixed = store.Inbox, rcpt
+		case from == "me":
+			t.Area = store.ToArea(rcpt, me)
+		case names.ValidVisitor(from):
+			t.Area = store.ToArea(rcpt, from)
+		default:
+			return badID("After inbox/ comes the sender: a visitor ID, me, or * for everyone. Mail to the owners is under inbox/owners/.")
+		}
+		rest = seg[i+1:]
 	default:
 		return noRoute
 	}
@@ -317,9 +378,11 @@ func (s *Server) route(c *reqCtx) error {
 	var h handler
 	isRead := m == http.MethodGet || m == http.MethodHead
 	switch {
+	case inbox && !isRead && !(m == http.MethodDelete && action == ""):
+		return methodErrMsg("GET, HEAD, DELETE", "inbox/ is what others sent you: read it, or delete from it. To send, use to/{recipient}/.")
 	case action == "series":
-		if t.AllUsers {
-			return &apierr.Error{Status: 400, Code: "invalid_key", Message: "Series can't be read or added across users/*/ yet. Use users/{id}/{key}/series."}
+		if t.Many() {
+			return &apierr.Error{Status: 400, Code: "invalid_key", Message: "Series can't be read or added across several senders or users yet. Name one: users/{id}/{key}/series, inbox/{sender}/{key}/series."}
 		}
 		switch {
 		case isRead:
@@ -346,7 +409,7 @@ func (s *Server) route(c *reqCtx) error {
 			}
 			h = s.pulseRead
 		case m == http.MethodPost:
-			if t.Pattern || t.AllUsers {
+			if t.Pattern || t.Many() {
 				return &apierr.Error{Status: 400, Code: "invalid_key", Message: "A pulse goes to one key. Listen with a pattern, send to a key."}
 			}
 			if err := checkParams(c.r); err != nil {
@@ -364,12 +427,12 @@ func (s *Server) route(c *reqCtx) error {
 			return err
 		}
 		h = s.watch
-	case t.AllUsers || t.Pattern:
+	case t.Many() || t.Pattern:
 		if !isRead {
-			if m == http.MethodPost && t.Pattern && !t.AllUsers {
+			if m == http.MethodPost && t.Pattern && !t.Many() {
 				return methodErrMsg("GET, HEAD", "To add a point to each of several series, POST to "+name+"/series.")
 			}
-			return methodErrMsg("GET, HEAD", "Patterns and users/*/ are read-only. Write and delete one key at a time.")
+			return methodErrMsg("GET, HEAD", "Patterns, users/*/, to/*/ and inbox/*/ are read-only. Write and delete one key at a time.")
 		}
 		if err := checkParams(c.r, "limit", "order", "after"); err != nil {
 			return err
@@ -409,6 +472,11 @@ func (s *Server) route(c *reqCtx) error {
 			}
 		} else if !rights.Allows(op) {
 			return apierr.NoAccess
+		}
+		// A to/ slot is sent to someone who exists. Deleting needs no check:
+		// the recipient may be gone and the sender still cleaning up.
+		if toRcpt != "" && m != http.MethodDelete && !s.store.VisitorExists(toRcpt) {
+			return &apierr.Error{Status: 404, Code: "no_visitor", Message: "No visitor has the ID " + toRcpt + "."}
 		}
 	} else if !rights.Allows(op) {
 		return apierr.NoSpace // visible through a write-only grant, but not readable

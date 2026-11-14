@@ -113,3 +113,11 @@ func (s *Store) DeleteVisitor(id string) {
 	s.srv.Exec(`DELETE FROM visitor_spaces WHERE visitor = ?`, id)
 	s.srv.Exec(`DELETE FROM visitors WHERE id = ?`, id)
 }
+
+// noteRecipient records the space for the recipient of a to/ slot, so their
+// cleanup finds what was sent to them even where they never wrote.
+func (s *Store) noteRecipient(area, space string) {
+	if r, from, ok := SplitTo(area); ok && r != "owners" && r != from {
+		s.noteVisitorSpace(r, space)
+	}
+}
