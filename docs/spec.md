@@ -168,7 +168,7 @@ POST /v1/anon
 - A visitor token is `vt_` plus 32 random bytes in base64url. It belongs to one visitor. The server stores only its SHA-256 hash.
 - The response includes the visitor's ID, so a client needs no second request to know who it is.
 - Two other routes also create a visitor when called without a token: [`POST /v1/spaces`](#create-a-space) and [`POST /v1/{space}/join`](#redeeming-join). A page that starts by creating a space or redeeming an invite never needs `/v1/anon`.
-- Creating a visitor, by any of the three routes, is rate limited by IP: 30 per hour with a burst of 30. IPv6 addresses are grouped by /64.
+- Creating a visitor, by any of the three routes, is rate limited by IP: 100 per hour with a burst of 100. IPv6 addresses are grouped by /64.
 
 ### Sending it
 
@@ -655,7 +655,7 @@ See [Owner token](#owner-token).
 - The body of a `PUT` is the value, exactly as sent.
 - It must be valid UTF-8, otherwise 400 `invalid_encoding`.
 - It must not be empty, otherwise 400 `empty_value`, whose message points to `DELETE`. Whitespace alone is valid text.
-- At most 64 KB (`max_value_size`), counting raw bytes, otherwise 413 `value_too_large` with `limit`. The server stops reading at limit + 1 bytes.
+- At most 512 KB (`max_value_size`), counting raw bytes, otherwise 413 `value_too_large` with `limit`. The server stops reading at limit + 1 bytes.
 - The request `Content-Type` is ignored. `fetch` sends `text/plain` for string bodies even when they contain JSON.
 
 ### JSON or text
@@ -680,7 +680,7 @@ In list and watch responses, JSON values appear as themselves and text values as
 
 ### Size
 
-64 KB is about 10,000 words. It's low on purpose: values are written whole, every watcher gets the whole value on every change, and a small limit pushes people towards a key per item, which also avoids conflicts. Pinned spaces can raise it up to 1 MB.
+512 KB is about 85,000 words of plain text, enough for a document or a CRDT state. Values are still written whole and every watcher gets the whole value on every change, so a key per item stays the better shape for lists, messages and anything edited in parts: smaller writes, no conflicts. `max_value_size` and pinned spaces go up to 4 MB.
 
 ## 8. Versions
 
@@ -782,7 +782,7 @@ PUT /v1/poll/{area}/question?ifVersion=0
 
 ### Expiring keys and leases
 
-`PUT {key}?ttl=N` gives a plain key a lifetime of N whole seconds. The default bounds are 5 seconds to 30 days, configured by `ttl_min_seconds` and `ttl_max_seconds`. TTL is accepted on PUT only, in every area. Series keys cannot have TTL.
+`PUT {key}?ttl=N` gives a plain key a lifetime of N whole seconds. The default bounds are 5 seconds to 90 days, configured by `ttl_min_seconds` and `ttl_max_seconds`. TTL is accepted on PUT only, in every area. Series keys cannot have TTL.
 
 - Every PUT states its lifetime. Omitting `ttl` clears any previous expiry, including on an identical-value write. Zero, fractions and out-of-range values return 400 `invalid_parameter`.
 - Expiry uses the server clock. Reads and writes check for due expiry before using the key. An expired key is absent for GET, list, initial watch, series reads and `ifVersion=0` acquisition.
@@ -820,7 +820,7 @@ Combine it with `ifVersion` on PUT or DELETE. Series still do not accept `ifVers
 
 ```json
 {
-  "limits": {"valueBytes":65536,"pointBytes":1024,"seriesPoints":50000,"spaceBytes":5242880,"spaceKeys":10000,"visitorBytes":1048576,"writesPerMinute":120,"writeBurst":30,"rateLimits":true,"ttlMinSeconds":5,"ttlMaxSeconds":2592000},
+  "limits": {"valueBytes":524288,"pointBytes":4096,"seriesPoints":20000,"spaceBytes":104857600,"spaceKeys":100000,"visitorBytes":26214400,"writesPerMinute":120,"writeBurst":30,"rateLimits":true,"ttlMinSeconds":5,"ttlMaxSeconds":7776000,"pulseBytes":4096,"pulsesPerSecond":60,"pulseBurst":120},
   "usage": {"bytes":183204,"keys":412,"visitorBytes":20480}
 }
 ```
@@ -830,8 +830,8 @@ Existing access fields remain. Pinned overrides appear here. `usage.visitorBytes
 Data-write responses, including refusals after authorization, expose `RateLimit-Policy` and `RateLimit` headers using the [IETF draft 11 syntax](https://www.ietf.org/archive/id/draft-ietf-httpapi-ratelimit-headers-11.html):
 
 ```text
-RateLimit-Policy: "visitor";q=30;w=15, "ip";q=300;w=60, "bytes";q=10485760;w=86400;qu="content-bytes"
-RateLimit: "visitor";r=29, "ip";r=299, "bytes";r=10485750
+RateLimit-Policy: "visitor";q=30;w=15, "ip";q=300;w=60, "stored";q=1073741824;w=86400;qu="bytes"
+RateLimit: "visitor";r=29, "ip";r=299, "stored";r=1073741814
 ```
 
 Each member describes a continuously refilling token bucket. `q` is capacity, `w` is its full-refill duration rounded up to seconds, `r` is the remaining whole tokens. The optional effective-window `t` is omitted because a continuously refilling bucket has no fixed reset. Visitor and IP buckets count requests; the bytes bucket declares `qu="content-bytes"` and counts the key plus raw write body. Use Retry-After on a refusal. Check every bucket, since any can refuse the next request. Values are advisory snapshots and never reserve the next write. With `rate_limits=false` these headers are omitted. CORS exposes them to pages, along with `KV-Time` and `KV-Expires`.
@@ -877,7 +877,7 @@ GET /v1/poll/users/*/vote
 
 - Items have `key`, `value`, `version` and `by`. Under `users/*/` they also have `user`, which is always the same as `by` there. Series keys also have `t`, the time of the newest point, and `value` is that point.
 - Sorted by key, ascending unless `order=desc`. Under `users/*/` ties are sorted by `user`.
-- `limit` is 1 to 1000, default 1000.
+- `limit` is 1 to 1000, default 1000. A page also ends once it holds 4 MB of keys and values, with `next` set, so a page of large values can have fewer items than `limit`. The first item always comes.
 - `next` is a cursor when more pages exist, otherwise `null`. Pass it back as `after`.
 - `version` is the space's counter when the list was read. Watching from it continues exactly after this list.
 - Listing in a space that doesn't exist, or that the request can't read, returns 404 `no_space`. A pattern with no matches returns an empty list.
@@ -946,7 +946,7 @@ A watch asks: "what changed in this key or pattern after version N?" The server 
 - `changes` is ordered by version. Each key appears at most once, with its current state. Every entry carries `by`; for a deleted key it's whoever deleted it. Under `users/*/` entries also carry `user`. Series keys carry `t`, and their value is the newest point.
 - `version` is what the client sends next. It's a position in the space's changes, not any key's version, and it can be far ahead of a watched key's own version. For `ifVersion`, always use the `version` inside a change entry.
 - On timeout: 200 with `"changes": []` and the space's current counter as `version`.
-- `more: true` means more changes were ready than the 1000 that fit. `version` is then the last included entry's, and the next request returns at once with the rest.
+- `more: true` means more changes were ready than fit in one response, 1000 or 4 MB of keys and values. `version` is then the last included entry's, and the next request returns at once with the rest.
 
 ### Timing
 
@@ -1032,7 +1032,7 @@ Replies are the HTTP response in an envelope:
 
 - A data message costs what its HTTP request costs: a read, or a write against the write limits. Starting a watch costs one read; pushes cost nothing. `auth`, `ping` and refused envelopes cost one read each, `stop` nothing.
 - The server pings every 30 seconds and closes a connection that doesn't answer within 15. A client that can't take a frame for 10 seconds is disconnected.
-- Messages are at most 256 KB.
+- Messages are at most twice the largest value the server accepts, or a full series batch if that's larger, plus 64 KB. With the defaults that's 1088 KB, enough for any value even as escaped `text`.
 - Close codes: 1000 normal, 1001 server restarting (reconnect at once), 1003 a binary frame, 1009 too large, 4408 no first message in 10 seconds.
 - Proxies must pass WebSocket upgrades. For nginx: `proxy_http_version 1.1`, `proxy_set_header Upgrade $http_upgrade` and `proxy_set_header Connection $connection_upgrade` with the usual `map`.
 
@@ -1062,7 +1062,7 @@ Authorization: Bearer vt_...
 ```
 
 - The body is one value, under the same rules as `PUT`: UTF-8, JSON or text, not empty. An object is one point, stored whole. `{"c": 21.4, "ok": true}` is one point, not two.
-- A point is at most 1 KB (`max_point_size`), otherwise 413 `value_too_large`.
+- A point is at most 4 KB (`max_point_size`), the same as a pulse, otherwise 413 `value_too_large`.
 - `t` is the server's clock in milliseconds when the request arrives. If that isn't later than the series' newest point, the server uses the newest point's time plus 1, so points the server times never collide.
 - `?t=1791449000000` sets the time instead, for devices that buffered readings while offline. Times more than 60 seconds in the future return 400 `invalid_parameter`. A point at a time that already exists replaces it.
 - A point that becomes the newest creates a new version and wakes watchers, even with the same value as before, because the reading's time changed.
@@ -1113,7 +1113,7 @@ GET /v1/home/shared/temp/series?since=1791440000000     the first 1000 after tha
 
 - Points are always oldest first, ready to draw.
 - Without `since`: the newest `limit` points. With `since`: the first `limit` points with `t` greater than `since`. `since=0` starts at the oldest point.
-- `limit` is 1 to 1000, default 1000.
+- `limit` is 1 to 1000, default 1000. A read also ends at 4 MB of values. With `since`, `next` then continues; without it you get the newest points that fit.
 - `next` is the `since` to send for the following page, when more points come after the last one returned. Otherwise it's `null`, which is always the case without `since`.
 - `version` is the space's counter when the points were read. Watching the key from it continues exactly after this read.
 - Values appear as in list and watch: JSON as itself, text as a JSON string.
@@ -1122,17 +1122,18 @@ GET /v1/home/shared/temp/series?since=1791440000000     the first 1000 after tha
 
 ### Series retention
 
-- A series keeps its newest 50,000 points (`max_series_points`). Adding one more deletes the oldest in the same transaction, so a series never fails for being long.
-- 50,000 points is about 35 days at one point a minute, or 6 days at one every 10 seconds.
+- A series keeps its newest 20,000 points (`max_series_points`). Adding one more deletes the oldest in the same transaction, so a series never fails for being long.
+- 20,000 points is about 14 days at one point a minute, or 2 days at one every 10 seconds.
+- 20,000 points of the largest size, with their keys, stay under the 100 MB space quota, so a full series at a steady rate can't fill a space by itself.
 - Points have no expiry of their own. They live as long as the key, which lives as long as its space, or its visitor under `users/` and `to/`.
 
 ### Series storage
 
 - A point's size is its key length plus its value length. A number under an 8-character key is about 12 bytes, so a full series of numbers is around 0.6 MB.
 - Points count towards the space and server quotas, but not towards keys per space.
-- Towards the visitor quota, a series counts like a plain key: its key and newest value, for whoever wrote last. Otherwise a device publishing readings would hit the 1 MB visitor limit after a few sensors. Space quotas, the limit on new spaces and the per-series cap still bound the total.
+- Towards the visitor quota, a series counts like a plain key: its key and newest value, for whoever wrote last. Otherwise a device publishing readings would hit the 25 MB visitor limit after a few sensors. Space quotas, the limit on new spaces and the per-series cap still bound the total.
 - Trimming the oldest point happens before the quota check. A full series at a steady rate never runs into the space quota by itself.
-- A 5 MB space holds about eight full numeric series. Pin a space for more.
+- A 100 MB space holds about 400 full numeric series. Pin a space for more.
 
 ### Watching
 
@@ -1213,9 +1214,9 @@ A live connection can leave pulses for the server to send when the connection en
 
 | Limit | Default | Config | Error |
 |---|---|---|---|
-| Value size | 64 KB | `max_value_size` | 413 `value_too_large` |
-| Point size in a series | 1 KB | `max_point_size` | 413 `value_too_large` |
-| Points per series | 50,000, oldest dropped | `max_series_points` | none, see [Series retention](#series-retention) |
+| Value size | 512 KB, at most 4 MB | `max_value_size` | 413 `value_too_large` |
+| Point size in a series | 4 KB | `max_point_size` | 413 `value_too_large` |
+| Points per series | 20,000, oldest dropped | `max_series_points` | none, see [Series retention](#series-retention) |
 | Members in one batch | 100 | fixed | 400 `batch_needs_object` |
 | Key length | 128 | fixed | 400 `invalid_key` |
 | JSON depth | 64 | fixed | 400 `json_too_deep` |
@@ -1226,10 +1227,10 @@ A key's size is its key length plus its value length. Tombstones count as their 
 
 | Limit | Default | Config | Error |
 |---|---|---|---|
-| Per visitor, all spaces | 1 MB | `max_visitor_bytes` | 507 `visitor_quota_exceeded` |
-| Per space | 5 MB | `max_space_bytes` | 507 `space_quota_exceeded` |
-| Keys per space | 10,000 | `max_space_keys` | 507 `space_quota_exceeded` |
-| Server total | 1 GB | `max_total_bytes` | 507 `server_full` |
+| Per visitor, all spaces | 25 MB | `max_visitor_bytes` | 507 `visitor_quota_exceeded` |
+| Per space | 100 MB | `max_space_bytes` | 507 `space_quota_exceeded` |
+| Keys per space | 100,000 | `max_space_keys` | 507 `space_quota_exceeded` |
+| Server total | 5 GB | `max_total_bytes` | 507 `server_full` |
 
 - Every key remembers who wrote it last. A visitor's usage is the size of the keys they last wrote, in every area.
 - Overwriting someone else's shared key moves its bytes to you. Deleting frees them for whoever wrote last.
@@ -1252,19 +1253,21 @@ Every rate in this table is configurable under `[limits]`, including `write_burs
 
 | Limit | Default | Error |
 |---|---|---|
-| New visitors per IP, through `/v1/anon`, `/v1/spaces` or `join` | 30 per hour, burst 30 | 429 `rate_limited` |
+| New visitors per IP, through `/v1/anon`, `/v1/spaces` or `join` | 100 per hour, burst 100 | 429 `rate_limited` |
 | Writes per visitor | 120 per minute, burst 30 | 429 `rate_limited` |
 | Writes per IP | 300 per minute | 429 `rate_limited` |
-| Write bytes per IP | 10 MB per day | 429 `rate_limited` |
-| Reads per IP | 600 per minute | 429 `rate_limited` |
-| New spaces per visitor | 5 per day | 429 `space_limit` |
-| New spaces per IP | 20 per day | 429 `space_limit` |
+| Growth of stored data per IP | 1 GB per day | 429 `stored_limit` |
+| Reads per IP | 1200 per minute | 429 `rate_limited` |
+| New spaces per visitor | 20 per day | 429 `space_limit` |
+| New spaces per IP | 50 per day | 429 `space_limit` |
 | Distinct missing spaces per IP | 30 per hour, burst 30 | 429 `miss_limit` |
 | Pulses per visitor | 60 per second, burst 120 | 429 `rate_limited` |
 | Pulses per IP | 300 per second, burst 600 | 429 `rate_limited` |
 | Spaces on the server | 1000 | 507 `server_full` |
 
 A `POST` that adds points counts as one write, however many series it adds to.
+
+The growth limit counts how much a write grows the space: new keys, larger values, added points, minus what it replaced or trimmed. Rewriting a document in place, renewing a TTL or adding to a full series costs nothing; deleting gives nothing back. Because the growth is only known after the write, a write is allowed while any budget is left and may take it below zero, and writes that store something wait until it refills. Deletes always work. `RateLimit` reports it as `"stored"`.
 
 The IP-based write limits exist because one person can create many visitors. They're set high enough for a household or office behind one IP.
 
@@ -1322,7 +1325,7 @@ Not configurable, listed so they're in one place:
 | Write-ahead log size kept per space | 4 MB |
 | Watch timeout | 25 s default, 1 to 55 s allowed |
 | Pause before answering a watch after a change | up to 50 ms during bursts; no pause after quiet |
-| Changes per watch response | 1000 |
+| Changes per watch response, items per list page, points per series read | 1000, and at most 4 MB of keys and values. The first entry always comes, however large |
 | Open space files kept without watchers | 64, least recently used closed first |
 
 ### Config file
@@ -1343,32 +1346,32 @@ space_idle_ttl = "180d"
 tombstone_ttl = "7d"
 
 [limits]
-max_value_size = "64KB"
-max_point_size = "1KB"
-max_series_points = 50000
-max_visitor_bytes = "1MB"
-max_space_bytes = "5MB"
-max_space_keys = 10000
-max_total_bytes = "1GB"
+max_value_size = "512KB"
+max_point_size = "4KB"
+max_series_points = 20000
+max_visitor_bytes = "25MB"
+max_space_bytes = "100MB"
+max_space_keys = 100000
+max_total_bytes = "5GB"
 max_spaces = 1000
 writes_per_minute = 120
 write_burst = 30
 writes_per_ip_per_minute = 300
-reads_per_ip_per_minute = 600
-write_bytes_per_ip_per_day = 10485760
-visitors_per_ip_per_hour = 30
-spaces_per_visitor_per_day = 5
-spaces_per_ip_per_day = 20
+reads_per_ip_per_minute = 1200
+stored_bytes_per_ip_per_day = "1GB"
+visitors_per_ip_per_hour = 100
+spaces_per_visitor_per_day = 20
+spaces_per_ip_per_day = 50
 misses_per_ip_per_hour = 30
 watches_per_ip = 50
 watches_total = 1000
 ttl_min_seconds = 5
-ttl_max_seconds = 2592000
+ttl_max_seconds = 7776000
 
 [spaces.poll-cedar-pilot-mango-frost]                  # pinned
-max_bytes = "100MB"
-max_value_size = "256KB"
-max_series_points = 500000
+max_bytes = "1GB"
+max_value_size = "2MB"
+max_series_points = 200000
 ```
 
 ### Administration
@@ -1412,6 +1415,7 @@ Through `cubby admin`, see [Admin](#admin) in the CLI section. There is no admin
 | 412 | `version_conflict` | `ifVersion` didn't match | `currentVersion` |
 | 413 | `value_too_large` | value or point over the limit | `limit`, and `key` in a batch |
 | 429 | `rate_limited` | a rate limit | `retryAfter` |
+| 429 | `stored_limit` | this IP's stored data grew by its daily budget | `retryAfter` |
 | 429 | `space_limit` | too many new spaces | `retryAfter` |
 | 429 | `too_many_watches` | too many open watches | |
 | 507 | `visitor_quota_exceeded` | visitor storage full | `limit`, `used` |
@@ -2218,7 +2222,8 @@ Everything held in memory has a bound, and nothing in it has to survive a restar
 | Pending "last seen" and "last active" times | one entry per active visitor and space | written to disk by the hourly job and on shutdown | up to an hour of activity isn't recorded, which only matters for retention measured in months |
 
 - A bucket that's full and untouched behaves exactly like a new one, so dropping it changes nothing. Dropping one early under the cap is slightly lenient towards that IP or visitor, which is acceptable.
-- Request bodies are read only up to the value limit plus one byte, so a single request can't use more than about 64 KB of body memory.
+- Request bodies are read only up to the value limit plus one byte, so a single request can't use more than about 512 KB of body memory. A live connection reads at most one message of the size above at a time.
+- List pages, watch responses and series reads stop at 4 MB of keys and values, so a response never holds more than that plus one entry.
 
 ## 20. Later
 

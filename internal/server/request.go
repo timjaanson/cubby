@@ -144,6 +144,25 @@ func (s *Server) rate(l *limiter, key string, n float64, code string) error {
 	return nil
 }
 
+// storedRoom refuses a write while the IP's stored-growth budget is used
+// up. What a write grows by is only known once it's done, so the budget is
+// charged afterwards with chargeStored and may run below zero.
+func (s *Server) storedRoom(ip string) error {
+	if !s.cfg.RateLimitsOn() {
+		return nil
+	}
+	if ok, retry := s.lim.storedPerIP.peek(ip, 1); !ok {
+		return apierr.RateLimited("stored_limit", retry)
+	}
+	return nil
+}
+
+func (s *Server) chargeStored(ip string, grown int64) {
+	if s.cfg.RateLimitsOn() {
+		s.lim.storedPerIP.charge(ip, float64(grown))
+	}
+}
+
 type statusWriter struct {
 	http.ResponseWriter
 	status int

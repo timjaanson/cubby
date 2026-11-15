@@ -62,3 +62,7 @@ Agreed and built 2026-11-14. Contracts in [spec.md](spec.md#to-and-inbox).
 - **`me/` removed.** `to/me/` is the private slot, and a space migration (user_version 3) moved rows and `me` scopes there. `me` stands for your own ID in `users/me/`, `to/me/` and `inbox/me/`, on the server.
 - **Scopes** `to[/RECIPIENT[/TARGET]]:rw`, settings `write.to`. `respond` lets anyone send.
 - **Bans**: per visitor and space, owners only, explicit 403 `banned` on every request including reads in private spaces, live sockets closed with 4403, wills dropped. A ban deletes and revokes nothing.
+
+## Done: roomier defaults, paged by bytes
+
+Agreed and built 2026-11-15, so chat and shared documents work on a default server. Values 512 KB (cap 4 MB, pinned too), points 4 KB like pulses with 20,000 per series so a full series stays under a space, 25 MB per visitor, 100 MB and 100,000 keys per space, 5 GB per server, 1200 reads per IP a minute, 100 new visitors per IP an hour, 20 new spaces per visitor and 50 per IP a day, TTL up to 90 days. The per-IP byte limit now counts growth of stored data (1 GB a day, `stored_limit`) instead of request bodies, so rewriting a document in place is free. List pages, watch responses and series reads stop at 4 MB of keys and values and continue through their usual cursors. Live connections accept messages sized from the largest value instead of a fixed 256 KB.

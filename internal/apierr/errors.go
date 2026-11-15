@@ -79,6 +79,8 @@ func RateLimited(code string, retry time.Duration) *Error {
 	switch code {
 	case "space_limit":
 		msg = "Too many new spaces. Try again later."
+	case "stored_limit":
+		msg = "This address has added as much stored data today as it may. Deleting frees space but not this budget. Try again later."
 	case "miss_limit":
 		msg = "Too many different spaces that don't exist from this address. Spaces you used in the last hour keep working. Try others later."
 	}

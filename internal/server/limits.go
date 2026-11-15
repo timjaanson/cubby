@@ -66,6 +66,27 @@ func (l *limiter) use(key string, n float64, take bool) (ok bool, retry time.Dur
 	return false, time.Duration(need / l.rate * float64(time.Second))
 }
 
+// charge removes n tokens even when that leaves the bucket below zero. For
+// costs only known after the fact; the next take or peek waits off the debt.
+func (l *limiter) charge(key string, n float64) {
+	if n <= 0 {
+		return
+	}
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b := l.buckets[key]
+	if b == nil {
+		if len(l.buckets) >= maxBuckets {
+			l.evictOldest()
+		}
+		b = &bucket{tokens: l.burst, last: now}
+		l.buckets[key] = b
+	}
+	b.tokens = math.Min(l.burst, b.tokens+now.Sub(b.last).Seconds()*l.rate) - n
+	b.last = now
+}
+
 func (l *limiter) evictOldest() {
 	var oldK string
 	var oldT time.Time
@@ -93,7 +114,7 @@ type limits struct {
 	visitorsPerIP    *limiter
 	writesPerVisitor *limiter
 	writesPerIP      *limiter
-	writeBytesPerIP  *limiter
+	storedPerIP      *limiter
 	readsPerIP       *limiter
 	spacesPerVisitor *limiter
 	spacesPerIP      *limiter
@@ -113,7 +134,7 @@ func newLimits(configs ...*config.Config) *limits {
 		visitorsPerIP:    newLimiter(float64(c.VisitorsPerIPPerHour), time.Hour, float64(c.VisitorsPerIPPerHour)),
 		writesPerVisitor: newLimiter(float64(c.WritesPerMinute), time.Minute, float64(c.WriteBurst)),
 		writesPerIP:      newLimiter(float64(c.WritesPerIPPerMinute), time.Minute, float64(c.WritesPerIPPerMinute)),
-		writeBytesPerIP:  newLimiter(float64(c.WriteBytesPerIPPerDay), day, float64(c.WriteBytesPerIPPerDay)),
+		storedPerIP:      newLimiter(float64(c.StoredBytesPerIPPerDay), day, float64(c.StoredBytesPerIPPerDay)),
 		readsPerIP:       newLimiter(float64(c.ReadsPerIPPerMinute), time.Minute, float64(c.ReadsPerIPPerMinute)),
 		spacesPerVisitor: newLimiter(float64(c.SpacesPerVisitorPerDay), day, float64(c.SpacesPerVisitorPerDay)),
 		spacesPerIP:      newLimiter(float64(c.SpacesPerIPPerDay), day, float64(c.SpacesPerIPPerDay)),
@@ -124,7 +145,7 @@ func newLimits(configs ...*config.Config) *limits {
 }
 
 func (l *limits) all() []*limiter {
-	return []*limiter{l.visitorsPerIP, l.writesPerVisitor, l.writesPerIP, l.writeBytesPerIP, l.readsPerIP, l.spacesPerVisitor, l.spacesPerIP, l.pulsesPerVisitor, l.pulsesPerIP}
+	return []*limiter{l.visitorsPerIP, l.writesPerVisitor, l.writesPerIP, l.storedPerIP, l.readsPerIP, l.spacesPerVisitor, l.spacesPerIP, l.pulsesPerVisitor, l.pulsesPerIP}
 }
 
 // watchCounter caps open watches per IP and in total.

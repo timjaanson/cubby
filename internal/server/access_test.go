@@ -396,14 +396,14 @@ func TestJoinCreatesVisitorsWithinLimit(t *testing.T) {
 	_, tok := c.mint(own.Space, own.Token, `{"uses":null}`)
 	ip := []string{"X-Forwarded-For", "203.0.113.50"}
 	n := 0
-	for range 40 {
+	for range 120 {
 		s, _, _ := c.req("POST", "/v1/"+own.Space+"/join", `{"token":"`+tok+`"}`, ip...)
 		if s == 429 {
 			break
 		}
 		n++
 	}
-	if n != 30 {
+	if n != 100 {
 		t.Fatalf("visitors per IP through join: %d", n)
 	}
 }

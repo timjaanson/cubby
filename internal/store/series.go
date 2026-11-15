@@ -30,8 +30,9 @@ type PointsReq struct {
 type pointsResult struct {
 	Version int64 // highest version among the keys afterwards
 	T       int64
-	Created bool // some key was new
-	Changed bool // some key got a new newest point
+	Created bool  // some key was new
+	Changed bool  // some key got a new newest point
+	Grown   int64 // bytes the space grew by, zero when it shrank
 }
 
 func (s *Store) AddPoints(ctx context.Context, r PointsReq) (res pointsResult, err error) {
@@ -254,11 +255,13 @@ func (s *Store) AddPoints(ctx context.Context, r PointsReq) (res pointsResult, e
 	s.noteVisitorSpace(r.Writer, r.Space)
 	s.noteRecipient(r.Area, r.Space)
 	res.T = t
+	res.Grown = max(0, spaceDelta)
 	return res, nil
 }
 
-// readPoints returns points oldest first: with since, the first limit after
-// it and the next since if there are more; without, the newest limit.
+// ReadPoints returns points oldest first: with since, the first limit after
+// it and the next since if there are more; without, the newest limit. Both
+// stop early at PageBytes.
 func (s *Store) ReadPoints(space, area, key string, since *int64, limit int) (points []Point, next *int64, version int64, err error) {
 	sp, err := s.Acquire(space)
 	if err != nil {
@@ -298,12 +301,18 @@ func (s *Store) ReadPoints(space, area, key string, since *int64, limit int) (po
 		return nil, nil, 0, err
 	}
 	defer rows.Close()
+	size, cut := 0, false
 	for rows.Next() {
+		if size >= PageBytes {
+			cut = true
+			break
+		}
 		p := Point{Area: area, Key: key}
 		if err := rows.Scan(&p.T, &p.Value, &p.IsJSON); err != nil {
 			return nil, nil, 0, err
 		}
 		points = append(points, p)
+		size += len(p.Value)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, nil, 0, err
@@ -312,9 +321,9 @@ func (s *Store) ReadPoints(space, area, key string, since *int64, limit int) (po
 		for i, j := 0, len(points)-1; i < j; i, j = i+1, j-1 {
 			points[i], points[j] = points[j], points[i]
 		}
-	} else if len(points) > limit {
-		points = points[:limit]
-		nt := points[limit-1].T
+	} else if len(points) > limit || cut {
+		points = points[:min(limit, len(points))]
+		nt := points[len(points)-1].T
 		next = &nt
 	}
 	return points, next, m.seq, nil

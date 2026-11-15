@@ -74,7 +74,7 @@ space                 notes-cedar-pilot-mango-frost   one per app or room
 └── to/{id}/{key}     sent to one visitor, read in their inbox/; to/me/ is private, to/owners/ goes to the owners
 ```
 
-Keys group with dots (`msg.1791449600123`), and a pattern like `msg.*` lists or watches them all. Values are JSON or text up to 64 KB.
+Keys group with dots (`msg.1791449600123`), and a pattern like `msg.*` lists or watches them all. Values are JSON or text up to 512 KB.
 
 ## Docs
 

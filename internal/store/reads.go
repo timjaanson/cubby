@@ -170,20 +170,31 @@ func (t Target) where() (string, []any) {
 	return b.String(), args
 }
 
-func scanEntries(rows *sql.Rows, across Across) ([]Entry, error) {
+// PageBytes caps the keys and values in one list page, watch response or
+// series read, so a page of large values doesn't have to sit in memory
+// whole. The first entry always fits, however large.
+const PageBytes = 4 << 20
+
+// scanEntries reads rows until they run out or the entries read so far
+// reach PageBytes. cut reports that it stopped there with rows left.
+func scanEntries(rows *sql.Rows, across Across) (out []Entry, cut bool, err error) {
 	defer rows.Close()
-	var out []Entry
+	var size int
 	for rows.Next() {
+		if size >= PageBytes {
+			return out, true, nil
+		}
 		var e Entry
 		var t sql.NullInt64
 		if err := rows.Scan(&e.Area, &e.Key, &e.Value, &e.IsJSON, &e.Version, &e.Writer, &e.Series, &t, &e.Expires, &e.Expired); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		e.T = t.Int64
 		e.fill(across)
 		out = append(out, e)
+		size += len(e.Key) + len(e.Value)
 	}
-	return out, rows.Err()
+	return out, false, rows.Err()
 }
 
 // fill sets the parties an entry carries: user across users/*/, from and
@@ -212,7 +223,8 @@ func (s *Store) CurrentSeq(space string) (int64, error) {
 	return m.seq, err
 }
 
-// list returns live entries in key order, plus a cursor if there are more.
+// List returns live entries in key order, at most limit and PageBytes, plus
+// a cursor if there are more.
 func (s *Store) List(t Target, after string, limit int, desc bool) (items []Entry, next string, version int64, err error) {
 	sp, err := s.Acquire(t.Space)
 	if err != nil {
@@ -250,13 +262,15 @@ func (s *Store) List(t Target, after string, limit int, desc bool) (items []Entr
 	if err != nil {
 		return nil, "", 0, err
 	}
-	items, err = scanEntries(rows, t.Across)
+	items, cut, err := scanEntries(rows, t.Across)
 	if err != nil {
 		return nil, "", 0, err
 	}
 	if len(items) > limit {
-		items = items[:limit]
-		last := items[limit-1]
+		items, cut = items[:limit], true
+	}
+	if cut {
+		last := items[len(items)-1]
 		next = last.Key
 		if t.Many() {
 			next += "/" + t.Party(last.Area)
@@ -267,27 +281,27 @@ func (s *Store) List(t Target, after string, limit int, desc bool) (items []Entr
 
 var ErrVersionExpired = errors.New("version expired")
 
-// changes returns entries changed after version, ordered by version, at most
-// max+1 so the caller can tell whether there are more. It also returns the
-// space's current counter.
-func (s *Store) Changes(t Target, after int64, limit int) ([]Entry, int64, error) {
+// Changes returns entries changed after version, ordered by version, at most
+// limit and PageBytes, and whether more follow. It also returns the space's
+// current counter.
+func (s *Store) Changes(t Target, after int64, limit int) (changes []Entry, seq int64, more bool, err error) {
 	sp, err := s.Acquire(t.Space)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	if sp == nil {
-		return nil, 0, apierr.NoSpace
+		return nil, 0, false, apierr.NoSpace
 	}
 	defer s.Release(sp)
 	if err := s.expire(sp); err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	m, err := readMeta(sp.db)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	if after > 0 && (after < m.floor || after > m.seq) {
-		return nil, m.seq, ErrVersionExpired
+		return nil, m.seq, false, ErrVersionExpired
 	}
 	where, args := t.where()
 	where += " AND version > ?"
@@ -297,10 +311,13 @@ func (s *Store) Changes(t Target, after int64, limit int) ([]Entry, int64, error
 	}
 	rows, err := sp.db.Query(`SELECT area, key, value, is_json, version, writer, series, t, expires, expired FROM kv WHERE `+where+` ORDER BY version LIMIT ?`, append(args, limit+1)...)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
-	out, err := scanEntries(rows, t.Across)
-	return out, m.seq, err
+	out, cut, err := scanEntries(rows, t.Across)
+	if len(out) > limit {
+		out, cut = out[:limit], true
+	}
+	return out, m.seq, cut, err
 }
 
 // Point is one entry of a series.

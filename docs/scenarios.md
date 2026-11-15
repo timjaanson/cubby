@@ -919,7 +919,7 @@ watchNow()
 - **No token on the page.** Reading points, current values and watching are all plain `GET`s.
 - **The live values and the chart come from the same keys.** Watching `env.*` gives the newest point of each series, with its time in `t`. The chart reads the full points from `env.temp/series`.
 - **The chart pages through `next`.** A day at one point a minute is 1440 points, more than one response holds.
-- **Old readings go by themselves.** Each series keeps its newest 50,000 points, about 35 days at this rate, so the board never needs a cleanup job and never starts failing.
+- **Old readings go by themselves.** Each series keeps its newest 20,000 points, about 14 days at this rate, so the board never needs a cleanup job and never starts failing.
 - **The server doesn't average anything.** The page draws every point. For longer ranges it would thin them out itself.
 
 ### The same with curl

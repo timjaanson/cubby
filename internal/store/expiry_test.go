@@ -72,7 +72,7 @@ func TestLeaseExpiryAndContenders(t *testing.T) {
 	if _, err = s.Write(ctx, req); !isCode(err, "version_conflict") {
 		t.Fatalf("stale renewal: %v", err)
 	}
-	changes, _, err := s.Changes(Target{Space: space, Area: "s", Key: "lock"}, first.Version, 100)
+	changes, _, _, err := s.Changes(Target{Space: space, Area: "s", Key: "lock"}, first.Version, 100)
 	if err != nil || len(changes) != 1 || changes[0].Value != nil || !changes[0].Expired || changes[0].Writer != id {
 		t.Fatalf("expiry changes: %+v %v", changes, err)
 	}
@@ -157,7 +157,7 @@ func TestTTLRemovalAndRestart(t *testing.T) {
 	if err = reopened.SweepExpired(ctx); err != nil {
 		t.Fatal(err)
 	}
-	changes, _, err := reopened.Changes(Target{Space: space, Area: "s", Key: req.Key}, first.Version, 100)
+	changes, _, _, err := reopened.Changes(Target{Space: space, Area: "s", Key: req.Key}, first.Version, 100)
 	if err != nil || len(changes) != 1 || !changes[0].Expired {
 		t.Fatalf("restart: %+v %v", changes, err)
 	}
@@ -241,7 +241,7 @@ func TestExpiredReadsAndLeaseBeforeSweep(t *testing.T) {
 					t.Fatalf("expired list %+v %v", items, err)
 				}
 			case "watch":
-				items, _, err := s.Changes(Target{Space: space, Area: "s", Pattern: true}, 0, 100)
+				items, _, _, err := s.Changes(Target{Space: space, Area: "s", Pattern: true}, 0, 100)
 				if err != nil || len(items) != 0 {
 					t.Fatalf("expired snapshot %+v %v", items, err)
 				}
@@ -251,7 +251,7 @@ func TestExpiredReadsAndLeaseBeforeSweep(t *testing.T) {
 					t.Fatalf("expired series %v", err)
 				}
 			}
-			changes, _, err := s.Changes(Target{Space: space, Area: "s", Key: "gone"}, first.Version, 100)
+			changes, _, _, err := s.Changes(Target{Space: space, Area: "s", Key: "gone"}, first.Version, 100)
 			if err != nil || len(changes) != 1 || !changes[0].Expired {
 				t.Fatalf("expiry lost %+v %v", changes, err)
 			}

@@ -87,7 +87,6 @@ type Config struct {
 		WriteBurst             int `toml:"write_burst"`
 		WritesPerIPPerMinute   int `toml:"writes_per_ip_per_minute"`
 		ReadsPerIPPerMinute    int `toml:"reads_per_ip_per_minute"`
-		WriteBytesPerIPPerDay  int `toml:"write_bytes_per_ip_per_day"`
 		VisitorsPerIPPerHour   int `toml:"visitors_per_ip_per_hour"`
 		SpacesPerVisitorPerDay int `toml:"spaces_per_visitor_per_day"`
 		SpacesPerIPPerDay      int `toml:"spaces_per_ip_per_day"`
@@ -108,7 +107,10 @@ type Config struct {
 		MaxSpaceKeys    int  `toml:"max_space_keys"`
 		MaxTotalBytes   Size `toml:"max_total_bytes"`
 		MaxSpaces       int  `toml:"max_spaces"`
-		MaxPulseSize    Size `toml:"max_pulse_size"`
+		// Growth of stored data per IP per day. Rewrites that don't grow
+		// anything are free.
+		StoredBytesPerIPPerDay Size `toml:"stored_bytes_per_ip_per_day"`
+		MaxPulseSize           Size `toml:"max_pulse_size"`
 	} `toml:"limits"`
 	Spaces map[string]PinnedSpace `toml:"spaces"`
 
@@ -123,27 +125,27 @@ func Default() *Config {
 	c.Retention.EmptyVisitorIdleTTL = Duration(30 * 24 * time.Hour)
 	c.Retention.SpaceIdleTTL = Duration(180 * 24 * time.Hour)
 	c.Retention.TombstoneTTL = Duration(7 * 24 * time.Hour)
-	c.Limits.MaxValueSize = 64 << 10
-	c.Limits.MaxPointSize = 1 << 10
-	c.Limits.MaxSeriesPoints = 50000
-	c.Limits.MaxVisitorBytes = 1 << 20
-	c.Limits.MaxSpaceBytes = 5 << 20
-	c.Limits.MaxSpaceKeys = 10000
-	c.Limits.MaxTotalBytes = 1 << 30
+	c.Limits.MaxValueSize = 512 << 10
+	c.Limits.MaxPointSize = 4 << 10
+	c.Limits.MaxSeriesPoints = 20000
+	c.Limits.MaxVisitorBytes = 25 << 20
+	c.Limits.MaxSpaceBytes = 100 << 20
+	c.Limits.MaxSpaceKeys = 100000
+	c.Limits.MaxTotalBytes = 5 << 30
 	c.Limits.MaxSpaces = 1000
 	c.Limits.WritesPerMinute = 120
 	c.Limits.WriteBurst = 30
 	c.Limits.WritesPerIPPerMinute = 300
-	c.Limits.ReadsPerIPPerMinute = 600
-	c.Limits.WriteBytesPerIPPerDay = 10485760
-	c.Limits.VisitorsPerIPPerHour = 30
-	c.Limits.SpacesPerVisitorPerDay = 5
-	c.Limits.SpacesPerIPPerDay = 20
+	c.Limits.ReadsPerIPPerMinute = 1200
+	c.Limits.StoredBytesPerIPPerDay = 1 << 30
+	c.Limits.VisitorsPerIPPerHour = 100
+	c.Limits.SpacesPerVisitorPerDay = 20
+	c.Limits.SpacesPerIPPerDay = 50
 	c.Limits.MissesPerIPPerHour = 30
 	c.Limits.WatchesPerIP = 50
 	c.Limits.WatchesTotal = 1000
 	c.Limits.TTLMinSeconds = 5
-	c.Limits.TTLMaxSeconds = 2592000
+	c.Limits.TTLMaxSeconds = 7776000
 	c.Limits.PulsesPerSecond = 60
 	c.Limits.PulseBurst = 120
 	c.Limits.PulsesPerIPPerSecond = 300
@@ -199,8 +201,16 @@ func Load(path string) (*Config, error) {
 	if c.Limits.ReadsPerIPPerMinute < 1 {
 		return nil, fmt.Errorf("reads_per_ip_per_minute must be positive")
 	}
-	if c.Limits.WriteBytesPerIPPerDay < 1 {
-		return nil, fmt.Errorf("write_bytes_per_ip_per_day must be positive")
+	if c.Limits.StoredBytesPerIPPerDay < 1 {
+		return nil, fmt.Errorf("stored_bytes_per_ip_per_day must be positive")
+	}
+	if c.Limits.MaxValueSize < 1 || c.Limits.MaxValueSize > MaxValueCap {
+		return nil, fmt.Errorf("max_value_size must be 1 byte to 4MB")
+	}
+	for name, p := range c.Spaces {
+		if p.MaxValueSize > MaxValueCap {
+			return nil, fmt.Errorf("pinned space %s: max_value_size must be at most 4MB", name)
+		}
 	}
 	if c.Limits.VisitorsPerIPPerHour < 1 {
 		return nil, fmt.Errorf("visitors_per_ip_per_hour must be positive")
@@ -244,12 +254,24 @@ func (c *Config) RateLimitsOn() bool {
 	return c.Server.RateLimits == nil || *c.Server.RateLimits
 }
 
+// MaxValueCap bounds max_value_size, in [limits] and for pinned spaces.
+const MaxValueCap = 4 << 20
+
+// LargestValue is the largest value any space on this server accepts.
+func (c *Config) LargestValue() int64 {
+	n := int64(c.Limits.MaxValueSize)
+	for _, p := range c.Spaces {
+		n = max(n, int64(p.MaxValueSize))
+	}
+	return n
+}
+
 // limitsFor returns the value size, byte and key limits for a space.
 func (c *Config) LimitsFor(space string) (maxValue, maxBytes int64, maxKeys int) {
 	maxValue, maxBytes, maxKeys = int64(c.Limits.MaxValueSize), int64(c.Limits.MaxSpaceBytes), c.Limits.MaxSpaceKeys
 	if p, ok := c.Spaces[space]; ok {
 		if p.MaxValueSize > 0 {
-			maxValue = min(int64(p.MaxValueSize), 1<<20)
+			maxValue = int64(p.MaxValueSize)
 		}
 		if p.MaxBytes > 0 {
 			maxBytes = int64(p.MaxBytes)

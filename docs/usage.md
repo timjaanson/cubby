@@ -36,7 +36,7 @@ to/owners/{key} reaches every owner, who read it under inbox/owners/{sender}/{ke
 - Owners invite people with access tokens (`at_...`), usually sent as a link with `#t=at_...`. Redeeming one with `join` gives that visitor a grant. By default an invite makes a full member, works for 10 people and expires after 7 days. Members can invite too, with at most the rights they hold, unless the space says `invite: "owners"`. The owner token (`ot_...`) is the owner's recovery key.
 - A private space looks exactly like a missing one to anyone without a grant: 404 `no_space`.
 - A key is up to 128 of `A-Z a-z 0-9 . _ : -`, and can't be `.`, `..`, `watch`, `series` or `pulse`. Group with dots (`msg.1791449600123`), because listing and watching select by prefix (`msg.*`).
-- A value is UTF-8 text up to 64 KB. Valid JSON comes back as `application/json`, anything else as `text/plain`, always byte for byte as written.
+- A value is UTF-8 text up to 512 KB. Valid JSON comes back as `application/json`, anything else as `text/plain`, always byte for byte as written.
 - A series key keeps every value added to it, each with a time, for sensor readings and the like. Its value is the newest point. See [Series](#series).
 - Every write gets a version number. Pass it back with `ifVersion` to write only if nobody changed the key meanwhile.
 - Private means invited people only. The server's operator can still read everything, so it's not a password vault.
@@ -176,7 +176,7 @@ cubby set notes-cedar-pilot-mango-frost/users/me/here online --ttl 30s
 cubby time                           # server clock offset and round trip
 ```
 
-Plain keys can expire after 5 seconds to 30 days. Renewing the same value extends TTL without a new version or waking watchers. A PUT without TTL makes the key permanent. Expiry produces a delete marked `expired: true`. Combine TTL with `--create` and `--if-version` for a cooperative lease. See the [lease recipe and expiry rules](spec.md#expiring-keys-and-leases).
+Plain keys can expire after 5 seconds to 90 days. Renewing the same value extends TTL without a new version or waking watchers. A PUT without TTL makes the key permanent. Expiry produces a delete marked `expired: true`. Combine TTL with `--create` and `--if-version` for a cooperative lease. See the [lease recipe and expiry rules](spec.md#expiring-keys-and-leases).
 
 ```js
 const { limits, usage } = await db.limits()
@@ -189,7 +189,7 @@ await db.user().set("answer", "B", { ifBefore: opensAt + 20000 })
 
 Every key returns its value time as `t` in list/watch and `KV-Time` on reads. `/v1/time` supplies the server clock. `ifBefore` enforces a write deadline. Clock estimates and browser timers are subject to network asymmetry and browser scheduling.
 
-Defaults are 120 writes per visitor per minute, burst 30, and 50 open watches per IP. Reads remain 600/IP/minute. Every rate is configurable. `GET /v1/limits` reports the server's actual settings; `/access` includes effective space limits and usage. Data-write responses carry remaining visitor and IP budgets in `RateLimit` headers, exposed by kv.js as `db.writeBudget`. These are snapshots, so clients must still handle 429 and `err.retryAfter`. Writes are never automatically retried after 429 or an uncertain network failure. [Full contract](spec.md#limits-and-server-time).
+Defaults are 120 writes per visitor per minute, burst 30, and 50 open watches per IP. Reads are 1200/IP/minute, and stored data may grow by 1 GB per IP per day; rewrites in place don't count. Every rate is configurable. `GET /v1/limits` reports the server's actual settings; `/access` includes effective space limits and usage. Data-write responses carry remaining visitor and IP budgets in `RateLimit` headers, exposed by kv.js as `db.writeBudget`. These are snapshots, so clients must still handle 429 and `err.retryAfter`. Writes are never automatically retried after 429 or an uncertain network failure. [Full contract](spec.md#limits-and-server-time).
 
 ## CLI
 
@@ -300,8 +300,8 @@ GET  /v1/home-cedar-pilot-mango-frost/shared/temp/series?since=MS   → the poin
 ```
 
 - With a key in the URL, the body is one point, whatever its shape: a number, text, an object. With `prefix*`, the body is an object, and each member becomes a point in series `prefix` + name, all at the same time. Up to 100 members, all or nothing.
-- Points are stored as sent, up to 1 KB each. The server never calculates anything from them.
+- Points are stored as sent, up to 4 KB each. The server never calculates anything from them.
 - `PUT` on a series returns 409 `is_series`, and `/series` on a plain key returns 409 `not_series`. `DELETE` removes a series with all its points.
-- Each series keeps its newest 50,000 points and drops the oldest, so a device that sends forever never starts failing.
+- Each series keeps its newest 20,000 points and drops the oldest, so a device that sends forever never starts failing.
 - Lists and watches include `t` for series keys. Watching gives the newest point, and `series?since=` catches up on every point.
 - A `POST` counts as one write for rate limits, however many series it adds to. Points count towards the space's storage, not the visitor's.

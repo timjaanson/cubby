@@ -40,11 +40,11 @@ func (s *Server) writeBudget(c *reqCtx) {
 		for _, b := range []struct {
 			name, key string
 			l         *limiter
-		}{{"visitor", c.visitor, s.lim.writesPerVisitor}, {"ip", c.ip, s.lim.writesPerIP}, {"bytes", c.ip, s.lim.writeBytesPerIP}} {
+		}{{"visitor", c.visitor, s.lim.writesPerVisitor}, {"ip", c.ip, s.lim.writesPerIP}, {"stored", c.ip, s.lim.storedPerIP}} {
 			remaining := b.l.remaining(b.key)
 			item := fmt.Sprintf(`"%s";q=%d;w=%d`, b.name, int64(b.l.burst), int64(math.Ceil(b.l.burst/b.l.rate)))
-			if b.name == "bytes" {
-				item += `;qu="content-bytes"`
+			if b.name == "stored" {
+				item += `;qu="bytes"`
 			}
 			policy = append(policy, item)
 			budget = append(budget, fmt.Sprintf(`"%s";r=%d`, b.name, remaining))
@@ -61,7 +61,7 @@ func (l *limiter) remaining(key string) int64 {
 	if b := l.buckets[key]; b != nil {
 		tokens = math.Min(l.burst, b.tokens+l.now().Sub(b.last).Seconds()*l.rate)
 	}
-	return int64(math.Floor(tokens))
+	return max(0, int64(math.Floor(tokens)))
 }
 
 func parseIfBefore(r *http.Request) (*int64, error) {

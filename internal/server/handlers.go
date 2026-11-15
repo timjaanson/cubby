@@ -175,14 +175,17 @@ func (s *Server) write(c *reqCtx, t store.Target) error {
 	if err := s.rate(s.lim.writesPerIP, c.ip, 1, "rate_limited"); err != nil {
 		return err
 	}
-	if err := s.rate(s.lim.writeBytesPerIP, c.ip, float64(len(req.Value)+len(t.Key)), "rate_limited"); err != nil {
-		return err
+	if req.Value != nil {
+		if err := s.storedRoom(c.ip); err != nil {
+			return err
+		}
 	}
 
 	res, err := s.store.Write(c.r.Context(), req)
 	if err != nil {
 		return err
 	}
+	s.chargeStored(c.ip, res.Grown)
 	if res.Changed {
 		s.notify.fire(t.Space)
 	}
@@ -275,13 +278,9 @@ func (s *Server) list(c *reqCtx, t store.Target) error {
 
 var errVersionExpired = &apierr.Error{Status: 410, Code: "version_expired", Message: "That version is too old or from elsewhere. Start again from version=0."}
 
-// watchBatch is one watch response: at most 1000 changes after from, and
-// the version to continue from.
-func watchBatch(changes []store.Entry, seq, from int64) (body map[string]any, next int64) {
-	more := len(changes) > 1000
-	if more {
-		changes = changes[:1000]
-	}
+// watchBatch is one watch response: the changes after from, at most 1000
+// and store.PageBytes, and the version to continue from.
+func watchBatch(changes []store.Entry, seq, from int64, more bool) (body map[string]any, next int64) {
 	out := make([]itemJSON, 0, len(changes))
 	for _, e := range changes {
 		out = append(out, toItem(e))
@@ -345,7 +344,7 @@ func (s *Server) watch(c *reqCtx, t store.Target) error {
 	woken := false
 	for {
 		sig := s.notify.subscribe(t.Space)
-		changes, seq, err := s.store.Changes(t, from, 1000)
+		changes, seq, more, err := s.store.Changes(t, from, 1000)
 		if errors.Is(err, store.ErrVersionExpired) {
 			return errVersionExpired
 		}
@@ -363,7 +362,7 @@ func (s *Server) watch(c *reqCtx, t store.Target) error {
 				woken = false
 				continue
 			}
-			body, _ := watchBatch(changes, seq, from)
+			body, _ := watchBatch(changes, seq, from, more)
 			c.json(200, body)
 			return nil
 		}

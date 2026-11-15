@@ -21,6 +21,7 @@ import (
 
 	"github.com/timjaanson/cubby/internal/access"
 	"github.com/timjaanson/cubby/internal/apierr"
+	"github.com/timjaanson/cubby/internal/config"
 	"github.com/timjaanson/cubby/internal/names"
 	"github.com/timjaanson/cubby/internal/store"
 )
@@ -30,10 +31,17 @@ const (
 	livePing            = 30 * time.Second // below the common 60 s proxy idle timeout
 	livePingWait        = 15 * time.Second
 	liveWriteWait       = 10 * time.Second // a client that can't take a frame this long is gone
-	liveReadLimit       = 256 << 10        // a full series batch fits
 	liveMaxWatches      = 20
 	liveMaxWills        = 8
 )
+
+// liveReadLimit is the largest message a client may send: the largest value
+// or series batch the server accepts, with room for the envelope and for
+// escaping a text value.
+func liveReadLimit(c *config.Config) int64 {
+	batch := int64(maxBatchMembers)*(int64(c.Limits.MaxPointSize)+160) + 2
+	return max(2*c.LargestValue(), batch) + 64<<10
+}
 
 // liveAuthWait is a variable so tests can shorten it.
 var liveAuthWait = liveAuthWaitDefault
@@ -227,7 +235,7 @@ func (l *liveConn) run(settled bool) {
 		l.conn.Close(websocket.StatusNormalClosure, "")
 		l.fireWills()
 	}()
-	l.conn.SetReadLimit(liveReadLimit)
+	l.conn.SetReadLimit(liveReadLimit(l.s.cfg))
 	go l.keepalive()
 	var authTimer *time.Timer
 	if !settled {
@@ -801,7 +809,7 @@ func (l *liveConn) runWatch(ctx context.Context, w *liveWatch, id json.RawMessag
 	first, woken := true, false
 	for {
 		sig := s.notify.subscribe(t.Space)
-		changes, seq, err := s.store.Changes(t, from, 1000)
+		changes, seq, more, err := s.store.Changes(t, from, 1000)
 		if errors.Is(err, store.ErrVersionExpired) {
 			fail(errVersionExpired)
 			return
@@ -827,7 +835,7 @@ func (l *liveConn) runWatch(ctx context.Context, w *liveWatch, id json.RawMessag
 				fail(apierr.NoSpace)
 				return
 			}
-			body, next := watchBatch(changes, seq, from)
+			body, next := watchBatch(changes, seq, from, more)
 			if ctx.Err() != nil {
 				return
 			}
@@ -835,7 +843,7 @@ func (l *liveConn) runWatch(ctx context.Context, w *liveWatch, id json.RawMessag
 				return
 			}
 			from, first = next, false
-			if more, _ := body["more"].(bool); more {
+			if more {
 				continue
 			}
 		}

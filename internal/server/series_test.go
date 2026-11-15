@@ -153,7 +153,7 @@ func TestSeriesKinds(t *testing.T) {
 		{"POST", S + "/temp/series?ifVersion=1", "5", 400, "invalid_parameter"},
 		{"POST", S + "/temp/series?t=abc", "5", 400, "invalid_parameter"},
 		{"POST", S + "/temp/series?t=" + itoa(time.Now().UnixMilli()+120_000), "5", 400, "invalid_parameter"},
-		{"POST", S + "/temp/series", strings.Repeat("x", 1025), 413, "value_too_large"},
+		{"POST", S + "/temp/series", strings.Repeat("x", 4097), 413, "value_too_large"},
 		{"GET", S + "/temp/series?limit=0", "", 400, "invalid_parameter"},
 		{"GET", S + "/temp/series?since=-1", "", 400, "invalid_parameter"},
 	} {
@@ -229,7 +229,7 @@ func TestSeriesBatch(t *testing.T) {
 		{`{"temp": 1, "temp": 2}`, "batch_needs_object", "env.temp"},
 		{`{"temp": 22, "bad name": 1}`, "invalid_key", "env.bad name"},
 		{`{"temp": 22, "note": 1}`, "not_series", "env.note"},
-		{`{"temp": 22, "big": "` + strings.Repeat("x", 1100) + `"}`, "value_too_large", "env.big"},
+		{`{"temp": 22, "big": "` + strings.Repeat("x", 4200) + `"}`, "value_too_large", "env.big"},
 	} {
 		st, _, b := c.req("POST", S+"/env.*/series", tt.body, auth...)
 		if errCode(b) != tt.code || st < 400 {

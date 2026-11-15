@@ -24,6 +24,7 @@ type writeResult struct {
 	Created    bool // a new key, for 201
 	Changed    bool // false for an identical rewrite
 	T, Expires int64
+	Grown      int64 // bytes the space grew by, zero when it shrank
 }
 
 func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err error) {
@@ -247,5 +248,5 @@ func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err err
 		s.noteVisitorSpace(r.Writer, r.Space)
 		s.noteRecipient(r.Area, r.Space)
 	}
-	return writeResult{Version: version, Created: !live, Changed: true, T: nowMS, Expires: expires}, nil
+	return writeResult{Version: version, Created: !live, Changed: true, T: nowMS, Expires: expires, Grown: max(0, spaceDelta)}, nil
 }

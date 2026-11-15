@@ -96,7 +96,7 @@ func (s *Server) seriesAdd(c *reqCtx, t store.Target) error {
 	if err := s.rate(s.lim.writesPerIP, c.ip, 1, "rate_limited"); err != nil {
 		return err
 	}
-	if err := s.rate(s.lim.writeBytesPerIP, c.ip, float64(len(body)+len(t.Key)), "rate_limited"); err != nil {
+	if err := s.storedRoom(c.ip); err != nil {
 		return err
 	}
 
@@ -104,6 +104,7 @@ func (s *Server) seriesAdd(c *reqCtx, t store.Target) error {
 	if err != nil {
 		return err
 	}
+	s.chargeStored(c.ip, res.Grown)
 	if res.Changed {
 		s.notify.fire(t.Space)
 	}

@@ -52,7 +52,7 @@ Whatever the proxy, it needs to:
 - **Pass WebSocket upgrades.** Live connections are a WebSocket at `/v1/{space}/live`. Without upgrade headers they fail, and the JS client quietly falls back to HTTP polling, which works but is slower.
 - **Allow at least 60 seconds per request.** An HTTP watch waits up to 25 seconds for a change (55 if the client asks), and the server pings each WebSocket every 30 seconds. 75 seconds leaves room.
 - **Send `X-Forwarded-For`,** and run where cubby trusts it. Rate limits are per client address. cubby believes `X-Forwarded-For` only from `trusted_proxies`, by default `127.0.0.1` and `::1`. A proxy on another host or in another container needs its address added, or every visitor shares the proxy's limits.
-- **Accept request bodies up to 256 KB.** A value is at most 64 KB and a batch of series points about 120 KB.
+- **Accept request bodies of at least 1 MB.** A value is at most 512 KB by default and a batch of series points about 420 KB. nginx's default `client_max_body_size` is 1 MB, which is enough; raise it if `max_value_size` or a pinned space goes higher.
 - **Speak HTTP/2 to browsers,** ideally. Browsers open at most 6 HTTP/1.1 connections per host across all tabs, and each HTTP watch holds one. Pages using live connections don't need it.
 
 To check a proxy, ask for a WebSocket on any valid space name. `101 Switching Protocols` means upgrades get through:
@@ -182,19 +182,19 @@ empty_visitor_idle_ttl = "30d"    # visitors who never stored anything
 tombstone_ttl = "7d"
 
 [limits]
-max_value_size = "64KB"
-max_point_size = "1KB"            # one point in a series
-max_series_points = 50000         # per series; the oldest are dropped
-max_visitor_bytes = "1MB"
-max_space_bytes = "5MB"
-max_space_keys = 10000
-max_total_bytes = "1GB"
+max_value_size = "512KB"          # at most 4MB
+max_point_size = "4KB"            # one point in a series
+max_series_points = 20000         # per series; the oldest are dropped
+max_visitor_bytes = "25MB"
+max_space_bytes = "100MB"
+max_space_keys = 100000
+max_total_bytes = "5GB"
 max_spaces = 1000
 
 [spaces.status-cedar-pilot-mango-frost]          # pinned: never cleaned up, own limits
-max_bytes = "100MB"
-max_value_size = "256KB"
-max_series_points = 500000
+max_bytes = "1GB"
+max_value_size = "2MB"
+max_series_points = 200000
 ```
 
 ## Where data lives

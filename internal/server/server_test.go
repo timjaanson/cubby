@@ -24,8 +24,12 @@ type tc struct {
 	cfg   *config.Config
 }
 
-func newTest(t *testing.T) *tc {
+// newTest starts a server with the default config, changed by each fn.
+func newTest(t *testing.T, fns ...func(*config.Config)) *tc {
 	cfg := config.Default()
+	for _, fn := range fns {
+		fn(cfg)
+	}
 	cfg.Server.DataDir = t.TempDir()
 	cfg2, _ := config.Load("")
 	cfg.Trusted = cfg2.Trusted
@@ -176,7 +180,7 @@ func TestReadWriteDelete(t *testing.T) {
 	if s, _, b := c.req("PUT", sp+"/shared/empty", "", auth...); s != 400 || errCode(b) != "empty_value" {
 		t.Fatalf("empty: %d %s", s, b)
 	}
-	if s, _, b := c.req("PUT", sp+"/shared/big", strings.Repeat("x", 64<<10+1), auth...); s != 413 {
+	if s, _, b := c.req("PUT", sp+"/shared/big", strings.Repeat("x", 512<<10+1), auth...); s != 413 {
 		t.Fatalf("big: %d %s", s, b)
 	}
 	deep := strings.Repeat("[", 65) + strings.Repeat("]", 65)

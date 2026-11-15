@@ -69,7 +69,7 @@ func exitFor(code string, status int) int {
 		return 2
 	case "no_access", "owner_only", "not_yours", "invite_invalid", "missing_token", "invalid_token", "banned":
 		return 3
-	case "rate_limited", "space_limit", "too_many_watches", "visitor_quota_exceeded", "space_quota_exceeded", "server_full":
+	case "rate_limited", "stored_limit", "space_limit", "too_many_watches", "visitor_quota_exceeded", "space_quota_exceeded", "server_full":
 		return 4
 	}
 	if status >= 400 && status < 500 {

@@ -139,7 +139,7 @@ space              "poll-cedar-pilot-mango-frost"     settings: read, write per 
 - **users/{id}/** is each visitor's public data: a vote, a name, a score, a message. Everyone who can read the space can read it, nobody else can change it. `users/*/vote` lists every visitor's `vote` at once.
 - **to/** and **inbox/** are values with one reader. A sender writes `to/{recipient}/{key}`, the recipient reads `inbox/{sender}/{key}`, and nobody else sees it. Each sender has their own slot, so answers never overwrite each other. `to/me/` is a visitor's private data, `to/owners/` reaches every owner. `me` stands for your own ID anywhere one goes.
 - **Key** is a short name like `question` or `msg.1791449600123`. No slashes. Group with dots, because listing and watching work by prefix.
-- **Value** is text up to 64 KB. If it parses as JSON it comes back as JSON, otherwise as plain text. You get back exactly the bytes you wrote.
+- **Value** is text up to 512 KB. If it parses as JSON it comes back as JSON, otherwise as plain text. You get back exactly the bytes you wrote.
 - **Version** is a number that goes up with every write in the space. Each key remembers the version of its last write, and `by`, the visitor who made it.
 - **Series** is a key that keeps every value written to it, each with a time. Its value is the newest point, and `{key}/series` has the rest. See [Series](#series).
 
@@ -367,26 +367,26 @@ GET /v1/home/shared/temp/series?since=T           → the points after T, then f
 ```
 
 - The first `POST {key}/series` makes the key a series. `PUT` on it then returns 409 `is_series`, so a stray write can't make the latest value disagree with the history.
-- Points accept anything a `PUT` does: numbers, strings, objects, text. They're stored and returned as sent, up to 1 KB each.
+- Points accept anything a `PUT` does: numbers, strings, objects, text. They're stored and returned as sent, up to 4 KB each, the same as a pulse.
 - Points are always returned oldest first. A chart of the last day is `since=<now - 24h>`.
 - Watching a series key gives the newest point, like any key. Reading `series?since=` catches up on every point.
-- Each series keeps its newest 50,000 points and drops the oldest, so a device sending forever never starts failing.
+- Each series keeps its newest 20,000 points and drops the oldest, so a device sending forever never starts failing.
 - A `POST` counts as one write however many series it adds to.
 
 ## Limits, briefly
 
 | Thing | Default |
 |---|---|
-| Value size | 64 KB |
-| Point size in a series | 1 KB |
-| Points kept per series | 50,000, oldest dropped |
+| Value size | 512 KB |
+| Point size in a series | 4 KB |
+| Points kept per series | 20,000, oldest dropped |
 | Key length | 128 characters |
-| Data per visitor | 1 MB |
-| Data per space | 5 MB |
-| Total data | 1 GB |
+| Data per visitor | 25 MB |
+| Data per space | 100 MB |
+| Total data | 5 GB |
 | Writes per visitor | 120 per minute, burst 30 |
-| New visitors per IP | 30 per hour |
-| New spaces per visitor | 5 per day |
+| New visitors per IP | 100 per hour |
+| New spaces per visitor | 20 per day |
 | Open watches per IP | 50 |
 
 Hitting a limit makes the write fail with a clear error. Reads keep working and nothing stored is lost.

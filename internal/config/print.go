@@ -65,7 +65,7 @@ func (c *Config) TOML(def *Config, dataDirNote string) string {
 	w.set("write_burst", strconv.Itoa(c.Limits.WriteBurst), strconv.Itoa(def.Limits.WriteBurst), "Visitor write bucket capacity.")
 	w.set("writes_per_ip_per_minute", strconv.Itoa(c.Limits.WritesPerIPPerMinute), strconv.Itoa(def.Limits.WritesPerIPPerMinute), "Writes per IP per minute. Bucket capacity equals this value.")
 	w.set("reads_per_ip_per_minute", strconv.Itoa(c.Limits.ReadsPerIPPerMinute), strconv.Itoa(def.Limits.ReadsPerIPPerMinute), "Reads per IP per minute, including continuing watches.")
-	w.set("write_bytes_per_ip_per_day", strconv.Itoa(c.Limits.WriteBytesPerIPPerDay), strconv.Itoa(def.Limits.WriteBytesPerIPPerDay), "Write bytes per IP per day. Bucket capacity equals this value.")
+	w.set("stored_bytes_per_ip_per_day", size(c.Limits.StoredBytesPerIPPerDay), size(def.Limits.StoredBytesPerIPPerDay), "How much stored data may grow per IP per day. Rewrites and deletes don't count.")
 	w.set("visitors_per_ip_per_hour", strconv.Itoa(c.Limits.VisitorsPerIPPerHour), strconv.Itoa(def.Limits.VisitorsPerIPPerHour), "New visitors per IP per hour.")
 	w.set("spaces_per_visitor_per_day", strconv.Itoa(c.Limits.SpacesPerVisitorPerDay), strconv.Itoa(def.Limits.SpacesPerVisitorPerDay), "New spaces per visitor per day.")
 	w.set("spaces_per_ip_per_day", strconv.Itoa(c.Limits.SpacesPerIPPerDay), strconv.Itoa(def.Limits.SpacesPerIPPerDay), "New spaces per IP per day.")
@@ -83,10 +83,10 @@ func (c *Config) TOML(def *Config, dataDirNote string) string {
 	w.comment("Leave a setting out to use the one from [limits].")
 	if len(c.Spaces) == 0 {
 		w.line("# [spaces.status-cedar-pilot-mango]")
-		w.line(`# max_bytes = "100MB"`)
-		w.line(`# max_value_size = "256KB"     # capped at 1MB`)
-		w.line("# max_keys = 50000")
-		w.line("# max_series_points = 500000")
+		w.line(`# max_bytes = "1GB"`)
+		w.line(`# max_value_size = "2MB"     # capped at 4MB`)
+		w.line("# max_keys = 500000")
+		w.line("# max_series_points = 200000")
 	}
 	pinned := make([]string, 0, len(c.Spaces))
 	for name := range c.Spaces {
