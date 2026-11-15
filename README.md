@@ -5,7 +5,7 @@ A small back-end for live web apps. One binary gives you a key-value store with 
 It's for the things that are too small for a real back-end: a poll for the group chat, a shared shopping list, a quiz night, a scoreboard, a board several people edit at once, a sensor dashboard, a script that tells another script something changed.
 
 - **Live updates.** Watch a key or a pattern and changes arrive as they happen, over one WebSocket per page or plain HTTP long polling.
-- **No sign-up.** Each browser gets an anonymous identity by itself. One request creates a space.
+- **No sign-up.** Each browser gets an anonymous identity by itself. One request creates a space. A one-use code links a second device to the same identity.
 - **Private unless you say so.** Spaces are invite-only. One word (`public: "read"`, `"respond"`, `"all"`) opens them up.
 - **Safe with many writers.** Every value has a version, and `ifVersion` refuses a write if someone got there first. Each visitor has an area only they can write, so votes and names can't be faked.
 - **Pulses for the fast stuff.** Cursors, drags, reactions and game inputs go out as pulses: values that are never stored, reach whoever is listening right now, and can be sent dozens of times a second.

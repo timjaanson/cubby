@@ -141,3 +141,31 @@ func TestTokenShapes(t *testing.T) {
 		t.Fatal("ids")
 	}
 }
+
+func TestLinkCodes(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 1000; i++ {
+		c := NewLinkCode()
+		if NormalizeLinkCode(c) != c || seen[c] {
+			t.Fatalf("code %q", c)
+		}
+		seen[c] = true
+	}
+	for in, want := range map[string]string{
+		"K7M2X-9Q4PA":   "lk_K7M2X9Q4PA",
+		" k7m2x 9q4pa ": "lk_K7M2X9Q4PA",
+		"LK_k7m2x9q4pa": "lk_K7M2X9Q4PA",
+		"OIL00-11111":   "lk_01100" + "11111",
+		"K7M2X-9Q4P":    "",
+		"K7M2X-9Q4PAU":  "",
+		"K7M2X-9Q4PU":   "",
+		"":              "",
+	} {
+		if got := NormalizeLinkCode(in); got != want {
+			t.Errorf("NormalizeLinkCode(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if d := DisplayLinkCode("lk_K7M2X9Q4PA"); d != "K7M2X-9Q4PA" {
+		t.Fatal(d)
+	}
+}

@@ -152,7 +152,7 @@ A 405 names the methods that work and, where it helps, the route you probably me
 
 ## 3. Visitors
 
-A visitor is an anonymous identity: one browser, one script, one device. Everything a request is allowed to do follows from who the visitor is and which grants they hold in the space, see [Access](#4-spaces-and-access).
+A visitor is an anonymous identity: a browser, a script, a device, or several of them [linked](#devices-and-links) into one. Everything a request is allowed to do follows from who the visitor is and which grants they hold in the space, see [Access](#4-spaces-and-access).
 
 ### Getting a visitor token
 
@@ -165,7 +165,7 @@ POST /v1/anon
 {"token": "vt_4Jx9...", "id": "u_k7m2x9q4p1r8t3w6"}
 ```
 
-- A visitor token is `vt_` plus 32 random bytes in base64url. It belongs to one visitor. The server stores only its SHA-256 hash.
+- A visitor token is `vt_` plus 32 random bytes in base64url. It belongs to one device of one visitor. The server stores only its SHA-256 hash.
 - The response includes the visitor's ID, so a client needs no second request to know who it is.
 - Two other routes also create a visitor when called without a token: [`POST /v1/spaces`](#create-a-space) and [`POST /v1/{space}/join`](#redeeming-join). A page that starts by creating a space or redeeming an invite never needs `/v1/anon`.
 - Creating a visitor, by any of the three routes, is rate limited by IP: 100 per hour with a burst of 100. IPv6 addresses are grouped by /64.
@@ -191,6 +191,8 @@ or `?token=vt_4Jx9...` where a header can't be set, such as a browser tab, or wh
 | reads of `shared/` and `users/` in a space with `read: anyone` | no |
 | `GET /v1/{space}/access` | no |
 | `POST /v1/anon`, `POST /v1/spaces`, `POST /v1/{space}/join` | no, one is created if missing |
+| `POST /v1/links/redeem` | no; one that's sent is replaced |
+| `/v1/links`, `/v1/devices` otherwise | yes |
 
 - A token sent with a read that doesn't need one is still used for "last seen". If it's unknown or expired, it's ignored.
 - Where a token is needed, a missing one returns 401 `missing_token` and an unknown or expired one returns 401 `invalid_token`. The exception is a space the request can't read, which answers as if it didn't exist, see [Private spaces](#private-spaces).
@@ -208,9 +210,93 @@ GET /v1/whoami
 
 For clients that kept the token but lost the ID.
 
+### Devices and links
+
+A visitor can be on several devices: a phone, a laptop, a script. Each device has its own visitor token, and all of them act as the same visitor ID, with the same grants and data in every space. This is different from sharing. An [invite](#5-access-tokens-and-grants) gives another person a grant in one space; a link makes another device *you*, everywhere, ownership included.
+
+```
+device A ── POST /v1/links ──> code K7M2X-9Q4PA ── QR, link or typed ──> device B: POST /v1/links/redeem ──> B's own token for A's visitor
+```
+
+#### Making a link
+
+```
+POST /v1/links                      {"ttl": 600}, or no body
+Authorization: Bearer vt_A...
+```
+
+```
+201
+{"id": "l_x4k2m7q9", "code": "lk_K7M2X9Q4PA", "display": "K7M2X-9Q4PA", "state": "open",
+ "created": 1794650000000, "expires": 1794650600000, "ended": null, "device": null}
+```
+
+- `code` is `lk_` plus 10 characters of Crockford's base32, 50 bits. `display` is the same code for reading out and typing. The server stores only a hash.
+- A link is used once. `ttl` is 30 to 3600 seconds, default 600. To link another device, make another link.
+- At most 3 open links per visitor (409 `too_many_links`) and 20 new ones per visitor per hour (429).
+- Pages put the code in the fragment, `page#link=lk_...`, never in `#t=`. kv.js never redeems it on its own.
+
+#### Redeeming
+
+```
+POST /v1/links/redeem               the code as the whole body, or {"code": "...", "label": "Pixel 8"}
+Authorization: Bearer vt_B...       optional
+```
+
+```
+201
+{"token": "vt_...", "id": "u_k7m2x9q4p1r8t3w6", "device": "d_q4p1r8t3", "previous": "u_b2c3d4e5f6g7h2j3", "deleted": true}
+```
+
+- **The code** is accepted with or without `lk_`, in any case, with dashes and spaces ignored, O read as 0 and I or L as 1. A body that doesn't start with `{` is the code, so `curl -d K7M2X-9Q4PA` works.
+- **Redeeming always replaces.** If the request carries a visitor token, that device leaves its visitor: its token stops working. If that visitor has no other device left, it is deleted at once with everything it had, exactly as [expiry](#expiry) would: `users/` data, what it sent and received under `to/`, grants and bans in every space. `previous` names the old visitor, `deleted` says whether it went. A page must ask the person before redeeming. An unknown or expired token in the request is ignored.
+- **A client must save `token` before anything else**, as with `join`.
+- **Errors.** An unknown code is 404 `bad_link`. A known one that can't be used any more is 410 `link_used`, `link_expired` or `link_cancelled`. A device that already is the link's visitor gets 409 `same_visitor`, and the code stays unused.
+- **Guessing.** Every `bad_link` counts against the IP (IPv6 by /64): after 10 in 10 minutes, redeeming answers 429 until the budget refills. With 50-bit codes that live minutes, that makes guessing hopeless.
+- Live connections of the replaced device lose their identity, see [Signing out](#signing-out).
+
+#### Waiting for a link to be used
+
+```
+GET /v1/links/{id}?wait=30          up to 60 seconds
+DELETE /v1/links/{id}               cancel
+```
+
+- Both answer the link as in its creation, without the code. `state` is `open`, `used`, `expired` or `cancelled`. Once used, `device` is the new device, as in the device list.
+- With `wait`, an open link's status waits until it changes, the wait ends, or the link expires. The wait counts as a [watch](#10-watching) toward the per-IP limit.
+- Only the visitor who made the link sees it; anyone else gets 404. The ID is a handle, so polling never puts the code in a URL.
+- Cancelling a link that already ended changes nothing.
+
+#### Devices
+
+```
+GET    /v1/devices                  {"id": "u_...", "device": "d_...", "items": [...]}
+PATCH  /v1/devices/{id or me}       {"label": "Work laptop"}, answers like GET
+DELETE /v1/devices/{id or me}       {"removed": ["d_..."]}
+DELETE /v1/devices?others=1         every device but this one
+```
+
+Each item:
+
+```
+{"id": "d_q4p1r8t3", "label": "Pixel 8", "created": 1794650000000, "lastSeen": 1794650100000, "linkedBy": "d_k7m2x9q4", "current": true}
+```
+
+- Every device of the visitor may list, label and sign out every other. Labels are up to 64 characters of plain text, empty by default; kv.js and the CLI fill in a guess when redeeming.
+- `lastSeen` is updated at most once an hour. `linkedBy` is the device whose link made this one, `null` for a visitor's first.
+- The last device can't be signed out: 409 `last_device`.
+- Another visitor's device ID is 404 `not_found`.
+
+#### Signing out
+
+- A signed-out device's token is unknown from then on: 401 `invalid_token` where a token is needed, as for any unknown token.
+- Its live connections stay open but lose their identity, as if they had sent a bad token: reads go on without a visitor, writes answer `invalid_token`, and watches on `inbox/`, `to/` and `users/me/` end with `identity_changed`. A page that just redeemed a link sends `auth` with its new token and goes on. Last wills stay and fire as they would.
+- Nothing in any space changes. The visitor and its other devices are untouched.
+
 ### Expiry
 
-- A visitor counts as seen whenever a request carries their valid token, reads included.
+- A visitor counts as seen whenever a request carries a valid token of any of their devices, reads included.
+- A device unseen for `visitor_idle_ttl` is signed out on its own. Ended links are deleted a day after they end.
 - After 365 days unseen (`visitor_idle_ttl`), a cleanup job deletes the visitor, their token, their grants and bans, their `users/` data, and everything they sent or received under `to/` in every space. What others sent them is deleted too, and stops counting against the senders.
 - Visitors who never stored anything and hold no grant are deleted after 30 days unseen (`empty_visitor_idle_ttl`).
 - `visitor_idle_ttl` should stay longer than `space_idle_ttl`. Otherwise a visitor's votes or grants could vanish from a space that's still in use.
@@ -1392,7 +1478,7 @@ Through `cubby admin`, see [Admin](#admin) in the CLI section. There is no admin
 | 400 | `empty_value` | empty `PUT` or `POST` body | |
 | 400 | `json_too_deep` | JSON nested over 64 levels | |
 | 400 | `batch_needs_object` | a batch body that isn't a JSON object with 1 to 100 members | |
-| 400 | `invalid_parameter` | bad `limit`, `order`, `after`, `since`, `t`, `timeout`, `version`, `ifVersion`, `ttl`, `ifBefore`, `label`, `name`, `uses`, `until`, `grantFor`, or a malformed JSON body | `parameter` |
+| 400 | `invalid_parameter` | bad `limit`, `order`, `after`, `since`, `t`, `timeout`, `version`, `ifVersion`, `ttl`, `ifBefore`, `label`, `name`, `uses`, `until`, `grantFor`, `wait`, `others`, `code`, or a malformed JSON body | `parameter` |
 | 400 | `invalid_settings` | unknown setting or value, `public` together with `read` or `write`, or `read: granted` with any area writable by anyone | |
 | 400 | `invalid_scope` | malformed scope or unknown preset, or more than 20 scopes | `scope` |
 | 401 | `missing_token` | visitor token needed but missing | |
@@ -1405,12 +1491,17 @@ Through `cubby admin`, see [Admin](#admin) in the CLI section. There is no admin
 | 404 | `not_found` | key, route, token ID, grant ID or visitor doesn't exist | |
 | 404 | `no_space` | the space doesn't exist, or it's private and the request can't read it. The message says both, see [Private spaces](#private-spaces) | |
 | 404 | `invite_invalid` | `join` with a token that's unknown, expired, used up or revoked, or for a space that doesn't exist | |
+| 404 | `bad_link` | redeeming a link code that doesn't exist | |
 | 405 | `method_not_allowed` | wrong method for the route, such as `PUT` under `users/*/` or `inbox/`, or `POST` on a key without `/series` | `allow` |
 | 409 | `space_exists` | `POST /v1/spaces?name=` with a taken name | `space` |
 | 409 | `is_owner` | banning an owner | |
+| 409 | `same_visitor` | redeeming a link as the visitor who made it | |
+| 409 | `too_many_links` | a fourth open device link | `limit` |
+| 409 | `last_device` | signing out a visitor's only device | |
 | 409 | `is_series` | `PUT` on a series key | |
 | 409 | `not_series` | `/series` on a plain key | `key` in a batch |
 | 410 | `version_expired` | watch version too old or from elsewhere | |
+| 410 | `link_used`, `link_expired`, `link_cancelled` | redeeming a link that can't be used any more | |
 | 412 | `too_late` | `ifBefore` deadline reached | `t` |
 | 412 | `version_conflict` | `ifVersion` didn't match | `currentVersion` |
 | 413 | `value_too_large` | value or point over the limit | `limit`, and `key` in a batch |
@@ -1482,7 +1573,7 @@ Optional. Served at `/kv.js` as an ES module with no dependencies. Every method 
 
 ### Guide comment
 
-Many pages using cubby are written by coding agents for people who don't know what a space or a token is. kv.js starts with a comment that tells the reader, human or agent, how to do the safe thing. It's part of the contract, kept under 50 lines, and its text is:
+Many pages using cubby are written by coding agents for people who don't know what a space or a token is. kv.js starts with a comment that tells the reader, human or agent, how to do the safe thing. It's part of the contract, kept under 60 lines, and its text is:
 
 ```js
 // cubby client. A guide for whoever writes code with this, person or coding agent.
@@ -1530,6 +1621,9 @@ Many pages using cubby are written by coding agents for people who don't know wh
 //   db.to("me").set("draft", text)       // private to you
 // Moderation: db.owner.bans.add(id). A banned visitor's open() has banned: { until }.
 //
+// The same person on another device is not sharing. devices() links them: one
+// device shows (await devices().link()).url, the other asks, then accept()s.
+//
 // Never put an access token (at_...) or owner token (ot_...) in page source.
 // Anyone who can load the page could use it. Invite links are for sending to people.
 //
@@ -1539,7 +1633,7 @@ Many pages using cubby are written by coding agents for people who don't know wh
 ### Setup
 
 ```js
-import { kv, createSpace, openRoom, takeInvite, inviteLink, newName, validSpace, KvError } from "https://kv.example.com/kv.js"
+import { kv, createSpace, openRoom, devices, takeInvite, inviteLink, newName, validSpace, KvError } from "https://kv.example.com/kv.js"
 
 const db = kv("poll-cedar-pilot-mango-frost")
 const me = await db.open()
@@ -1634,6 +1728,38 @@ type Room = {
 - `me.inside === false` means the room is gone or the link didn't work. The page decides what to show, and `forget()` before creating a new one.
 - `link()` mints an invite with no use limit and no end, once per visitor and room, and keeps it in localStorage. It checks the token still works before reusing it, and mints a new one otherwise. Owners and members can both call it, so nobody keeps someone else's token. The link is the page with `#s=<space>&t=<token>`.
 - Every kv option works, such as `live: true`.
+
+### Devices
+
+Linking devices is about the visitor, not a space, so it's a top-level export and not on `db`:
+
+```ts
+devices(opts?: { server?, tokenKey?, fetch? }): Devices
+
+type Devices = {
+  id: string | null,                                 // this device's visitor ID
+  pending(param = "link"): string | null,            // the code in #link=..., not redeemed
+  link(opts?: { ttl?: number, base?: string }): Promise<Link>,
+  accept(code?: string, opts?: { label?, param? }): Promise<{ id, device, previous, deleted } | null>,
+  list(): Promise<Device[]>,                          // as in GET /v1/devices
+  rename(label: string, id = "me"): Promise<Device[]>,
+  remove(id: string): Promise<string[]>,              // sign a device out
+  signOutOthers(): Promise<string[]>,
+}
+
+type Link = {
+  id, code, display, expires,
+  url: string | null,             // base, or this page, with #link=CODE; any #t= dropped
+  done: Promise<{ device }>,      // when another device redeems it; rejects link_expired or link_cancelled
+  cancel(): Promise<string>,      // the state after
+}
+```
+
+- It shares the stored identity with every `kv()` for the same server and `tokenKey`.
+- `accept()` with no code takes `#link=` from the address and removes it, or returns `null` if there's none. It sends the current token, so this device leaves its old visitor; see [Redeeming](#redeeming). It stores the new token before returning. Every `kv()` on the page uses it from the next request on, and live connections send `auth` with it.
+- **`accept()` is never called on its own**, not by `open()` or `openRoom()`. A page checks `pending()` and asks the person first, since a link pushed at someone would otherwise swap their identity.
+- The default label is a guess like "Safari on iOS", or "Node.js".
+- `done` long-polls the link's status and starts on first use.
 
 ### Client limits and clock
 
@@ -1915,6 +2041,11 @@ The server URL defaults to `http://localhost:28229`. A bare port (`9000` or `:90
 | `access <space>` | what you may do here | `owner` or `member`, then one line per grant: ID, `until` or `-`, scopes |
 | `whoami [--show-token]` | your visitor ID, or with `--show-token` your visitor token, for use with `curl` | the ID or the token |
 | `url <path>` | the full URL for a path, for `curl` or a browser | the URL |
+| `device link [--ttl D] [--link URL] [--no-wait]` | make a one-use [device link](#devices-and-links), then wait until it's used | the code as `K7M2X-9Q4PA`, with `--link` also `URL#link=CODE` |
+| `device accept <code or link> [--label L] [--yes]` | become the link's visitor. Asks first if this CLI already has a visitor, unless `--yes`. With `--token` or `CUBBY_TOKEN`, prints the new token instead of saving it | the visitor ID |
+| `device ls` | this visitor's devices | one line per device: ID (`*` for this one), created, last seen, label |
+| `device name <label> [id]` | label this device or another | nothing |
+| `device rm <id>`, `device rm --others` | sign out one device, or every other one | the removed IDs with `--others` |
 
 Owner commands, each for one space:
 
@@ -2078,7 +2209,7 @@ Go.
 
 ```
 data/
-├── visitors.db          visitors, token hashes, last seen, which spaces each visitor has data or grants in
+├── server.db            visitors, their devices and token hashes, device links, last seen, which spaces each visitor has data or grants in
 ├── admin.sock           Unix socket for `cubby admin`, only accessible to the server's user
 └── spaces/{name}.db     one SQLite file per space
 ```
@@ -2201,11 +2332,12 @@ Hourly:
 
 1. Write pending "last seen" and "last active" times from memory to disk.
 2. Delete visitors unseen past `visitor_idle_ttl`, or past `empty_visitor_idle_ttl` if they never stored anything and hold no grant, with their `u:` and `m:` rows, points and grants in every space they used.
-3. Delete grants past their `until`, and access tokens that can't be redeemed, have no grants left and ended over 30 days ago.
-4. Delete tombstones older than `tombstone_ttl` and update `tombstone_floor`.
-5. Delete space files without activity past `space_idle_ttl`, unless pinned.
-6. Drop idle rate-limit buckets and cache entries, as described below.
-7. Run `PRAGMA incremental_vacuum` and `PRAGMA wal_checkpoint(TRUNCATE)` on spaces changed since the last run.
+3. Sign out devices unseen past `visitor_idle_ttl`, and delete device links a day after they ended.
+4. Delete grants past their `until`, and access tokens that can't be redeemed, have no grants left and ended over 30 days ago.
+5. Delete tombstones older than `tombstone_ttl` and update `tombstone_floor`.
+6. Delete space files without activity past `space_idle_ttl`, unless pinned.
+7. Drop idle rate-limit buckets and cache entries, as described below.
+8. Run `PRAGMA incremental_vacuum` and `PRAGMA wal_checkpoint(TRUNCATE)` on spaces changed since the last run.
 
 ### In-memory state
 
@@ -2242,7 +2374,7 @@ Ideas from the design discussion that were left out to keep the first version sm
 
 ### Sharing and identity
 
-- **Device linking.** Device A gets a short code that's valid for 10 minutes. Device B redeems it with its own token and becomes the same visitor. Brings `to/me/` and grants along to other devices, and gives "your devices" and "sign out others". Until then, a person on a second device redeems the same invite link again, which works within its uses.
+- **Linking from the new device.** A laptop shows a QR code, a phone that already is the visitor scans it and approves. Covered for now by typing the 10-character code on the laptop.
 - **Read-only links per room, without operator help.** Spaces whose ID is a hash of a write key, so a page can derive a read link from an edit link with no server state. Explored in depth and dropped because it needs hashing, fragment conventions and remembered keys in the client.
 - **Visitor IDs that differ per space**, derived with an HMAC, so a visitor can't be linked across spaces.
 

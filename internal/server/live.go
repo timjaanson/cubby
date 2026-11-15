@@ -105,6 +105,58 @@ func (s *Server) closeBanned(space, visitor string, until int64) {
 	}
 }
 
+// signOutLive treats live connections of devices that were signed out as
+// if their token had stopped working, the same as a bad token on HTTP:
+// reads go on without a visitor, writes answer invalid_token, watches on
+// the visitor's own areas end. Wills stay and fire as they would. The connection stays
+// open, so a page that just linked can send auth with its new token.
+func (s *Server) signOutLive(devices []string) {
+	if len(devices) == 0 {
+		return
+	}
+	gone := map[string]bool{}
+	for _, d := range devices {
+		gone[d] = true
+	}
+	s.live.mu.Lock()
+	var conns []*liveConn
+	for l := range s.live.conns {
+		l.mu.Lock()
+		if l.device != "" && gone[l.device] {
+			conns = append(conns, l)
+		}
+		l.mu.Unlock()
+	}
+	s.live.mu.Unlock()
+	for _, l := range conns {
+		l.setIdentity("", "", apierr.InvalidToken)
+	}
+}
+
+// setIdentity changes who the connection's messages come from. Watches on
+// the previous visitor's own areas end; the client starts them again.
+func (l *liveConn) setIdentity(visitor, device string, tokErr *apierr.Error) {
+	l.mu.Lock()
+	changed := visitor != l.visitor
+	l.visitor, l.device, l.tokErr = visitor, device, tokErr
+	var ended []string
+	if changed {
+		// inbox/, to/ and users/me/ meant the previous visitor's.
+		for id, w := range l.watches {
+			if w.self {
+				w.cancel()
+				delete(l.watches, id)
+				ended = append(ended, id)
+			}
+		}
+	}
+	l.mu.Unlock()
+	for _, id := range ended {
+		l.sendErr(json.RawMessage(id), &apierr.Error{Status: 409, Code: "identity_changed",
+			Message: "This connection authenticated as another visitor, or its device was signed out, so its watches on inbox/, to/ and users/me/ ended. Start them again from their last version."})
+	}
+}
+
 // CloseLive closes every live connection with 1001 going away, so clients
 // reconnect at once. http.Server.Shutdown doesn't see hijacked connections.
 func (s *Server) CloseLive() {
@@ -138,6 +190,7 @@ type liveConn struct {
 
 	mu      sync.Mutex
 	visitor string
+	device  string // the device of the token it authenticated with
 	tokErr  *apierr.Error
 	watches map[string]*liveWatch
 	wills   map[string]liveWill // by path
@@ -215,7 +268,7 @@ func (s *Server) liveRoute(c *reqCtx, space string) error {
 	// gets its own.
 	ctx, cancel := context.WithCancel(context.Background())
 	l := &liveConn{s: s, conn: conn, ctx: ctx, cancel: cancel, ip: c.ip, space: space,
-		addr: s.clientIP(c.r).String(), visitor: c.visitor, watches: map[string]*liveWatch{}, wills: map[string]liveWill{}}
+		addr: s.clientIP(c.r).String(), visitor: c.visitor, device: c.device, watches: map[string]*liveWatch{}, wills: map[string]liveWill{}}
 	s.live.add(l)
 	defer s.live.remove(l)
 	l.run(c.visitor != "")
@@ -422,14 +475,14 @@ func (l *liveConn) auth(m liveIn) {
 	if m.Token != nil {
 		tok = *m.Token
 	}
-	visitor := ""
+	visitor, device := "", ""
 	var tokErr *apierr.Error
 	switch {
 	case tok == "":
 	case !names.VisitorTokenRe.MatchString(tok):
 		tokErr = apierr.InvalidToken
 	default:
-		id, err := l.s.store.VisitorByToken(tok)
+		id, dev, err := l.s.store.VisitorByToken(tok)
 		if err != nil {
 			l.sendErr(m.ID, err)
 			return
@@ -437,30 +490,10 @@ func (l *liveConn) auth(m liveIn) {
 		if id == "" {
 			tokErr = apierr.InvalidToken
 		}
-		visitor = id
+		visitor, device = id, dev
 	}
 
-	l.mu.Lock()
-	changed := visitor != l.visitor
-	l.visitor, l.tokErr = visitor, tokErr
-	var ended []string
-	if changed {
-		// inbox/, to/ and users/me/ meant the previous visitor's. Those
-		// watches end; the client starts them again from their last version.
-		for id, w := range l.watches {
-			if w.self {
-				w.cancel()
-				delete(l.watches, id)
-				ended = append(ended, id)
-			}
-		}
-	}
-	l.mu.Unlock()
-	for _, id := range ended {
-		l.sendErr(json.RawMessage(id), &apierr.Error{Status: 409, Code: "identity_changed",
-			Message: "This connection authenticated as another visitor, so its watches on inbox/, to/ and users/me/ ended. Start them again from their last version."})
-	}
-
+	l.setIdentity(visitor, device, tokErr)
 	if tokErr != nil {
 		l.sendErr(m.ID, tokErr)
 		return

@@ -22,6 +22,7 @@ type reqCtx struct {
 	r       *http.Request
 	ip      string // rate-limit key: the IPv4 address or the IPv6 /64
 	visitor string // "" when no valid token was sent
+	device  string // the device of that token
 	tokErr  *apierr.Error
 	status  int
 

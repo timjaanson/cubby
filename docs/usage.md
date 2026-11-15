@@ -76,7 +76,7 @@ const db = room.db
 shareButton.onclick = async () => showQr(await room.link())   // a reusable invite, from owners and members alike
 ```
 
-It keeps the visitor token in `localStorage`, sends it as a header on writes and as `?token=` on reads (so reads skip CORS preflights), and finds the API from the URL it was loaded from. The module exports `kv`, `createSpace`, `takeInvite`, `inviteLink`, `newName`, `validSpace` and `KvError`. Every entry has `by`, the visitor who wrote it, and `mine`. Its opening comment is a short guide for coding agents; [docs/agents.md](agents.md) is the long one.
+It keeps the visitor token in `localStorage`, sends it as a header on writes and as `?token=` on reads (so reads skip CORS preflights), and finds the API from the URL it was loaded from. The module exports `kv`, `createSpace`, `openRoom`, `devices`, `takeInvite`, `inviteLink`, `newName`, `validSpace` and `KvError`. Every entry has `by`, the visitor who wrote it, and `mine`. Its opening comment is a short guide for coding agents; [docs/agents.md](agents.md) is the long one.
 
 For sharing without writing any UI, the server also serves a panel: invite links, QR codes, the member list, who can see the space, and the recovery key.
 
@@ -167,6 +167,48 @@ A banned visitor gets 403 `banned` for every request in the space and their live
 
 To let one person mute another, keep a list in `db.to("me")` and skip those senders in the page. The server has no per-person block.
 
+## Your devices
+
+Sharing gives *another person* a grant in one space. Linking makes *another device you*: the same visitor ID, with every grant and all data, in every space. A device makes a one-use code that lives 10 minutes; the other device redeems it.
+
+```js
+import { devices } from "https://cubby.example.com/kv.js"
+const me = devices()
+
+// The device that's already you: show the link or the code, then wait.
+const link = await me.link()                    // { code, display: "K7M2X-9Q4PA", url: "<this page>#link=lk_...", done, cancel() }
+showQr(link.url); showText(link.display)
+const { device } = await link.done              // { id, label: "Safari on iOS" }; rejects link_expired, link_cancelled
+
+// The new device: never automatic, ask first.
+if (me.pending() && confirm("Use this device as your account from the other one? Anything stored here so far goes away."))
+  await me.accept()                             // or me.accept(typedCode); { id, previous, deleted }
+
+await me.list()                                 // [{ id, label, created, lastSeen, linkedBy, current }]
+await me.rename("Work laptop"); await me.remove(id); await me.signOutOthers()
+```
+
+Redeeming always replaces the identity the device had. If nothing else uses that old visitor, it is deleted with its data, so a page should ask before calling `accept()`. A signed-out device's token stops working at once. The last device can't be signed out.
+
+From a shell or another language it's two requests:
+
+```sh
+curl -s -X POST -H "Authorization: Bearer $VT" $S/v1/links            # {"id": "l_...", "code": "lk_...", "display": "K7M2X-9Q4PA", ...}
+curl -s -H "Authorization: Bearer $VT" "$S/v1/links/l_...?wait=60"   # waits until used: "state": "used", "device": {...}
+curl -s -d K7M2X-9Q4PA $S/v1/links/redeem                             # on the new device: {"token": "vt_...", "id": "u_...", ...}
+curl -s -H "Authorization: Bearer $VT" $S/v1/devices
+curl -s -X DELETE -H "Authorization: Bearer $VT" "$S/v1/devices?others=1"
+```
+
+```python
+import json, urllib.request
+code = input("Code from your other device: ")
+r = urllib.request.urlopen(urllib.request.Request(S + "/v1/links/redeem", data=code.encode()))
+token = json.load(r)["token"]                   # save it before anything else
+```
+
+The CLI: `cubby device link` prints the code and waits, `cubby device accept K7M2X-9Q4PA` on the other machine, and `cubby device ls|name|rm`.
+
 ## Expiry, limits and timing
 
 ```sh
@@ -223,6 +265,14 @@ cubby token ls|set|rm <space> ...    cubby grant ls|add|rm <space> ...
 cubby owner-token <space>            cubby drop <space>
 ```
 
+Your devices (this visitor on another machine, not sharing):
+
+```sh
+cubby device link [--ttl 10m] [--link URL]              # prints K7M2X-9Q4PA and waits until it's used
+cubby device accept K7M2X-9Q4PA                          # on the other machine: become that visitor
+cubby device ls | name <label> | rm <id> | rm --others
+```
+
 Series:
 
 ```sh
@@ -277,6 +327,8 @@ Everything the CLI does is a single request.
 | invite | `POST /v1/{space}/tokens` (owners) → `{"token": "at_...", "uses": 10, "until": ...}` |
 | join | `POST /v1/{space}/join` with `{"token": "at_..."}`; without a visitor token one is created and returned |
 | what may I do | `GET /v1/{space}/access` |
+| link another device | `POST /v1/links` → `{"id", "code", "display"}`; the other device `POST /v1/links/redeem` with the code as the body → `{"token", "id"}` |
+| your devices | `GET /v1/devices`, `PATCH`/`DELETE /v1/devices/{id or me}`, `DELETE /v1/devices?others=1` |
 | owners | `PATCH`/`DELETE /v1/{space}`, `/tokens[/{id}]`, `/grants[/{id}]`, `POST /owner-token` |
 
 Unknown or repeated query parameters, and unknown JSON fields, are rejected with 400, so a typo like `ifversion=0` fails instead of overwriting. Errors are JSON with a stable `error` code and a `message`. CORS is open, so pages on any origin can call it.

@@ -1,13 +1,40 @@
 package store
 
+// serverVersion is server.db's user_version. 1: tokens moved from visitors
+// to devices.
+const serverVersion = 1
+
 const serverSchema = `
 CREATE TABLE IF NOT EXISTS visitors (
   id           TEXT PRIMARY KEY,
-  token_hash   TEXT NOT NULL UNIQUE,
-  created_at   INTEGER NOT NULL,
-  last_seen_at INTEGER NOT NULL,
+  created_at   INTEGER NOT NULL,           -- s
+  last_seen_at INTEGER NOT NULL,           -- s, the newest of its devices
   stored       INTEGER NOT NULL DEFAULT 0
 );
+-- Every visitor token is a device. A visitor has one or more.
+CREATE TABLE IF NOT EXISTS devices (
+  id           TEXT PRIMARY KEY,           -- d_ + 8 base32
+  visitor      TEXT NOT NULL,
+  token_hash   TEXT NOT NULL UNIQUE,       -- SHA-256 of the vt_ token
+  label        TEXT NOT NULL DEFAULT '',
+  created_at   INTEGER NOT NULL,           -- ms
+  last_seen_at INTEGER NOT NULL,           -- ms
+  linked_by    TEXT                        -- the device whose link made this one, NULL for the first
+);
+CREATE INDEX IF NOT EXISTS devices_by_visitor ON devices (visitor);
+-- One-use codes that make another device the same visitor.
+CREATE TABLE IF NOT EXISTS links (
+  id         TEXT PRIMARY KEY,             -- l_ + 8 base32
+  code_hash  TEXT NOT NULL UNIQUE,         -- SHA-256 of lk_ + the 10-character code
+  visitor    TEXT NOT NULL,
+  by_device  TEXT NOT NULL,
+  created_at INTEGER NOT NULL,             -- ms
+  expires    INTEGER NOT NULL,             -- ms
+  state      TEXT NOT NULL DEFAULT 'open', -- open, used, cancelled
+  ended_at   INTEGER,                      -- ms
+  device     TEXT                          -- the device it made
+);
+CREATE INDEX IF NOT EXISTS links_by_visitor ON links (visitor);
 CREATE TABLE IF NOT EXISTS visitor_spaces (
   visitor TEXT NOT NULL,
   space   TEXT NOT NULL,

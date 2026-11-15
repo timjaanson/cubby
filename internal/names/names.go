@@ -26,6 +26,8 @@ var (
 	OwnerTokenRe   = regexp.MustCompile(`^ot_[A-Za-z0-9_-]{43}$`)
 	tokenIDRe      = regexp.MustCompile(`^t_[a-z2-7]{8}$`)
 	grantIDRe      = regexp.MustCompile(`^g_[a-z2-7]{8}$`)
+	deviceIDRe     = regexp.MustCompile(`^d_[a-z2-7]{8}$`)
+	linkIDRe       = regexp.MustCompile(`^l_[a-z2-7]{8}$`)
 )
 
 const (
@@ -156,6 +158,75 @@ func shortID(prefix string) string {
 // NewTokenID and NewGrantID name access tokens and grants within a space.
 func NewTokenID() string { return shortID("t_") }
 func NewGrantID() string { return shortID("g_") }
+
+// NewDeviceID names a visitor's device, NewLinkID a device link. Both are
+// server-wide, and their tables' primary keys catch the rare repeat.
+func NewDeviceID() string { return shortID("d_") }
+func NewLinkID() string   { return shortID("l_") }
+
+func ValidDeviceID(id string) bool { return deviceIDRe.MatchString(id) }
+func ValidLinkID(id string) bool   { return linkIDRe.MatchString(id) }
+
+// Link codes are 10 characters of Crockford's base32, 50 bits: short enough
+// to type, used once, and alive for minutes. The server limits failed
+// redeems per IP, which is what makes 50 bits enough.
+const linkAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+const LinkCodeLen = 10
+
+// NewLinkCode returns a code in its canonical form, lk_ plus 10 characters.
+func NewLinkCode() string {
+	var b [8]byte
+	rand.Read(b[:])
+	var n uint64
+	for _, c := range b {
+		n = n<<8 | uint64(c)
+	}
+	out := make([]byte, LinkCodeLen)
+	for i := range out {
+		out[i] = linkAlphabet[n&31]
+		n >>= 5
+	}
+	return "lk_" + string(out)
+}
+
+// NormalizeLinkCode reads a code as people type it: with or without lk_,
+// any case, with dashes or spaces, O for 0 and I or L for 1. It returns the
+// canonical lk_ form, or "" if it can't be a code.
+func NormalizeLinkCode(in string) string {
+	s := strings.TrimSpace(in)
+	if len(s) >= 3 && strings.EqualFold(s[:3], "lk_") {
+		s = s[3:]
+	}
+	var b strings.Builder
+	for _, c := range strings.ToUpper(s) {
+		switch {
+		case c == '-' || c == ' ':
+			continue
+		case c == 'O':
+			c = '0'
+		case c == 'I' || c == 'L':
+			c = '1'
+		}
+		if !strings.ContainsRune(linkAlphabet, c) {
+			return ""
+		}
+		b.WriteRune(c)
+	}
+	if b.Len() != LinkCodeLen {
+		return ""
+	}
+	return "lk_" + b.String()
+}
+
+// DisplayLinkCode is the code for reading and typing: K7M2X-9Q4PA.
+func DisplayLinkCode(code string) string {
+	c := strings.TrimPrefix(code, "lk_")
+	if len(c) != LinkCodeLen {
+		return c
+	}
+	return c[:5] + "-" + c[5:]
+}
 
 func ValidTokenID(id string) bool { return tokenIDRe.MatchString(id) }
 func ValidGrantID(id string) bool { return grantIDRe.MatchString(id) }

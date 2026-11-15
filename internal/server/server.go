@@ -29,6 +29,7 @@ type Server struct {
 	log     *log.Logger
 	live    liveSet
 	pulses  *pulseHubs
+	links   linkWaits
 }
 
 func New(cfg *config.Config, store *store.Store, logger *log.Logger) *Server {
@@ -115,7 +116,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if tok != "" && !names.VisitorTokenRe.MatchString(tok) {
 		c.tokErr = apierr.InvalidToken // malformed, no need to look it up
 	} else if tok != "" {
-		id, err := s.store.VisitorByToken(tok)
+		id, dev, err := s.store.VisitorByToken(tok)
 		if err != nil {
 			c.fail(err)
 			return
@@ -123,7 +124,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if id == "" {
 			c.tokErr = apierr.InvalidToken
 		}
-		c.visitor = id
+		c.visitor, c.device = id, dev
 	}
 
 	if err := s.route(c); err != nil {
@@ -193,6 +194,12 @@ func (s *Server) route(c *reqCtx) error {
 			}
 			return s.createSpace(c)
 		}
+	}
+
+	// Devices and links belong to the visitor, not to a space. Space names
+	// are at least 16 characters, so these can't be one.
+	if seg[0] == "links" || seg[0] == "devices" {
+		return s.identityRoute(c, seg)
 	}
 
 	// The shape of the path first, before anything about the space, so an

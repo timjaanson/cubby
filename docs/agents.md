@@ -12,7 +12,7 @@ Leave it private unless the user has said that strangers should see or change th
 
 | The user wants | `public` | Sharing |
 |---|---|---|
-| something for themselves, on one or more devices | `none` (leave it out) | none. They use the owner token on a second device |
+| something for themselves, on one or more devices | `none` (leave it out) | none. They link the second device, see below |
 | something for people they know: family, friends, a team, a club | `none` (leave it out) | an invite link per person |
 | to publish something anyone may read, but only they or their scripts write | `read` | invite links or machine tokens for the writers |
 | a poll, quiz, RSVP or sign-up that strangers answer | `respond` | none for answers. Invite co-editors |
@@ -93,6 +93,22 @@ curl -s -X POST -d '{"token": "at_..."}' https://SERVER/v1/homelab-.../join     
 ```
 
 Store the returned `vt_...` as the device's or CI's secret (`CUBBY_TOKEN` for the CLI). Give each machine its own narrow token, so revoking one doesn't affect the others.
+
+## The same person on another device
+
+That's linking, not sharing. Don't make an invite for it: an invite makes a second visitor with a grant in one space, so `db.to("me")`, `users/me/` and every other space stay behind.
+
+```js
+import { devices } from "https://SERVER/kv.js"
+const me = devices()
+// on the device that's already them: a "Use on another device" button
+const link = await me.link()             // show link.url as a QR code and link.display (K7M2X-9Q4PA) as text
+await link.done                          // then say "linked"
+// at the start of every page: never accept without asking
+if (me.pending() && confirm("Use this device as your account from the other one? Anything stored here so far goes away.")) await me.accept()
+```
+
+A text field for the typed code calls `me.accept(code)`. Offer a device list with `me.list()` and "sign out" buttons with `me.remove(id)` where it fits.
 
 ## Hidden answers, private messages, moderation
 

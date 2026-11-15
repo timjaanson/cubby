@@ -120,6 +120,8 @@ type limits struct {
 	spacesPerIP      *limiter
 	pulsesPerVisitor *limiter
 	pulsesPerIP      *limiter
+	linksPerVisitor  *limiter // device links created
+	linkMissesPerIP  *limiter // codes redeemed that don't exist
 	misses           *missGuard
 }
 
@@ -140,12 +142,14 @@ func newLimits(configs ...*config.Config) *limits {
 		spacesPerIP:      newLimiter(float64(c.SpacesPerIPPerDay), day, float64(c.SpacesPerIPPerDay)),
 		pulsesPerVisitor: newLimiter(float64(c.PulsesPerSecond), time.Second, float64(c.PulseBurst)),
 		pulsesPerIP:      newLimiter(float64(c.PulsesPerIPPerSecond), time.Second, float64(2*c.PulsesPerIPPerSecond)),
+		linksPerVisitor:  newLimiter(20, time.Hour, 20),
+		linkMissesPerIP:  newLimiter(10, 10*time.Minute, 10),
 		misses:           newMissGuard(c.MissesPerIPPerHour),
 	}
 }
 
 func (l *limits) all() []*limiter {
-	return []*limiter{l.visitorsPerIP, l.writesPerVisitor, l.writesPerIP, l.storedPerIP, l.readsPerIP, l.spacesPerVisitor, l.spacesPerIP, l.pulsesPerVisitor, l.pulsesPerIP}
+	return []*limiter{l.visitorsPerIP, l.writesPerVisitor, l.writesPerIP, l.storedPerIP, l.readsPerIP, l.spacesPerVisitor, l.spacesPerIP, l.pulsesPerVisitor, l.pulsesPerIP, l.linksPerVisitor, l.linkMissesPerIP}
 }
 
 // watchCounter caps open watches per IP and in total.

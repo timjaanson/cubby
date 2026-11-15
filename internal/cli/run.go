@@ -38,6 +38,11 @@ Sharing (owners invite, others join):
   cubby access <space> | settings <space> | token ls|set|rm | grant ls|add|rm | ban ls|add|rm
   cubby owner-token <space> | drop <space>
 
+Your devices (this visitor on another machine, not sharing):
+  cubby device link [--ttl 10m]                      one-use code for another device, then wait
+  cubby device accept <code or link>                 become the visitor that made the code
+  cubby device ls | name <label> | rm <id> | rm --others
+
 Paths mirror the URL after /v1/:
   poll-cedar-pilot-mango/shared/question     poll-cedar-pilot-mango/users/me/vote
   'poll-cedar-pilot-mango/shared/msg.*'      'poll-cedar-pilot-mango/users/*/vote'

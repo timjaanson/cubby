@@ -45,6 +45,7 @@ var commandFlags = map[string]struct {
 	"owner-token": {nil, nil, "owner-token <space>\n  Rotate the space's owner token and print the new one (owners). Owners who joined\n  with the old one lose ownership; you keep yours."},
 	"token":       {[]string{"allow", "uses", "until", "grant-for", "label", "link"}, nil, "token new <space> [--allow SCOPE ...] [--uses N|unlimited] [--until T|never] [--grant-for D]\n          [--label L] [--link URL]\n  Mint an access token: an invite. Owners and, unless the space says --invite owners,\n  members can. Defaults: 10 uses, 7 days, and a full member from an owner, or the\n  inviter's own rights from a member. A member can't give more than they hold. --allow takes scopes like shared/status.*:w, or member or viewer. --until\n  takes 12h, 30d, 2027-01-31 or an RFC 3339 time. --link prints URL#t=TOKEN to send.\ntoken ls <space>\n  Your tokens, or every token for an owner. One line per token: ID, state, uses left, until, grants, label, scopes.\ntoken set <space> <id> [--uses N|unlimited] [--until T|never]\n  Change how often and how long it can still be redeemed. --uses 0 stops new ones.\ntoken rm <space> <id>\n  Revoke a token and every grant redeemed from it."},
 	"ban":         {[]string{"until"}, nil, "ban ls <space>\n  One line per ban: user, until or -, by.\nban add <space> <user> [--until T]\n  Ban a visitor from the space (owners): every request they make answers banned and\n  their live connections close. Deletes and revokes nothing. --until takes 12h, 30d,\n  2027-01-31 or an RFC 3339 time.\nban rm <space> <user>\n  Lift the ban. They get back exactly what they had."},
+	"device":      {[]string{"ttl", "link", "label"}, []string{"no-wait", "others", "yes", "y"}, "device link [--ttl 10m] [--link URL] [--no-wait]\n  Make a one-use code that turns another device into this visitor: same ID, every grant,\n  every space. Prints the code (K7M2X-9Q4PA), with --link also URL#link=CODE for a page,\n  then waits until it's used. Valid 10 minutes unless --ttl says otherwise (30s to 1h).\ndevice accept <code or link> [--label L] [--yes]\n  Become the visitor that made the code. This CLI's current visitor is deleted with its\n  data if no other device uses it, so it asks first unless --yes. Prints the new ID.\ndevice ls\n  This visitor's devices: ID (* for this one), created, last seen, label.\ndevice name <label> [device-id]\n  Label this device, or another of yours.\ndevice rm <device-id>\ndevice rm --others\n  Sign a device out, or every device but this one. Their tokens stop working."},
 	"grant":       {[]string{"allow", "until", "user"}, []string{"owner"}, "grant ls <space> [--user ID]\n  One line per grant: ID, user, owner or member, source, until, scopes.\ngrant add <space> <user> [--allow SCOPE ...] [--until T] [--owner]\n  Give a visitor rights directly, with no token. Prints the grant ID.\ngrant rm <space> <grant-id>\ngrant rm <space> --user ID\n  Revoke one grant, or everything a visitor holds in the space."},
 }
 
@@ -185,6 +186,8 @@ func (c *client) run(cmd string, f *flags) error {
 		return c.grantCmd(f)
 	case "ban":
 		return c.banCmd(f)
+	case "device":
+		return c.deviceCmd(f)
 	case "url":
 		p, err := c.onePath(f, "url")
 		if err == nil {

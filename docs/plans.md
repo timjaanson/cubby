@@ -22,6 +22,10 @@ Written down so they aren't lost. Each needs a decision first.
 
 - **kv.js versioned mirror** (`db.shared.mirror(...)`). Rejected 2026-10-27. It is a large primitive for a narrow race. Pages handle it with specific checks instead: keep the version per key from the watch, including deletes, and ignore a write acknowledgement whose version is older than what the watch already delivered.
 
+## Done: device links
+
+One visitor on several devices. A device makes a one-use code (`POST /v1/links`, 10 minutes, 50 bits, typed as `K7M2X-9Q4PA`), another redeems it (`POST /v1/links/redeem`, the code as the body) and gets its own token for the same visitor. Redeeming replaces the device's previous identity, deleting it if nothing else uses it. `/v1/devices` lists, labels and signs out devices. kv.js `devices()`, CLI `cubby device`. Differences from the plan: signed-out devices' live connections lose their identity instead of closing, so the page that just linked re-auths in place; there's no `has_identity` check or `replace` flag; the reverse direction, a new device showing a QR for an existing one to approve, is in spec.md Later. The contract is [spec.md](spec.md#devices-and-links).
+
 ## Rules for any change
 
 So that nothing changes stored data in a way that's hard to see coming:

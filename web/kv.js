@@ -43,12 +43,15 @@
 //   db.to("me").set("draft", text)       // private to you
 // Moderation: db.owner.bans.add(id). A banned visitor's open() has banned: { until }.
 //
+// The same person on another device is not sharing. devices() links them: one
+// device shows (await devices().link()).url, the other asks, then accept()s.
+//
 // Never put an access token (at_...) or owner token (ot_...) in page source.
 // Anyone who can load the page could use it. Invite links are for sending to people.
 //
 // Docs: docs/agents.md in the cubby repository.
 //
-// An ES module with no dependencies. Exports: kv, createSpace, openRoom,
+// An ES module with no dependencies. Exports: kv, createSpace, openRoom, devices,
 // takeInvite, inviteLink, newName, validSpace, KvError.
 
 const SERVER = new URL(".", import.meta.url).href.replace(/\/$/, "")
@@ -1137,6 +1140,131 @@ export async function createSpace(o = {}) {
   const out = await res.json()
   ident.adopt(out.token, out.id)
   return { space: out.space, ownerToken: out.owner }
+}
+
+// devices: this visitor on several devices. Not about a space, so it isn't
+// on db. One device makes a link, another redeems it and becomes the same
+// visitor, with every grant and all its data. Redeeming replaces whatever
+// identity that device had, so ask the person first; it never happens on
+// its own.
+//   const me = devices()
+//   const link = await me.link()            // { code, display, url, expires, done, cancel() }
+//   show(link.url, link.display); const { device } = await link.done
+//   if (me.pending() && confirm("Link this device?")) await me.accept()
+// Options: server, tokenKey and fetch, as for kv().
+export function devices(o = {}) {
+  const { server: srv, tokenKey, fetch: f, ...rest } = o
+  for (const k of Object.keys(rest)) {
+    throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are server, tokenKey, fetch.`)
+  }
+  const server = (srv || SERVER).replace(/\/$/, "")
+  const fetchFn = f || globalThis.fetch.bind(globalThis)
+  const ident = identity(server, tokenKey || "cubby:" + server, fetchFn)
+
+  async function call(method, path, body, { auth = true, signal } = {}) {
+    const headers = {}
+    const cur = auth ? await ident.get() : ident.current()
+    if (cur?.token) headers.Authorization = "Bearer " + cur.token
+    let res
+    try {
+      res = await fetchFn(server + path, { method, headers, signal, body: body === undefined ? undefined : JSON.stringify(body) })
+    } catch (err) {
+      if (err?.name === "AbortError") throw err
+      throw new KvError(0, "network_error", String(err?.message || err))
+    }
+    if (!res.ok) {
+      const err = await errorFrom(res)
+      // This device was signed out: drop the token, so id says so and
+      // the next kv() call starts a new visitor.
+      if (err.code === "invalid_token" && cur?.token && !ident.fixed && ident.current()?.token === cur.token) ident.forget()
+      throw err
+    }
+    return res.json()
+  }
+
+  function makeLink(out, base) {
+    const ctl = new AbortController()
+    let done = null
+    const link = {
+      id: out.id, code: out.code, display: out.display, expires: out.expires,
+      url: linkUrl(out.code, base),
+      // Resolves with { device } once another device redeems the code;
+      // rejects with link_expired or link_cancelled.
+      get done() {
+        if (!done) done = (async () => {
+          for (;;) {
+            let l
+            try {
+              l = await call("GET", "/v1/links/" + out.id + "?wait=55", undefined, { signal: ctl.signal })
+            } catch (err) {
+              if (err?.name === "AbortError") l = await call("GET", "/v1/links/" + out.id)
+              else if (err instanceof KvError && err.retryable) { await new Promise(r => setTimeout(r, 2000)); continue }
+              else throw err
+            }
+            if (l.state === "used") return { device: l.device }
+            if (l.state !== "open") throw new KvError(410, "link_" + l.state, l.state === "expired" ? "The link expired before another device used it." : "The link was cancelled.", l)
+          }
+        })()
+        return done
+      },
+      async cancel() {
+        const l = await call("DELETE", "/v1/links/" + out.id)
+        ctl.abort()
+        return l.state
+      },
+    }
+    return link
+  }
+
+  return {
+    // This device's visitor ID, null before it has one.
+    get id() { return ident.current()?.id ?? null },
+    // The code in #link=..., without redeeming it. null if there's none.
+    pending(param = "link") { return hashParams().get(param) },
+    // A one-use code for another device, alive ttl seconds (30 to 3600,
+    // default 600). url is this page with #link=CODE, or base's.
+    async link({ ttl, base } = {}) {
+      const out = await call("POST", "/v1/links", ttl === undefined ? undefined : { ttl })
+      return makeLink(out, base)
+    },
+    // Redeem a code: the one given, or #link=... from the address, which is
+    // removed. This device becomes that visitor; a previous identity with
+    // no other device is deleted with its data. null if there's no code.
+    async accept(code, { label = deviceLabel(), param = "link" } = {}) {
+      if (code == null) code = takeInvite(param)
+      if (code == null) return null
+      const out = await call("POST", "/v1/links/redeem", { code: String(code), label }, { auth: false })
+      ident.adopt(out.token, out.id)
+      return { id: out.id, device: out.device, previous: out.previous, deleted: out.deleted }
+    },
+    // This visitor's devices, oldest first. current marks this one.
+    async list() { return (await call("GET", "/v1/devices")).items },
+    async rename(label, id = "me") { return (await call("PATCH", "/v1/devices/" + id, { label })).items },
+    // Sign a device out: its token stops working. Not the last one.
+    async remove(id) { return (await call("DELETE", "/v1/devices/" + id)).removed },
+    async signOutOthers() { return (await call("DELETE", "/v1/devices?others=1")).removed },
+  }
+}
+
+// linkUrl adds link=code to base's fragment, keeping its other parameters
+// and dropping an invite.
+function linkUrl(code, base) {
+  if (!base && typeof location === "undefined") return null
+  const u = new URL(base || location.href)
+  const p = new URLSearchParams(u.hash.slice(1))
+  p.delete("t")
+  p.set("link", code)
+  u.hash = p.toString()
+  return u.href
+}
+
+// A short guess at what this device is, like "Safari on iOS".
+function deviceLabel() {
+  const ua = globalThis.navigator?.userAgent || ""
+  if (!ua || /^Node\.js/.test(ua)) return typeof process !== "undefined" && process.versions?.node ? "Node.js" : ""
+  const browser = /Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "Browser"
+  const os = /iPhone|iPad|iPod/.test(ua) ? "iOS" : /Android/.test(ua) ? "Android" : /Mac OS X/.test(ua) ? "macOS" : /Windows/.test(ua) ? "Windows" : /Linux/.test(ua) ? "Linux" : ""
+  return os ? browser + " on " + os : browser
 }
 
 function hashParams() {

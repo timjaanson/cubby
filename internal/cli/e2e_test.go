@@ -238,3 +238,48 @@ func TestCLIToInboxAndBans(t *testing.T) {
 		t.Fatal("write after unban")
 	}
 }
+
+func TestCLIDevices(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.DataDir = t.TempDir()
+	cfg.Server.RateLimits = new(bool)
+	st, err := store.Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(server.New(cfg, st, nil))
+	t.Cleanup(func() { ts.Close(); st.Close() })
+	t.Setenv("CUBBY_SERVER", ts.URL)
+	t.Setenv("CUBBY_TOKEN", "")
+	desk, laptop := t.TempDir(), t.TempDir()
+
+	out, _ := cli(t, desk, "new", "notes")
+	space := strings.Split(out, "\n")[0]
+	cli(t, desk, "set", space+"/shared/todo", "milk")
+	deskID, _ := cli(t, desk, "whoami")
+
+	out, code := cli(t, desk, "device", "link", "--no-wait", "--link", "https://example.com/page/")
+	lines := strings.Split(out, "\n")
+	if code != 0 || len(lines) != 2 || len(lines[0]) != 11 || !strings.HasSuffix(lines[1], "#link=lk_"+strings.Replace(lines[0], "-", "", 1)) {
+		t.Fatalf("link: %d %q", code, out)
+	}
+	// The laptop accepts the URL form, with its own visitor to replace.
+	cli(t, laptop, "whoami")
+	if out, code := cli(t, laptop, "device", "accept", lines[1], "--yes", "--label", "laptop"); code != 0 || out != deskID {
+		t.Fatalf("accept: %d %q", code, out)
+	}
+	if out, _ := cli(t, laptop, "get", space+"/shared/todo"); out != "milk" {
+		t.Fatalf("laptop reads: %q", out)
+	}
+	out, _ = cli(t, laptop, "device", "ls")
+	if ls := strings.Split(out, "\n"); len(ls) != 2 || !strings.Contains(ls[1], "*\t") || !strings.HasSuffix(ls[1], "laptop") {
+		t.Fatalf("ls: %q", out)
+	}
+	if out, code := cli(t, laptop, "device", "rm", "--others"); code != 0 || !strings.HasPrefix(out, "d_") {
+		t.Fatalf("rm --others: %d %q", code, out)
+	}
+	// The desk's token is gone; it gets a new visitor that can't see the space.
+	if _, code := cli(t, desk, "get", space+"/shared/todo"); code != 1 {
+		t.Fatalf("desk after sign out: %d", code)
+	}
+}

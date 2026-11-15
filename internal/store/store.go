@@ -19,7 +19,7 @@ import (
 
 // Data layout:
 //
-//	{data}/server.db           visitors, which spaces each visitor wrote to, deleted-space counters
+//	{data}/server.db           visitors and their devices, device links, which spaces each visitor wrote to, deleted-space counters
 //	{data}/spaces/{name}.db    one SQLite file per space, self-contained
 //	{data}/admin.sock          Unix socket for `cubby admin`
 //
@@ -91,7 +91,11 @@ func Open(cfg *config.Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := srv.Exec(serverSchema); err != nil {
+	if err := migrateServer(srv); err != nil {
+		srv.Close()
+		return nil, fmt.Errorf("migrate %s: %w", filepath.Join(dir, "server.db"), err)
+	}
+	if _, err := srv.Exec(serverSchema + fmt.Sprintf("PRAGMA user_version = %d;", serverVersion)); err != nil {
 		srv.Close()
 		return nil, fmt.Errorf("open %s: %w", filepath.Join(dir, "server.db"), err)
 	}

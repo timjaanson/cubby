@@ -124,30 +124,17 @@ func (s *Store) Cleanup() (rep CleanupReport, err error) {
 	}
 	rows.Close()
 	for _, id := range ids {
-		srows, err := s.srv.Query(`SELECT space FROM visitor_spaces WHERE visitor = ?`, id)
-		if err != nil {
+		if err := s.PurgeVisitor(id); err != nil {
 			return rep, err
 		}
-		var spaces []string
-		for srows.Next() {
-			var n string
-			srows.Scan(&n)
-			spaces = append(spaces, n)
-		}
-		srows.Close()
-		for _, sp := range spaces {
-			if err := s.dropVisitorRows(sp, id); err != nil {
-				return rep, err
-			}
-		}
-		s.srv.Exec(`DELETE FROM visitor_spaces WHERE visitor = ?`, id)
-		s.srv.Exec(`DELETE FROM visitors WHERE id = ?`, id)
-		s.cacheMu.Lock()
-		delete(s.vbytes, id)
-		delete(s.vtouched, id)
-		s.cacheMu.Unlock()
 		rep.Visitors++
 	}
+
+	// Devices unseen as long as a visitor may be, and links that ended a
+	// day ago. A visitor whose other devices are in use stays.
+	nowMs := NowMs()
+	s.srv.Exec(`DELETE FROM devices WHERE last_seen_at < ?`, nowMs-secs(r.VisitorIdleTTL)*1000)
+	s.srv.Exec(`DELETE FROM links WHERE coalesce(ended_at, expires) < ?`, nowMs-24*3600*1000)
 
 	// 2. Idle spaces, unless pinned.
 	idle := now - secs(r.SpaceIdleTTL)
