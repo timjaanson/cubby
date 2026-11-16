@@ -7,9 +7,9 @@ async page => {
   await page.goto(base + '/health')
   const space = await page.evaluate(async base => {
     const { createSpace, kv } = await import(base + '/kv.js')
-    const { space } = await createSpace({ server: base, public: 'all' })
+    const { space } = await createSpace({ server: base, anyone: 'all' })
     const db = kv(space, { server: base, live: true })
-    window.here = db.users.presence('here', { value: { name: 'first tab' } })
+    window.here = db.presence('here', { value: { name: 'first tab' } })
     window.left = []
     window.here.onLeave = id => window.left.push({ id, at: performance.now() })
     return space
@@ -19,7 +19,7 @@ async page => {
   const other = await tab.evaluate(async ([base, space]) => {
     const { kv } = await import(base + '/kv.js')
     const db = kv(space, { server: base, live: true, tokenKey: 'second-tab-' + Date.now() })
-    window.here = db.users.presence('here', { value: { name: 'second tab' } })
+    window.here = db.presence('here', { value: { name: 'second tab' } })
     return db.id()
   }, [base, space])
   await page.waitForFunction(id => window.here.peers.get(id)?.value.name === 'second tab', other)

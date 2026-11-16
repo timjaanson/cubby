@@ -13,7 +13,7 @@ const until = async (f, m, ms = 3000) => {
 // Counts HTTP data requests and keeps hold of sockets, to check what went where.
 let dataFetches = 0
 const countingFetch = (url, o) => {
-  if (/\/v1\/[^/]+\/(shared|me|users)\//.test(String(url))) dataFetches++
+  if (/\/v1\/[^/]+\/(shared|by|to|inbox)\//.test(String(url))) dataFetches++
   return fetch(url, o)
 }
 const sockets = []
@@ -57,11 +57,11 @@ const before = dataFetches
   assert(await db.shared.delete("t") === true && await db.shared.delete("t") === false, "delete")
   assert(await db.shared.update("count", n => (n || 0) + 1) === 1, "update")
   await db.to("me").set("pref", "dark")
-  await db.user().set("name", "Tim")
+  await db.mine.set("name", "Tim")
   assert(await db.to("me").get("pref") === "dark" && await http.inbox.from("me").get("pref") === "dark", "to/me")
   const inboxItems = (await db.inbox.list("*")).items
   assert(inboxItems.length === 1 && inboxItems[0].from === inboxItems[0].to && inboxItems[0].mine, "own note in inbox " + JSON.stringify(inboxItems))
-  assert(await db.user().get("name") === "Tim" && (await db.users.list("name")).items.length === 1, "users area")
+  assert(await db.mine.get("name") === "Tim" && (await db.by.list("name")).items.length === 1, "by area")
 }
 assert(dataFetches === before, `data requests used HTTP while open: ${dataFetches - before}`)
 
@@ -121,7 +121,7 @@ assert(dataFetches === before, `data requests used HTTP while open: ${dataFetche
 // Anonymous reads, then the first write creates a visitor and authenticates
 // the same socket.
 {
-  const { space: pub } = await createSpace({ server: S, tokenKey: "owner", public: "all" })
+  const { space: pub } = await createSpace({ server: S, tokenKey: "owner", anyone: "all" })
   const guest = kv(pub, { server: S, tokenKey: "guest-" + Date.now(), live: true })
   const got = []
   const stop = guest.shared.watch("*", c => got.push(c))
@@ -136,7 +136,7 @@ assert(dataFetches === before, `data requests used HTTP while open: ${dataFetche
 {
   const mem = new Map()
   globalThis.localStorage = { getItem: k => mem.get(k) ?? null, setItem: (k, v) => mem.set(k, v), removeItem: k => mem.delete(k) }
-  const { space: pub } = await createSpace({ server: S, tokenKey: "owner", public: "all" })
+  const { space: pub } = await createSpace({ server: S, tokenKey: "owner", anyone: "all" })
   mem.set("stale", JSON.stringify({ token: "vt_" + "x".repeat(43), id: "u_aaaaaaaaaaaaaaaa" }))
   const d = kv(pub, { server: S, tokenKey: "stale", live: true })
   await d.shared.get("a")

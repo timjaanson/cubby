@@ -71,15 +71,15 @@ func (c *tc) anon() (token, id string) {
 	return out.Token, out.ID
 }
 
-// open creates a space under name with public "all", owned by the visitor
+// open creates a space under name with anyone "all", owned by the visitor
 // with tok, and returns tok. With tok "" it creates the visitor too.
 func (c *tc) open(name, tok string) string {
 	c.t.Helper()
-	return c.create(`{"name":"`+name+`","public":"all"}`, tok).Token
+	return c.create(`{"name":"`+name+`","anyone":"all"}`, tok).Token
 }
 
 type created struct {
-	Space, Owner, ID, Token string
+	Space, OwnerToken, ID, Token string
 }
 
 // create posts body to /v1/spaces as tok, or as a new visitor.
@@ -211,37 +211,37 @@ func TestAreas(t *testing.T) {
 	b := []string{"Authorization", "Bearer " + tokB}
 	sp := "/v1/poll-cedar-pilot-mango"
 
-	c.req("PUT", sp+"/users/"+idA+"/vote", `"tacos"`, a...)
-	c.req("PUT", sp+"/users/"+idB+"/vote", `"pizza"`, b...)
-	if s, _, body := c.req("PUT", sp+"/users/"+idA+"/vote", `"x"`, b...); s != 403 || errCode(body) != "not_yours" {
+	c.req("PUT", sp+"/by/"+idA+"/vote", `"tacos"`, a...)
+	c.req("PUT", sp+"/by/"+idB+"/vote", `"pizza"`, b...)
+	if s, _, body := c.req("PUT", sp+"/by/"+idA+"/vote", `"x"`, b...); s != 403 || errCode(body) != "not_yours" {
 		t.Fatalf("not_yours: %d %s", s, body)
 	}
 	// The owner (A) may delete B's entry, as moderation, but not write it.
-	if s, _, body := c.req("PUT", sp+"/users/"+idB+"/vote", `"x"`, a...); s != 403 || errCode(body) != "not_yours" {
+	if s, _, body := c.req("PUT", sp+"/by/"+idB+"/vote", `"x"`, a...); s != 403 || errCode(body) != "not_yours" {
 		t.Fatalf("owner writing someone's entry: %d %s", s, body)
 	}
-	_, _, body := c.req("GET", sp+"/users/*/vote", "")
+	_, _, body := c.req("GET", sp+"/by/*/vote", "")
 	var l struct {
-		Items []struct{ Key, User string }
+		Items []struct{ Key, By string }
 		Next  *string
 	}
 	json.Unmarshal([]byte(body), &l)
 	if len(l.Items) != 2 || l.Next != nil {
-		t.Fatalf("users/*: %s", body)
+		t.Fatalf("by/*: %s", body)
 	}
-	if s, _, _ := c.req("PUT", sp+"/users/*/vote", "x", a...); s != 405 {
+	if s, _, _ := c.req("PUT", sp+"/by/*/vote", "x", a...); s != 405 {
 		t.Fatalf("PUT users/*: %d", s)
 	}
 	// Pagination across users.
-	_, _, body = c.req("GET", sp+"/users/*/vote?limit=1", "")
+	_, _, body = c.req("GET", sp+"/by/*/vote?limit=1", "")
 	json.Unmarshal([]byte(body), &l)
 	if len(l.Items) != 1 || l.Next == nil {
 		t.Fatalf("page 1: %s", body)
 	}
-	_, _, body = c.req("GET", sp+"/users/*/vote?limit=1&after="+*l.Next, "")
-	first := l.Items[0].User
+	_, _, body = c.req("GET", sp+"/by/*/vote?limit=1&after="+*l.Next, "")
+	first := l.Items[0].By
 	json.Unmarshal([]byte(body), &l)
-	if len(l.Items) != 1 || l.Items[0].User == first {
+	if len(l.Items) != 1 || l.Items[0].By == first {
 		t.Fatalf("page 2: %s", body)
 	}
 
@@ -263,7 +263,7 @@ func TestAreas(t *testing.T) {
 		t.Fatalf("whoami: %s", body)
 	}
 	// Moderation delete, last, since it changes B's vote.
-	if s, _, body := c.req("DELETE", sp+"/users/"+idB+"/vote", "", a...); s != 200 {
+	if s, _, body := c.req("DELETE", sp+"/by/"+idB+"/vote", "", a...); s != 200 {
 		t.Fatalf("owner delete: %d %s", s, body)
 	}
 }
@@ -480,7 +480,7 @@ func TestCreateSpace(t *testing.T) {
 	tok, _ := c.anon()
 	a := []string{"Authorization", "Bearer " + tok}
 
-	if st, _, body := c.req("POST", "/v1/spaces", `{"name":"throws-amber-otter-tundra"}`, a...); st != 201 || !strings.Contains(body, `"space":"throws-amber-otter-tundra"`) || !strings.Contains(body, `"owner":"ot_`) {
+	if st, _, body := c.req("POST", "/v1/spaces", `{"name":"throws-amber-otter-tundra"}`, a...); st != 201 || !strings.Contains(body, `"space":"throws-amber-otter-tundra"`) || !strings.Contains(body, `"ownerToken":"ot_`) {
 		t.Fatalf("create by name: %d %s", st, body)
 	}
 	if st, _, body := c.req("POST", "/v1/spaces", `{"name":"throws-amber-otter-tundra"}`, a...); st != 409 || errCode(body) != "space_exists" {
@@ -495,11 +495,11 @@ func TestCreateSpace(t *testing.T) {
 	if st, _, body := c.req("POST", "/v1/spaces", `{"lable":"x"}`, a...); st != 400 || errCode(body) != "invalid_parameter" || !strings.Contains(body, `"parameter":"lable"`) {
 		t.Fatalf("unknown field: %d %s", st, body)
 	}
-	if st, _, body := c.req("POST", "/v1/spaces", `{"public":"read","read":"anyone"}`, a...); st != 400 || errCode(body) != "invalid_settings" {
-		t.Fatalf("public and read: %d %s", st, body)
+	if st, _, body := c.req("POST", "/v1/spaces", `{"public":"read"}`, a...); st != 400 || errCode(body) != "invalid_parameter" {
+		t.Fatalf("old public field: %d %s", st, body)
 	}
-	if st, _, body := c.req("POST", "/v1/spaces", `{"write":"anyone"}`, a...); st != 400 || errCode(body) != "invalid_settings" {
-		t.Fatalf("open writes into a private space: %d %s", st, body)
+	if st, _, body := c.req("POST", "/v1/spaces", `{"anyone":"owner"}`, a...); st != 400 || errCode(body) != "invalid_settings" {
+		t.Fatalf("anyone owner: %d %s", st, body)
 	}
 	if st, _, body := c.req("POST", "/v1/spaces?label=x", ``, a...); st != 400 || errCode(body) != "invalid_parameter" {
 		t.Fatalf("query parameter: %d %s", st, body)
@@ -508,22 +508,22 @@ func TestCreateSpace(t *testing.T) {
 	// An empty body: a generated name, private, owned by the caller.
 	st, _, body := c.req("POST", "/v1/spaces", ``, a...)
 	var out struct {
-		Space, Owner, ID, Token string
-		Settings                struct{ Public string }
+		Space, OwnerToken, ID, Token string
+		Settings                     struct{ Anyone, Invite string }
 	}
 	json.Unmarshal([]byte(body), &out)
-	if st != 201 || !names.ValidSpace(out.Space) || out.Settings.Public != "none" || out.Token != "" {
+	if st != 201 || !names.ValidSpace(out.Space) || out.Settings.Anyone != "none" || out.Settings.Invite != "post" || out.Token != "" {
 		t.Fatalf("empty body: %d %s", st, body)
 	}
 
 	// Without a token, the creator is a new visitor and gets its token.
-	st, _, body = c.req("POST", "/v1/spaces", `{"label":"poll","public":"respond"}`)
+	st, _, body = c.req("POST", "/v1/spaces", `{"label":"poll","anyone":"post"}`)
 	json.Unmarshal([]byte(body), &out)
-	if st != 201 || !strings.HasPrefix(out.Space, "poll-") || !strings.HasPrefix(out.Token, "vt_") || out.Settings.Public != "respond" {
+	if st != 201 || !strings.HasPrefix(out.Space, "poll-") || !strings.HasPrefix(out.Token, "vt_") || out.Settings.Anyone != "post" {
 		t.Fatalf("create without a token: %d %s", st, body)
 	}
 	// That token works, and its visitor owns the space.
-	if _, _, body := c.req("GET", "/v1/"+out.Space+"/access", "", "Authorization", "Bearer "+out.Token); !strings.Contains(body, `"owner":true`) {
+	if _, _, body := c.req("GET", "/v1/"+out.Space+"/access", "", "Authorization", "Bearer "+out.Token); !strings.Contains(body, `"access":"owner"`) {
 		t.Fatalf("creator isn't owner: %s", body)
 	}
 }
@@ -534,7 +534,7 @@ func TestQuietRoutes(t *testing.T) {
 	c := newTest(t)
 	var first string
 	for _, p := range []string{"/", "/v1", "/v1/", "/v1/x", "/v1/x/y", "/nope", "/v2/a/b/c",
-		"/v1/cedar-pilot-mango-frost/other/k", "/v1/cedar-pilot-mango-frost/users/k"} {
+		"/v1/cedar-pilot-mango-frost/other/k", "/v1/cedar-pilot-mango-frost/by/k"} {
 		s, _, b := c.req("GET", p, "")
 		if s != 404 || errCode(b) != "not_found" {
 			t.Fatalf("%s: %d %s", p, s, b)
@@ -608,10 +608,10 @@ func TestBy(t *testing.T) {
 		t.Fatalf("delete by: %s", body)
 	}
 
-	// users/*/ entries carry by as well as user.
-	c.req("PUT", sp+"/users/"+idA+"/name", `"Ann"`, a...)
-	_, _, body = c.req("GET", sp+"/users/*/name", "")
-	if !strings.Contains(body, `"user":"`+idA+`","by":"`+idA+`"`) {
-		t.Fatalf("users by: %s", body)
+	// by/*/ entries carry their author as by, with no other field.
+	c.req("PUT", sp+"/by/"+idA+"/name", `"Ann"`, a...)
+	_, _, body = c.req("GET", sp+"/by/*/name", "")
+	if !strings.Contains(body, `"by":"`+idA+`"`) || strings.Contains(body, `"user"`) {
+		t.Fatalf("by/ by: %s", body)
 	}
 }

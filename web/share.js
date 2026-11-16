@@ -1,7 +1,7 @@
 // cubby share panel. A custom element that gives a space's owners invite
-// links, a QR code, the member list, who can see the space, and its
-// recovery key. Members can see a "shared with you" line; everyone else
-// sees nothing.
+// links, a QR code, the member list with each person's level, who can see
+// the space, and its recovery key. Members who may invite get invite links;
+// other members can see a "shared with you" line; everyone else sees nothing.
 //
 //   <script type="module" src="https://kv.example.com/share.js"></script>
 //   <cubby-share space="family-cedar-pilot-mango-frost" members></cubby-share>
@@ -231,12 +231,15 @@ const ago = ms => {
   return d < 1 ? "today" : d === 1 ? "yesterday" : `${d} days ago`
 }
 
-const PUBLIC = [
+const ANYONE = [
   ["none", "Only people you invite", "Nobody else can see this exists."],
   ["read", "Anyone can look, invited people change it", "Anyone who has the address can read everything here."],
-  ["respond", "Anyone can look and add their own answer", "Anyone who has the address can read everything here and add their own entry, like a vote."],
+  ["post", "Anyone can look and add their own", "Anyone who has the address can read everything here and add their own entries, like a vote or a message."],
   ["all", "Anyone can look and change it", "Anyone who has the address can read and change everything here."],
 ]
+
+// What each level means to the person choosing it.
+const LEVEL_NAMES = { read: "Can look", post: "Can add their own", all: "Can change everything", owner: "Owner" }
 
 const CSS = `
 :host { display: inline-block; font: inherit; color: inherit; --a: var(--cubby-accent, #2a6df4); --r: var(--cubby-radius, 8px); }
@@ -304,10 +307,10 @@ class CubbyShare extends Base {
     if (generation !== this._generation) return
     this._access = a
     const style = h("style", {}, CSS)
-    if (a?.owner || a?.canInvite) {
+    if (a?.access === "owner" || a?.canInvite) {
       root.replaceChildren(style, h("button", { part: "button", className: "main", onclick: () => this._show("invite") }, "Share"))
       if (this._ownerToken || this.hasAttribute("open")) this._show(this._ownerToken ? "recovery" : "invite")
-    } else if (a?.inside && a.grants.length && this.hasAttribute("members")) {
+    } else if (a?.can("read") && a.settings?.anyone !== a.access && this.hasAttribute("members")) {
       root.replaceChildren(style, h("span", { className: "shared", part: "button" }, "Shared with you by the owner"))
     } else {
       root.replaceChildren(style)
@@ -330,14 +333,15 @@ class CubbyShare extends Base {
     const render = async () => {
       // Owners manage everything; members invite and see their own open invites.
       const a = await db.access()
-      const [tokens, grants] = await Promise.all([db.tokens.list(), a.owner ? db.owner.grants.list() : []])
+      const owner = a.access === "owner"
+      const [tokens, members] = await Promise.all([db.tokens.list(), owner ? db.members() : []])
       dlg.replaceChildren(
         h("button", { className: "close", "aria-label": "Close", onclick: () => dlg.close() }, "×"),
         h("h2", {}, "Share"),
-        a.owner ? this._recovery(db, focus === "recovery") : null,
-        this._invite(db, render),
-        this._people(db, tokens, grants, render, a.owner),
-        a.owner ? this._visibility(db, a.settings, render) : null,
+        owner ? this._recovery(db, focus === "recovery") : null,
+        this._invite(db, render, a.access),
+        this._people(db, tokens, members, render, owner, a.id),
+        owner ? this._visibility(db, a.settings, render) : null,
       )
     }
     await render()
@@ -361,7 +365,7 @@ class CubbyShare extends Base {
     return box
   }
 
-  _invite(db, rerender) {
+  _invite(db, rerender, mine) {
     const name = h("input", { type: "text", placeholder: "Who is it for?", "aria-label": "Who is it for?" })
     const result = h("div")
     const more = h("details", {},
@@ -411,32 +415,27 @@ class CubbyShare extends Base {
       h("div", { className: "row" },
         h("button", { className: "main", onclick: () => make({ uses: 1 }) }, "Create personal link"),
         h("button", { onclick: () => make({}) }, "Create group link"),
-        h("button", { onclick: () => make({ uses: 1, allow: "viewer" }) }, "Create view-only link"),
+        h("button", { onclick: () => make({ uses: 1, access: "read" }) }, "Create view-only link"),
       ),
-      h("p", { className: "muted" }, "One person: one use, 7 days. A group link: 10 people, 7 days."),
+      h("p", { className: "muted" }, `One person: one use, 7 days. A group link: 10 people, 7 days. People you invite get "${LEVEL_NAMES[mine === "owner" ? "all" : mine] || "Can look"}" unless the link says view-only.`),
       more,
       result,
     )
   }
 
-  _people(db, tokens, grants, rerender, owner) {
-    const labels = new Map(tokens.map(t => [t.id, t.label]))
-    const byUser = new Map()
-    for (const g of grants) {
-      if (g.owner) continue
-      const p = byUser.get(g.user) || { user: g.user, labels: [], created: g.createdAt, last: g.lastUsedAt }
-      p.labels.push(labels.get(g.source) || (g.source === "direct" ? "added directly" : "invite"))
-      p.last = Math.max(p.last || 0, g.lastUsedAt || 0)
-      byUser.set(g.user, p)
-    }
-    const people = [...byUser.values()]
+  _people(db, tokens, members, rerender, owner, me) {
     const pending = tokens.filter(t => t.state === "active")
     const act = fn => async () => { await fn(); this._changed(); rerender() }
+    const others = members.filter(m => m.id !== me)
+    const level = m => m.access === "banned" ? h("span", { className: "muted" }, " · banned") :
+      h("select", { "aria-label": "Level", onchange: async e => { await db.owner.members.set(m.id, e.target.value); this._changed(); rerender() } },
+        ...Object.entries(LEVEL_NAMES).map(([v, t]) => h("option", { value: v, selected: v === m.access }, t)))
     return h("section", {},
       owner ? h("h3", {}, "People") : null,
-      !owner ? null : people.length ? h("ul", {}, people.map(p => h("li", {},
-        h("span", {}, p.labels.filter(Boolean).join(", ") || p.user, h("span", { className: "muted" }, ` · joined ${ago(p.created)}, active ${ago(p.last)}`)),
-        h("button", { onclick: act(() => db.owner.grants.revokeUser(p.user)) }, "Remove"),
+      !owner ? null : others.length ? h("ul", {}, others.map(m => h("li", {},
+        h("span", {}, m.label || m.id, h("span", { className: "muted" }, ` · joined ${ago(m.since)}, active ${ago(m.lastUsedAt)}`)),
+        h("span", { className: "row" }, level(m),
+          h("button", { onclick: act(() => db.owner.members.remove(m.id)) }, m.access === "banned" ? "Lift ban" : "Remove")),
       ))) : h("p", { className: "muted" }, "Nobody has joined yet."),
       pending.length ? h("div", {},
         h("p", { className: "muted" }, "Open invites"),
@@ -445,7 +444,7 @@ class CubbyShare extends Base {
             ` · ${t.usesLeft === null ? "no limit" : `${t.usesLeft} left`}, until ${when(t.until)}`)),
           h("span", { className: "row" },
             h("button", { onclick: act(() => db.tokens.update(t.id, { until: "7d" })) }, "Extend"),
-            h("button", { onclick: act(() => t.grants ? db.tokens.update(t.id, { uses: 0 }) : db.tokens.revoke(t.id)) }, "Cancel"),
+            h("button", { onclick: act(() => t.members ? db.tokens.update(t.id, { uses: 0 }) : db.tokens.revoke(t.id)) }, "Cancel"),
           ),
         ))),
       ) : null,
@@ -453,16 +452,15 @@ class CubbyShare extends Base {
   }
 
   _visibility(db, settings, rerender) {
-    const current = settings?.public
+    const current = settings?.anyone
     return h("section", {},
       h("h3", {}, "Who can see this"),
-      current === "custom" ? h("p", { className: "muted" }, "Custom settings, set elsewhere.") : null,
-      PUBLIC.map(([value, title, warning]) => h("label", { className: "choice" },
+      ANYONE.map(([value, title, warning]) => h("label", { className: "choice" },
         h("input", {
-          type: "radio", name: "public", checked: value === current,
+          type: "radio", name: "anyone", checked: value === current,
           onchange: async e => {
             if (value !== "none" && !confirm(warning + " Continue?")) { e.target.checked = false; rerender(); return }
-            await db.owner.settings({ public: value })
+            await db.owner.settings({ anyone: value })
             this._changed()
             rerender()
           },

@@ -69,7 +69,7 @@ func (s *Server) read(c *reqCtx, t store.Target) error {
 	}
 	h := c.header()
 	h.Set("ETag", etag(e.Version))
-	h.Set("KV-By", e.Writer)
+	h.Set("KV-By", e.By())
 	writeMetadata(c, e.T, e.Expires)
 	if inm := c.r.Header.Get("If-None-Match"); inm != "" && strings.TrimPrefix(inm, "W/") == etag(e.Version) {
 		c.status = 304
@@ -204,7 +204,6 @@ type itemJSON struct {
 	Value   json.RawMessage `json:"value,omitempty"`
 	Deleted bool            `json:"deleted,omitempty"`
 	Version int64           `json:"version"`
-	User    string          `json:"user,omitempty"`
 	From    string          `json:"from,omitempty"`
 	To      string          `json:"to,omitempty"`
 	By      string          `json:"by"`
@@ -214,7 +213,7 @@ type itemJSON struct {
 }
 
 func toItem(e store.Entry) itemJSON {
-	it := itemJSON{Key: e.Key, Version: e.Version, User: e.User, From: e.From, To: e.To, By: e.Writer, Expires: e.Expires, Expired: e.Expired}
+	it := itemJSON{Key: e.Key, Version: e.Version, From: e.From, To: e.To, By: e.By(), Expires: e.Expires, Expired: e.Expired}
 	if e.T != 0 {
 		t := e.T
 		it.T = &t

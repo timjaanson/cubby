@@ -256,7 +256,7 @@ func TestLiveAccessPerMessage(t *testing.T) {
 		json.Unmarshal([]byte(b), &o)
 		return "", o.ID
 	}()
-	if s, _, b := c.req("DELETE", "/v1/"+own.Space+"/grants?user="+id, "", bearer(own.Token)...); s != 200 {
+	if s, _, b := c.req("DELETE", "/v1/"+own.Space+"/members/"+id, "", bearer(own.Token)...); s != 200 {
 		t.Fatalf("revoke %d %s", s, b)
 	}
 	c.req("PUT", "/v1/"+own.Space+"/shared/k", `2`, bearer(own.Token)...)

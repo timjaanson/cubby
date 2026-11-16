@@ -20,7 +20,7 @@ async page => {
       throw Error('timeout: ' + m)
     }
     const { createSpace, kv } = await import(base + '/kv.js')
-    const { space } = await createSpace({ server: base, public: 'all' })
+    const { space } = await createSpace({ server: base, anyone: 'all' })
     const a = kv(space, { server: base, live: true })
     const b = kv(space, { server: base, tokenKey: 'second-person' }) // plain HTTP participant
     const states = []
@@ -58,12 +58,12 @@ async page => {
 
     // Pulses: a live listener and an HTTP listener, 30 quick pulses each way.
     const onA = [], onB = []
-    const stopA = a.users.onPulse('cursor', p => { if (!p.mine) onA.push(p) })
-    const stopB = b.users.onPulse('cursor', p => { if (!p.mine) onB.push(p) })
+    const stopA = a.by.onPulse('cursor', p => { if (!p.mine) onA.push(p) })
+    const stopB = b.by.onPulse('cursor', p => { if (!p.mine) onB.push(p) })
     await sleep(200)
     const t2 = performance.now()
     // maxRate 0: every one of a burst must arrive, past the client throttle.
-    for (let i = 0; i < 30; i++) { a.user().pulse('cursor', { x: i }, { maxRate: 0 }); b.user().pulse('cursor', { x: i }, { maxRate: 0 }) }
+    for (let i = 0; i < 30; i++) { a.mine.pulse('cursor', { x: i }, { maxRate: 0 }); b.mine.pulse('cursor', { x: i }, { maxRate: 0 }) }
     await until(() => onA.length === 30 && onB.length === 30, `pulses ${onA.length}/${onB.length}`)
     const pulseMs = performance.now() - t2
     if (await a.shared.get('cursor') !== null) throw Error('pulse was stored')

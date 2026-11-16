@@ -1,7 +1,7 @@
 package server
 
 // Routes about a space rather than its data: creating it, joining it,
-// asking what you may do, and the owner's settings, tokens and grants.
+// asking what you may do, invites, members and the owner's settings.
 
 import (
 	"bytes"
@@ -52,15 +52,6 @@ func decodeBody(c *reqCtx, v any) error {
 
 func isNull(raw json.RawMessage) bool { return raw != nil && string(bytes.TrimSpace(raw)) == "null" }
 
-func scopeErr(err error) error { return apierr.InvalidScope(capital(err.Error()) + ".") }
-
-func capital(s string) string {
-	if s == "" {
-		return s
-	}
-	return strings.ToUpper(s[:1]) + s[1:]
-}
-
 // identity returns the request's visitor, or creates one when no token was
 // sent. created is the new token, "" when the visitor already existed.
 func (s *Server) identity(c *reqCtx) (id, created string, err error) {
@@ -78,9 +69,7 @@ func (s *Server) createSpace(c *reqCtx) error {
 	var in struct {
 		Name   string          `json:"name"`
 		Label  string          `json:"label"`
-		Public json.RawMessage `json:"public"`
-		Read   json.RawMessage `json:"read"`
-		Write  json.RawMessage `json:"write"`
+		Anyone json.RawMessage `json:"anyone"`
 		Invite json.RawMessage `json:"invite"`
 	}
 	if err := decodeBody(c, &in); err != nil {
@@ -95,7 +84,7 @@ func (s *Server) createSpace(c *reqCtx) error {
 	if in.Name != "" && !names.ValidSpace(in.Name) {
 		return apierr.InvalidSpace(names.SuggestFor(in.Name))
 	}
-	settings, err := access.ApplyInput(access.Private, in.Public, in.Read, in.Write, in.Invite)
+	settings, err := access.ApplyInput(access.Default, in.Anyone, in.Invite)
 	if err != nil {
 		return apierr.InvalidSettings(err.Error())
 	}
@@ -121,7 +110,7 @@ func (s *Server) createSpace(c *reqCtx) error {
 		return err
 	}
 	s.lim.misses.remember(c.ip, name, s.lim.misses.now()) // its creator can use it even while out of miss budget
-	out := map[string]any{"space": name, "owner": ownerToken, "id": id, "settings": settings}
+	out := map[string]any{"space": name, "ownerToken": ownerToken, "id": id, "settings": settings}
 	if newToken != "" {
 		out["token"] = newToken
 	}
@@ -129,7 +118,7 @@ func (s *Server) createSpace(c *reqCtx) error {
 	return nil
 }
 
-// join redeems an access or owner token. Any failure answers invite_invalid,
+// join redeems an invite or the owner token. Any failure answers invite_invalid,
 // the same for a space that doesn't exist, and costs one miss.
 func (s *Server) join(c *reqCtx, space string, rights *access.Rights) error {
 	var in struct {
@@ -167,7 +156,7 @@ func (s *Server) join(c *reqCtx, space string, rights *access.Rights) error {
 			return err
 		}
 	}
-	g, err := s.store.Redeem(space, id, in.Token)
+	j, err := s.store.Redeem(space, id, in.Token)
 	if err != nil {
 		if newToken != "" {
 			s.store.DeleteVisitor(id)
@@ -182,7 +171,7 @@ func (s *Server) join(c *reqCtx, space string, rights *access.Rights) error {
 	if err != nil {
 		return err
 	}
-	out := map[string]any{"space": space, "id": id, "owner": g.Owner, "allow": g.Allow, "until": g.Until, "settings": settings}
+	out := map[string]any{"space": space, "id": id, "access": j.Access, "until": j.Until, "settings": settings}
 	status := 200
 	if newToken != "" {
 		out["token"], status = newToken, 201
@@ -191,19 +180,7 @@ func (s *Server) join(c *reqCtx, space string, rights *access.Rights) error {
 	return nil
 }
 
-func grantJSON(g access.Grant) map[string]any {
-	var until any
-	if g.Until != 0 {
-		until = g.Until
-	}
-	allow := g.Allow
-	if allow == nil {
-		allow = []string{}
-	}
-	return map[string]any{"id": g.ID, "owner": g.Owner, "allow": allow, "source": g.Source, "until": until}
-}
-
-// spaceRoute handles /v1/{space} and its access, tokens, grants and
+// spaceRoute handles /v1/{space} and its access, tokens, members and
 // owner-token routes. rest is the path after the space name.
 func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest []string) error {
 	m := c.r.Method
@@ -218,10 +195,6 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 		if c.visitor != "" {
 			id = c.visitor
 		}
-		grants := []map[string]any{}
-		for _, g := range rights.Grants {
-			grants = append(grants, grantJSON(g))
-		}
 		if err := s.rate(s.lim.readsPerIP, c.ip, 1, "rate_limited"); err != nil {
 			return err
 		}
@@ -229,26 +202,36 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 		if err != nil {
 			return err
 		}
-		c.json(200, map[string]any{"id": id, "owner": rights.Owner, "canInvite": c.visitor != "" && rights.CanInvite(),
-			"settings": rights.Settings, "grants": grants, "usage": usage, "limits": s.spaceLimits(space)})
+		c.json(200, map[string]any{"id": id, "access": rights.Level(), "canInvite": c.visitor != "" && rights.CanInvite(),
+			"settings": rights.Settings, "usage": usage, "limits": s.spaceLimits(space)})
 		return nil
 	}
 
-	// Everything else needs a visitor: tokens for anyone who may invite, the rest for owners.
+	// Everything else needs a visitor.
 	if c.visitor == "" {
 		if c.tokErr != nil {
 			return c.tokErr
 		}
 		return apierr.MissingToken
 	}
-	if !rights.Owner {
-		if len(rest) == 0 || rest[0] != "tokens" || !rights.CanInvite() {
+	owner := rights.Owner()
+	route := ""
+	if len(rest) > 0 {
+		route = rest[0]
+	}
+	switch {
+	case route == "tokens":
+		if !rights.CanInvite() {
 			return apierr.OwnerOnly
 		}
+	case route == "members":
+		// Decided per method below.
+	case !owner:
+		return apierr.OwnerOnly
 	}
-	// Members see and change only the tokens they minted.
+	// Members see and change only the invites they minted.
 	by := ""
-	if !rights.Owner {
+	if !owner {
 		by = c.visitor
 	}
 
@@ -280,7 +263,7 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 		if err != nil {
 			return err
 		}
-		c.json(200, map[string]any{"owner": tok})
+		c.json(200, map[string]any{"ownerToken": tok})
 		return nil
 
 	case rest[0] == "tokens" && len(rest) == 1:
@@ -306,7 +289,7 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 	case rest[0] == "tokens" && len(rest) == 2:
 		id := rest[1]
 		if !names.ValidTokenID(id) {
-			return &apierr.Error{Status: 404, Code: "not_found", Message: "No such access token in this space."}
+			return &apierr.Error{Status: 404, Code: "not_found", Message: "No such invite in this space."}
 		}
 		if err := checkParams(c.r); err != nil {
 			return err
@@ -323,112 +306,86 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 		}
 		return methodErr("PATCH, DELETE")
 
-	case rest[0] == "grants" && len(rest) == 1:
-		switch m {
-		case http.MethodGet, http.MethodHead:
-			if err := checkParams(c.r, "user"); err != nil {
-				return err
-			}
-			user := c.r.URL.Query().Get("user")
-			if user != "" && !names.ValidVisitor(user) {
-				return apierr.BadParam("user", "user is a visitor ID like u_k7m2x9q4p1r8t3w6.")
-			}
-			items, err := s.store.ListGrants(space, user)
-			if err != nil {
-				return err
-			}
-			c.json(200, map[string]any{"items": items})
-			return nil
-		case http.MethodPost:
-			if err := checkParams(c.r); err != nil {
-				return err
-			}
-			return s.addGrant(c, space)
-		case http.MethodDelete:
-			if err := checkParams(c.r, "user"); err != nil {
-				return err
-			}
-			user := c.r.URL.Query().Get("user")
-			if !names.ValidVisitor(user) {
-				return apierr.BadParam("user", "To remove a visitor's grants, give ?user= with their ID. To remove one grant, DELETE grants/{id}.")
-			}
-			n, err := s.store.DeleteUserGrants(space, user)
-			if err != nil {
-				return err
-			}
-			c.json(200, map[string]any{"removed": n})
-			return nil
-		}
-		return methodErr("GET, HEAD, POST, DELETE")
-
-	case rest[0] == "bans" && len(rest) == 1:
+	case rest[0] == "members" && len(rest) == 1:
 		if m != http.MethodGet && m != http.MethodHead {
 			return methodErr("GET, HEAD")
 		}
 		if err := checkParams(c.r); err != nil {
 			return err
 		}
-		items, err := s.store.Bans(space)
+		if rights.Member < access.Read {
+			return notMember
+		}
+		items, err := s.store.Members(space, owner)
 		if err != nil {
 			return err
 		}
-		c.json(200, map[string]any{"items": items})
+		if owner {
+			c.json(200, map[string]any{"items": items})
+			return nil
+		}
+		// Members see who is in the space and at what level, nothing about
+		// invites or timing.
+		type seen struct {
+			ID     string       `json:"id"`
+			Access access.Level `json:"access"`
+			Since  int64        `json:"since"`
+		}
+		out := make([]seen, len(items))
+		for i, it := range items {
+			out[i] = seen{it.ID, it.Access, it.Since}
+		}
+		c.json(200, map[string]any{"items": out})
 		return nil
 
-	case rest[0] == "bans" && len(rest) == 2:
+	case rest[0] == "members" && len(rest) == 2:
 		user := rest[1]
+		if user == "me" {
+			user = c.visitor
+		}
 		if !names.ValidVisitor(user) {
-			return apierr.BadParam("user", "A ban names a visitor ID like u_k7m2x9q4p1r8t3w6.")
+			return apierr.BadParam("id", "A member is a visitor ID like u_k7m2x9q4p1r8t3w6, or me.")
 		}
 		if err := checkParams(c.r); err != nil {
 			return err
 		}
 		switch m {
 		case http.MethodPut:
-			return s.ban(c, space, user)
+			if !owner {
+				return apierr.OwnerOnly
+			}
+			return s.setMember(c, space, user)
 		case http.MethodDelete:
-			lifted, err := s.store.Unban(space, user)
+			// Owners remove anyone; everyone may leave.
+			if !owner && user != c.visitor {
+				return apierr.OwnerOnly
+			}
+			removed, err := s.store.RemoveMember(space, user)
 			if err != nil {
 				return err
 			}
-			c.json(200, map[string]any{"lifted": lifted})
+			c.json(200, map[string]any{"removed": removed})
 			return nil
 		}
 		return methodErr("PUT, DELETE")
-
-	case rest[0] == "grants" && len(rest) == 2:
-		if m != http.MethodDelete {
-			return methodErr("DELETE")
-		}
-		if err := checkParams(c.r); err != nil {
-			return err
-		}
-		if !names.ValidGrantID(rest[1]) {
-			return &apierr.Error{Status: 404, Code: "not_found", Message: "No such grant in this space."}
-		}
-		if err := s.store.DeleteGrant(space, rest[1]); err != nil {
-			return err
-		}
-		c.json(200, map[string]any{})
-		return nil
 	}
 	return noRoute
 }
+
+var notMember = &apierr.Error{Status: 403, Code: "not_member", Message: "Only members of this space can list its members."}
 
 func (s *Server) patchSettings(c *reqCtx, space string, cur access.Settings) error {
 	if err := checkParams(c.r); err != nil {
 		return err
 	}
 	var in struct {
-		Public json.RawMessage `json:"public"`
-		Read   json.RawMessage `json:"read"`
-		Write  json.RawMessage `json:"write"`
+		Anyone json.RawMessage `json:"anyone"`
 		Invite json.RawMessage `json:"invite"`
 	}
 	if err := decodeBody(c, &in); err != nil {
 		return err
 	}
-	st, err := access.ApplyInput(cur, in.Public, in.Read, in.Write, in.Invite)
+	st, err := access.ApplyInput(cur, in.Anyone, in.Invite)
 	if err != nil {
 		return apierr.InvalidSettings(err.Error())
 	}
@@ -439,20 +396,16 @@ func (s *Server) patchSettings(c *reqCtx, space string, cur access.Settings) err
 	return nil
 }
 
-// Defaults for a new access token: a member, 10 uses, 7 days.
+// Defaults for a new invite: 10 uses, 7 days.
 const (
 	defaultTokenUses = 10
 	defaultTokenTTL  = 7 * 24 * time.Hour
 )
 
-// exceedsRights: a member asked to hand out rights they don't hold.
-var exceedsRights = &apierr.Error{Status: 403, Code: "exceeds_rights",
-	Message: "An invite can only give rights you hold yourself. Leave allow out to give what you have."}
-
 func (s *Server) mintToken(c *reqCtx, space string, rights *access.Rights) error {
 	var in struct {
 		Label    string          `json:"label"`
-		Allow    json.RawMessage `json:"allow"`
+		Access   json.RawMessage `json:"access"`
 		Uses     json.RawMessage `json:"uses"`
 		Until    json.RawMessage `json:"until"`
 		GrantFor json.RawMessage `json:"grantFor"`
@@ -463,20 +416,20 @@ func (s *Server) mintToken(c *reqCtx, space string, rights *access.Rights) error
 	if utf8.RuneCountInString(in.Label) > 63 {
 		return apierr.BadParam("label", "A label is at most 63 characters.")
 	}
-	allow, err := access.ParseAllow(in.Allow)
-	if err != nil {
-		return scopeErr(err)
-	}
-	if !rights.Owner {
-		if in.Allow == nil {
-			allow = rights.OwnAllow() // an invite to have what the inviter has
+	// The default is all, or the inviter's own level if that's lower.
+	level := min(access.All, rights.Member)
+	if in.Access != nil {
+		var err error
+		if level, err = access.ParseIn(in.Access, "access", access.Read, access.Post, access.All); err != nil {
+			return apierr.BadParam("access", err.Error())
 		}
-		if len(allow) == 0 || !rights.CanGive(allow) {
-			return exceedsRights
+		if !rights.CanGive(level) {
+			return &apierr.Error{Status: 403, Code: "exceeds_rights",
+				Message: fmt.Sprintf("An invite can give at most your own level, %q.", rights.Member.String())}
 		}
 	}
 	now := time.Now()
-	spec := store.TokenSpec{By: c.visitor, Label: in.Label, Allow: allow}
+	spec := store.TokenSpec{By: c.visitor, Label: in.Label, Access: level}
 
 	uses := int64(defaultTokenUses)
 	spec.Uses = &uses
@@ -495,6 +448,7 @@ func (s *Server) mintToken(c *reqCtx, space string, rights *access.Rights) error
 	case isNull(in.Until):
 		spec.Until = nil
 	case in.Until != nil:
+		var err error
 		if until, err = access.ParseTime(in.Until, now); err != nil {
 			return apierr.BadParam("until", "until: "+err.Error()+".")
 		}
@@ -519,7 +473,7 @@ func (s *Server) mintToken(c *reqCtx, space string, rights *access.Rights) error
 	if err != nil {
 		return err
 	}
-	c.json(201, map[string]any{"id": info.ID, "token": token, "label": info.Label, "allow": info.Allow,
+	c.json(201, map[string]any{"id": info.ID, "token": token, "label": info.Label, "access": info.Access,
 		"uses": info.UsesLeft, "until": info.Until, "grantFor": info.GrantFor})
 	return nil
 }
@@ -561,25 +515,22 @@ func (s *Server) patchToken(c *reqCtx, space, id, by string) error {
 	return nil
 }
 
-func (s *Server) addGrant(c *reqCtx, space string) error {
+// setMember gives a visitor exactly one level, replacing their grants, or
+// bans them. A ban closes their live connections to the space.
+func (s *Server) setMember(c *reqCtx, space, user string) error {
 	var in struct {
-		User  string          `json:"user"`
-		Allow json.RawMessage `json:"allow"`
-		Owner bool            `json:"owner"`
-		Until json.RawMessage `json:"until"`
+		Access json.RawMessage `json:"access"`
+		Until  json.RawMessage `json:"until"`
 	}
 	if err := decodeBody(c, &in); err != nil {
 		return err
 	}
-	if !names.ValidVisitor(in.User) {
-		return apierr.BadParam("user", "user is a visitor ID like u_k7m2x9q4p1r8t3w6.")
-	}
-	if in.Owner && in.Allow != nil {
-		return apierr.BadParam("allow", "An owner grant has every right. Give owner or allow, not both.")
-	}
-	allow, err := access.ParseAllow(in.Allow)
+	level, err := access.ParseIn(in.Access, "access", access.Banned, access.Read, access.Post, access.All, access.Owner)
 	if err != nil {
-		return scopeErr(err)
+		return apierr.BadParam("access", err.Error())
+	}
+	if level == access.Banned && user == c.visitor {
+		return apierr.BadParam("access", "You can't ban yourself.")
 	}
 	var until *int64
 	if in.Until != nil && !isNull(in.Until) {
@@ -589,44 +540,17 @@ func (s *Server) addGrant(c *reqCtx, space string) error {
 		}
 		until = &ms
 	}
-	g, err := s.store.AddGrant(space, in.User, in.Owner, allow, until)
+	mem, err := s.store.SetMember(space, user, c.visitor, level, until)
 	if err != nil {
 		return err
 	}
-	c.json(201, g)
-	return nil
-}
-
-// ban bans a visitor, or replaces their ban, and closes their live
-// connections to the space. Nothing they stored or hold is touched.
-func (s *Server) ban(c *reqCtx, space, user string) error {
-	var in struct {
-		Until json.RawMessage `json:"until"`
-	}
-	if err := decodeBody(c, &in); err != nil {
-		return err
-	}
-	var until *int64
-	if in.Until != nil && !isNull(in.Until) {
-		ms, err := access.ParseTime(in.Until, time.Now())
-		if err != nil {
-			return apierr.BadParam("until", "until: "+err.Error()+".")
+	if level == access.Banned {
+		var u int64
+		if until != nil {
+			u = *until
 		}
-		until = &ms
+		s.closeBanned(space, user, u)
 	}
-	b, created, err := s.store.Ban(space, user, c.visitor, until)
-	if err != nil {
-		return err
-	}
-	var u int64
-	if until != nil {
-		u = *until
-	}
-	s.closeBanned(space, user, u)
-	status := 200
-	if created {
-		status = 201
-	}
-	c.json(status, b)
+	c.json(200, mem)
 	return nil
 }

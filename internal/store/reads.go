@@ -15,7 +15,6 @@ type Entry struct {
 	Value   []byte // nil for a tombstone
 	IsJSON  bool
 	Version int64
-	User    string // across users/*/
 	From    string // under to/ and inbox/: the sender
 	To      string // under to/ and inbox/: the recipient, a visitor ID or "owners"
 	Writer  string // visitor who last wrote or deleted the key
@@ -39,7 +38,7 @@ func (s *Store) Get(space, area, key string) (*Entry, error) {
 		return nil, err
 	}
 	e := &Entry{Key: key, Area: area}
-	e.fill(OneArea)
+	e.fill()
 	var t sql.NullInt64
 	err = sp.db.QueryRow(`SELECT value, is_json, version, writer, series, t, expires, expired FROM kv WHERE area = ? AND key = ? AND value IS NOT NULL`,
 		area, key).Scan(&e.Value, &e.IsJSON, &e.Version, &e.Writer, &e.Series, &t, &e.Expires, &e.Expired)
@@ -58,11 +57,14 @@ func (s *Store) Get(space, area, key string) (*Entry, error) {
 type Across int
 
 const (
-	OneArea  Across = iota
-	AllUsers        // users/*/
-	Inbox           // inbox/*/: every sender to Fixed, the recipient
-	Sent            // to/*/: every recipient of Fixed, the sender
+	OneArea Across = iota
+	AllBy          // by/*/: every author
+	Inbox          // inbox/*/: every sender to Fixed, the recipient
+	Sent           // to/*/: every recipient of Fixed, the sender
 )
+
+// ByArea is the stored area of an author's by/ keys.
+func ByArea(author string) string { return "b:" + author }
 
 // ToArea is the stored area of the slot a sender fills for a recipient: one
 // per recipient, sender and key. rcpt is a visitor ID or "owners".
@@ -90,7 +92,7 @@ type Target struct {
 	Key     string // exact key, or prefix when pattern
 	Pattern bool
 	// Self: what the target means depends on who asks (inbox/, to/,
-	// users/me/). A live watch on it ends when the connection changes
+	// by/me/). A live watch on it ends when the connection changes
 	// identity.
 	Self bool
 }
@@ -102,8 +104,8 @@ func (t Target) Many() bool { return t.Across != OneArea }
 // Match reports whether a stored area is in the target.
 func (t Target) Match(area string) bool {
 	switch t.Across {
-	case AllUsers:
-		return strings.HasPrefix(area, "u:")
+	case AllBy:
+		return strings.HasPrefix(area, "b:")
 	case Inbox:
 		return strings.HasPrefix(area, "i:"+t.Fixed+":")
 	case Sent:
@@ -116,8 +118,8 @@ func (t Target) Match(area string) bool {
 // the sender (Inbox) or the recipient (Sent). Used for list cursors.
 func (t Target) AreaFor(party string) string {
 	switch t.Across {
-	case AllUsers:
-		return "u:" + party
+	case AllBy:
+		return ByArea(party)
 	case Inbox:
 		return ToArea(t.Fixed, party)
 	case Sent:
@@ -129,8 +131,8 @@ func (t Target) AreaFor(party string) string {
 // Party is the inverse of AreaFor.
 func (t Target) Party(area string) string {
 	switch t.Across {
-	case AllUsers:
-		return strings.TrimPrefix(area, "u:")
+	case AllBy:
+		return strings.TrimPrefix(area, "b:")
 	case Inbox:
 		_, s, _ := SplitTo(area)
 		return s
@@ -145,8 +147,8 @@ func (t Target) where() (string, []any) {
 	var b strings.Builder
 	var args []any
 	switch t.Across {
-	case AllUsers:
-		b.WriteString("area >= 'u:' AND area < 'u;'")
+	case AllBy:
+		b.WriteString("area >= 'b:' AND area < 'b;'")
 	case Inbox:
 		b.WriteString("area >= ? AND area < ?")
 		args = append(args, "i:"+t.Fixed+":", "i:"+t.Fixed+";")
@@ -190,20 +192,26 @@ func scanEntries(rows *sql.Rows, across Across) (out []Entry, cut bool, err erro
 			return nil, false, err
 		}
 		e.T = t.Int64
-		e.fill(across)
+		e.fill()
 		out = append(out, e)
 		size += len(e.Key) + len(e.Value)
 	}
 	return out, false, rows.Err()
 }
 
-// fill sets the parties an entry carries: user across users/*/, from and
-// to for every entry under to/ and inbox/.
-func (e *Entry) fill(across Across) {
-	if across == AllUsers {
-		e.User = strings.TrimPrefix(e.Area, "u:")
-	}
+// fill sets the parties an entry carries: from and to for every entry under
+// to/ and inbox/.
+func (e *Entry) fill() {
 	e.To, e.From, _ = SplitTo(e.Area)
+}
+
+// By is who an entry belongs to: under by/ its author, even after an
+// owner's moderation delete; elsewhere whoever last wrote or deleted it.
+func (e *Entry) By() string {
+	if a, ok := strings.CutPrefix(e.Area, "b:"); ok {
+		return a
+	}
+	return e.Writer
 }
 
 // CurrentSeq is the space's counter.

@@ -11,9 +11,9 @@ import (
 )
 
 type listItem struct {
-	Key, From, To, By, User string
-	Value                   json.RawMessage
-	Deleted                 bool
+	Key, From, To, By string
+	Value             json.RawMessage
+	Deleted           bool
 }
 
 func listOf(t *testing.T, b string) []listItem {
@@ -27,7 +27,7 @@ func listOf(t *testing.T, b string) []listItem {
 
 func TestToAndInbox(t *testing.T) {
 	c := newTest(t)
-	alice := c.create(`{"public":"all"}`, "")
+	alice := c.create(`{"anyone":"all"}`, "")
 	sp := "/v1/" + alice.Space
 	a := bearer(alice.Token)
 	bobTok, bobID := c.anon()
@@ -83,14 +83,14 @@ func TestToAndInbox(t *testing.T) {
 	if _, _, body := c.req("GET", sp+"/inbox/"+bobID+"/draft", "", b...); body != `"secret"` {
 		t.Fatalf("inbox/{own id}: %s", body)
 	}
-	// users/me/ is the caller's own users/ area, on the server.
-	c.req("PUT", sp+"/users/me/name", `"Bob"`, b...)
-	if _, _, body := c.req("GET", sp+"/users/"+bobID+"/name", ""); body != `"Bob"` {
-		t.Fatalf("users/me: %s", body)
+	// by/me/ is the caller's own by/ area, on the server.
+	c.req("PUT", sp+"/by/me/name", `"Bob"`, b...)
+	if _, _, body := c.req("GET", sp+"/by/"+bobID+"/name", ""); body != `"Bob"` {
+		t.Fatalf("by/me: %s", body)
 	}
-	// The old area is gone, with a pointer.
-	if s, _, body := c.req("GET", sp+"/me/draft", "", b...); s != 404 || !strings.Contains(body, "to/me/") {
-		t.Fatalf("me/: %d %s", s, body)
+	// users/ is gone, with a pointer.
+	if s, _, body := c.req("GET", sp+"/users/me/name", "", b...); s != 404 || !strings.Contains(body, "by/") {
+		t.Fatalf("users/: %d %s", s, body)
 	}
 	// The inbox is read and delete only.
 	if s, _, _ := c.req("PUT", sp+"/inbox/"+bobID+"/message", `1`, a...); s != 405 {
@@ -132,7 +132,7 @@ func TestToAndInbox(t *testing.T) {
 
 func TestToOwners(t *testing.T) {
 	c := newTest(t)
-	own := c.create(`{"public":"respond"}`, "")
+	own := c.create(`{"anyone":"post"}`, "")
 	sp := "/v1/" + own.Space
 	o := bearer(own.Token)
 	bobTok, bobID := c.anon()
@@ -160,67 +160,46 @@ func TestToOwners(t *testing.T) {
 		t.Fatalf("member reads owners' inbox: %d %s", s, body)
 	}
 	newTok, newID := c.anon()
-	c.req("POST", sp+"/grants", `{"user":"`+newID+`","owner":true}`, o...)
+	c.req("PUT", sp+"/members/"+newID, `{"access":"owner"}`, o...)
 	if _, _, body := c.req("GET", sp+"/inbox/owners/*/*", "", bearer(newTok)...); len(listOf(t, body)) != 1 {
 		t.Fatalf("second owner %s", body)
 	}
-	// respond lets anyone send but not write shared/.
+	// post lets anyone send but not write shared/.
 	if s, _, _ := c.req("PUT", sp+"/shared/x", `1`, b...); s != 403 {
-		t.Fatalf("respond shared write: %d", s)
+		t.Fatalf("post shared write: %d", s)
 	}
 }
 
-func TestToScopes(t *testing.T) {
+func TestToLevels(t *testing.T) {
 	c := newTest(t)
 	own := c.create(``, "") // private
 	sp := "/v1/" + own.Space
-	o := bearer(own.Token)
 	_, friendID := c.anon()
 
-	// A contact form: send to the owners, nothing else.
-	_, form := c.mint(own.Space, own.Token, `{"allow":["to/owners/*:w"]}`)
-	s, vt, body := c.join(own.Space, form, "")
-	if s != 201 {
-		t.Fatalf("join: %d %s", s, body)
-	}
-	v := bearer(vt)
-	if s, _, body := c.req("PUT", sp+"/to/owners/msg", `"hello"`, v...); s != 201 {
-		t.Fatalf("send to owners: %d %s", s, body)
-	}
-	if s, _, body := c.req("PUT", sp+"/to/"+friendID+"/msg", `"hello"`, v...); s != 403 || errCode(body) != "no_access" {
-		t.Fatalf("send to a visitor: %d %s", s, body)
-	}
-	if s, _, body := c.req("PUT", sp+"/to/me/note", `1`, v...); s != 403 {
-		t.Fatalf("to/me without scope: %d %s", s, body)
-	}
-	// Write-only: the space stays dark for reads.
-	if s, _, body := c.req("GET", sp+"/to/owners/msg", "", v...); s != 404 || errCode(body) != "no_space" {
-		t.Fatalf("read without r: %d %s", s, body)
-	}
-	// Reading your inbox takes r on to.
-	_, reader := c.mint(own.Space, own.Token, `{"allow":["to:r"]}`)
+	// A reader reads their inbox but sends nothing.
+	_, reader := c.mint(own.Space, own.Token, `{"access":"read"}`)
 	_, rt, _ := c.join(own.Space, reader, "")
-	if s, _, body := c.req("GET", sp+"/inbox/*/*", "", bearer(rt)...); s != 200 {
-		t.Fatalf("to:r inbox: %d %s", s, body)
+	r := bearer(rt)
+	if s, _, body := c.req("GET", sp+"/inbox/*/*", "", r...); s != 200 {
+		t.Fatalf("read inbox: %d %s", s, body)
 	}
-	// Scope grammar: the recipient comes first.
-	for _, bad := range []string{"to/answer:w", "me:rw", "to/u_x/a:w"} {
-		if s, _, body := c.req("POST", sp+"/tokens", `{"allow":["`+bad+`"]}`, o...); s != 400 || errCode(body) != "invalid_scope" {
-			t.Fatalf("scope %s: %d %s", bad, s, body)
+	if s, _, body := c.req("PUT", sp+"/to/owners/msg", `"hello"`, r...); s != 403 || errCode(body) != "no_access" || !strings.Contains(body, `"need":"post"`) {
+		t.Fatalf("reader sends: %d %s", s, body)
+	}
+	// Post sends to anyone, and to yourself.
+	_, poster := c.mint(own.Space, own.Token, `{"access":"post"}`)
+	_, pt, _ := c.join(own.Space, poster, "")
+	p := bearer(pt)
+	for _, to := range []string{"owners", friendID, "me"} {
+		if s, _, body := c.req("PUT", sp+"/to/"+to+"/msg", `"hello"`, p...); s != 201 {
+			t.Fatalf("send to %s: %d %s", to, s, body)
 		}
-	}
-	if s, _, body := c.req("POST", sp+"/tokens", `{"allow":["to/*/msg.*:w","to/me:rw"]}`, o...); s != 201 || !strings.Contains(body, `"to/*/msg.*:w"`) || !strings.Contains(body, `"to/me:rw"`) {
-		t.Fatalf("valid to scopes: %d %s", s, body)
-	}
-	// write settings name to.
-	if s, _, body := c.req("PATCH", sp, `{"public":"respond"}`, o...); s != 200 || !strings.Contains(body, `"to":"anyone"`) {
-		t.Fatalf("respond: %d %s", s, body)
 	}
 }
 
 func TestDirectedPulses(t *testing.T) {
 	c := newTest(t)
-	alice := c.create(`{"public":"all"}`, "")
+	alice := c.create(`{"anyone":"all"}`, "")
 	sp := "/v1/" + alice.Space
 	a := bearer(alice.Token)
 	bobTok, bobID := c.anon()
@@ -228,7 +207,7 @@ func TestDirectedPulses(t *testing.T) {
 
 	toAlice := c.listen(sp+"/inbox/*/rtc.*/pulse?timeout=2", a...)
 	toCara := c.listen(sp+"/inbox/*/rtc.*/pulse?timeout=1", bearer(caraTok)...)
-	allUsers := c.listen(sp+"/users/*/rtc.*/pulse?timeout=1", bearer(caraTok)...)
+	allUsers := c.listen(sp+"/by/*/rtc.*/pulse?timeout=1", bearer(caraTok)...)
 	if s, _, body := c.req("POST", sp+"/to/"+alice.ID+"/rtc.offer/pulse", `{"sdp":"x"}`, bearer(bobTok)...); s != 202 {
 		t.Fatalf("send: %d %s", s, body)
 	}
@@ -241,7 +220,7 @@ func TestDirectedPulses(t *testing.T) {
 		t.Fatalf("cara got %+v", p)
 	}
 	if p := parsePulses(t, <-allUsers); len(p.Pulses) != 0 {
-		t.Fatalf("users/* got %+v", p)
+		t.Fatalf("by/* got %+v", p)
 	}
 	// from and to come with it.
 	got := c.listen(sp+"/inbox/*/rtc.*/pulse?timeout=2", a...)
@@ -254,7 +233,7 @@ func TestDirectedPulses(t *testing.T) {
 
 func TestInboxLiveIdentity(t *testing.T) {
 	c := newTest(t)
-	alice := c.create(`{"public":"all"}`, "")
+	alice := c.create(`{"anyone":"all"}`, "")
 	bobTok, _ := c.anon()
 	w := c.dial(alice.Space, bearer(alice.Token)...)
 	w.send(`{"id":"in","method":"GET","path":"inbox/*/*/watch","query":{"version":0}}`)
@@ -273,32 +252,29 @@ func TestInboxLiveIdentity(t *testing.T) {
 
 func TestBans(t *testing.T) {
 	c := newTest(t)
-	own := c.create(`{"public":"all"}`, "")
+	own := c.create(`{"anyone":"all"}`, "")
 	sp := "/v1/" + own.Space
 	o := bearer(own.Token)
 	bobTok, bobID := c.anon()
 	b := bearer(bobTok)
-	c.req("PUT", sp+"/users/me/msg.1", `"spam"`, b...)
+	c.req("PUT", sp+"/by/me/msg.1", `"spam"`, b...)
 	memberTok, _ := c.anon()
-	c.req("POST", sp+"/grants", `{"user":"`+bobID+`","allow":"member"}`, o...)
+	c.req("PUT", sp+"/members/"+bobID, `{"access":"all"}`, o...)
 
-	// Only owners ban, and owners can't be banned.
-	if s, _, body := c.req("PUT", sp+"/bans/"+bobID, ``, bearer(memberTok)...); s != 403 || errCode(body) != "owner_only" {
+	// Only owners ban.
+	if s, _, body := c.req("PUT", sp+"/members/"+bobID, `{"access":"banned"}`, bearer(memberTok)...); s != 403 || errCode(body) != "owner_only" {
 		t.Fatalf("member bans: %d %s", s, body)
-	}
-	if s, _, body := c.req("PUT", sp+"/bans/"+own.ID, ``, o...); s != 409 || errCode(body) != "is_owner" {
-		t.Fatalf("ban owner: %d %s", s, body)
 	}
 	// A live socket is closed when the ban lands.
 	w := c.dial(own.Space, b...)
 	w.call("1", `{"id":1,"method":"GET","path":"shared/x"}`)
-	w.call("2", `{"id":2,"op":"will","path":"users/me/here/pulse","body":0}`)
-	gone := c.listen(sp+"/users/*/here/pulse?timeout=1", o...)
+	w.call("2", `{"id":2,"op":"will","path":"by/me/here/pulse","body":0}`)
+	gone := c.listen(sp+"/by/*/here/pulse?timeout=1", o...)
 
-	if s, _, body := c.req("PUT", sp+"/bans/"+bobID, `{"until":"1h"}`, o...); s != 201 || !strings.Contains(body, `"until":`) {
+	if s, _, body := c.req("PUT", sp+"/members/"+bobID, `{"access":"banned","until":"1h"}`, o...); s != 200 || !strings.Contains(body, `"until":1`) {
 		t.Fatalf("ban: %d %s", s, body)
 	}
-	if s, _, _ := c.req("PUT", sp+"/bans/"+bobID, `{"until":null}`, o...); s != 200 {
+	if s, _, _ := c.req("PUT", sp+"/members/"+bobID, `{"access":"banned"}`, o...); s != 200 {
 		t.Fatalf("replace ban: %d", s)
 	}
 	if f, ok := w.next(2 * time.Second); !ok || f.code() != "banned" {
@@ -312,30 +288,27 @@ func TestBans(t *testing.T) {
 		t.Fatalf("a banned visitor's will fired: %+v", p)
 	}
 	// Every request with the token says so, reads and access included.
-	for _, r := range [][2]string{{"GET", "/shared/x"}, {"PUT", "/shared/x"}, {"GET", "/access"}, {"POST", "/users/me/x/pulse"}, {"GET", "/inbox/*/*"}} {
+	for _, r := range [][2]string{{"GET", "/shared/x"}, {"PUT", "/shared/x"}, {"GET", "/access"}, {"POST", "/by/me/x/pulse"}, {"GET", "/inbox/*/*"}} {
 		s, _, body := c.req(r[0], sp+r[1], `1`, b...)
 		if s != 403 || errCode(body) != "banned" || !strings.Contains(body, `"until":null`) {
 			t.Fatalf("%s %s banned: %d %s", r[0], r[1], s, body)
 		}
 	}
-	// Anonymous reading of a public space still works.
-	if s, _, _ := c.req("GET", sp+"/users/"+bobID+"/msg.1", ""); s != 200 {
+	// Anonymous reading of an open space still works, and their data stays.
+	if s, _, _ := c.req("GET", sp+"/by/"+bobID+"/msg.1", ""); s != 200 {
 		t.Fatalf("anonymous read: %d", s)
 	}
-	// Nothing was deleted or revoked; the owner lists the ban.
-	_, _, body := c.req("GET", sp+"/bans", "", o...)
-	if !strings.Contains(body, bobID) || !strings.Contains(body, `"by":"`+own.ID+`"`) {
-		t.Fatalf("bans list %s", body)
+	_, _, body := c.req("GET", sp+"/members", "", o...)
+	if !strings.Contains(body, `"id":"`+bobID+`","access":"banned"`) {
+		t.Fatalf("members list %s", body)
 	}
-	// Unbanning restores exactly what was there.
-	if s, _, body := c.req("DELETE", sp+"/bans/"+bobID, "", o...); s != 200 || !strings.Contains(body, `"lifted":true`) {
+	// Removing the ban makes them a stranger: the anyone level, not what
+	// they had before.
+	if s, _, body := c.req("DELETE", sp+"/members/"+bobID, "", o...); s != 200 || !strings.Contains(body, `"removed":true`) {
 		t.Fatalf("unban: %d %s", s, body)
 	}
-	if _, _, body := c.req("GET", sp+"/access", "", b...); !strings.Contains(body, `"allow":["*:rw"]`) {
-		t.Fatalf("grants after unban %s", body)
-	}
-	if s, _, _ := c.req("PUT", sp+"/shared/x", `1`, b...); s != 201 {
-		t.Fatalf("write after unban: %d", s)
+	if _, _, body := c.req("GET", sp+"/access", "", b...); !strings.Contains(body, `"access":"all"`) {
+		t.Fatalf("after unban %s", body)
 	}
 }
 
@@ -346,15 +319,13 @@ func TestBanBlocksJoin(t *testing.T) {
 	o := bearer(own.Token)
 	_, link := c.mint(own.Space, own.Token, `{"uses":null}`)
 	_, bobTok, _ := c.join(own.Space, link, "")
-	_, bobID := c.anon()
-	_ = bobID
 	var who struct{ ID string }
 	_, _, body := c.req("GET", "/v1/whoami", "", bearer(bobTok)...)
 	json.Unmarshal([]byte(body), &who)
 
-	// A member's invite stops working while they're banned, and comes back.
+	// A banned member can't rejoin, and their own invites end.
 	_, memberLink := c.mint(own.Space, bobTok, ``)
-	c.req("PUT", sp+"/bans/"+who.ID, ``, o...)
+	c.req("PUT", sp+"/members/"+who.ID, `{"access":"banned"}`, o...)
 	if s, _, body := c.join(own.Space, link, bobTok); s != 403 || errCode(body) != "banned" {
 		t.Fatalf("rejoin while banned: %d %s", s, body)
 	}
@@ -365,17 +336,13 @@ func TestBanBlocksJoin(t *testing.T) {
 	if s, _, body := c.req("GET", sp+"/shared/x", "", bearer(bobTok)...); s != 403 || errCode(body) != "banned" {
 		t.Fatalf("private read: %d %s", s, body)
 	}
-	c.req("DELETE", sp+"/bans/"+who.ID, "", o...)
-	if s, _, body := c.join(own.Space, memberLink, ""); s != 201 {
-		t.Fatalf("member's invite after unban: %d %s", s, body)
-	}
-	// A ban with an end lapses by itself.
-	c.req("PUT", sp+"/bans/"+who.ID, `{"until":`+itoa(time.Now().Add(300*time.Millisecond).UnixMilli())+`}`, o...)
+	// A ban with an end lapses by itself, and they can join again.
+	c.req("PUT", sp+"/members/"+who.ID, `{"access":"banned","until":`+itoa(time.Now().Add(300*time.Millisecond).UnixMilli())+`}`, o...)
 	if s, _, _ := c.req("GET", sp+"/shared/x", "", bearer(bobTok)...); s != 403 {
 		t.Fatalf("timed ban: %d", s)
 	}
 	time.Sleep(400 * time.Millisecond)
-	if s, _, body := c.req("GET", sp+"/access", "", bearer(bobTok)...); s != 200 {
-		t.Fatalf("after lapse: %d %s", s, body)
+	if s, _, body := c.join(own.Space, link, bobTok); s != 200 || !strings.Contains(body, `"access":"all"`) {
+		t.Fatalf("join after lapse: %d %s", s, body)
 	}
 }

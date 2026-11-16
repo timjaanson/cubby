@@ -23,8 +23,8 @@ func (c *client) add(f *flags) error {
 	if err != nil {
 		return err
 	}
-	if strings.HasPrefix(p.area, "users/*") {
-		return usageCli("add writes your own data. Use users/me/ instead of users/*/")
+	if strings.HasPrefix(p.area, "by/*") {
+		return usageCli("add writes your own data. Use by/me/ instead of by/*/")
 	}
 	u := p.url() + "/series"
 	q, err := writeFlags(f)
@@ -115,7 +115,7 @@ func (c *client) series(f *flags) error {
 	if err != nil {
 		return err
 	}
-	if p.isPattern() || p.area == "users/*" {
+	if p.isPattern() || p.area == "by/*" {
 		return usageCli("series reads one key")
 	}
 	limit := 0

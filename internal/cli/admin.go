@@ -107,35 +107,13 @@ func cmdAdmin(args []string) int {
 				return err
 			}
 			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "SPACE\tREAD\tWRITE\tSIZE\tKEYS\tLAST ACTIVE")
+			fmt.Fprintln(tw, "SPACE\tANYONE\tINVITE\tSIZE\tKEYS\tLAST ACTIVE")
 			for _, r := range rows {
-				st := r.Settings
-				read, write := "granted", "granted"
-				if st.Read {
-					read = "anyone"
-				}
-				switch {
-				case st.WriteShared && st.WriteUsers && st.WriteTo:
-					write = "anyone"
-				case st.WriteShared || st.WriteUsers || st.WriteTo:
-					var parts []string
-					for _, a := range []struct {
-						n  string
-						on bool
-					}{{"shared", st.WriteShared}, {"users", st.WriteUsers}, {"to", st.WriteTo}} {
-						v := "granted"
-						if a.on {
-							v = "anyone"
-						}
-						parts = append(parts, a.n+"="+v)
-					}
-					write = strings.Join(parts, ",")
-				}
 				name := r.Name
 				if r.Pinned {
 					name += " (pinned)"
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n", name, read, write, humanBytes(r.Bytes), r.Keys, time.Unix(r.LastActive, 0).Format("2006-01-02 15:04"))
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n", name, r.Settings.Anyone, r.Settings.Invite, humanBytes(r.Bytes), r.Keys, time.Unix(r.LastActive, 0).Format("2006-01-02 15:04"))
 			}
 			return tw.Flush()
 		case "stats":
@@ -189,11 +167,11 @@ func cmdAdmin(args []string) int {
 			if err != nil {
 				return err
 			}
-			var out struct{ Owner string }
+			var out struct{ OwnerToken string }
 			if err := decode(resp, &out); err != nil {
 				return err
 			}
-			fmt.Println(out.Owner)
+			fmt.Println(out.OwnerToken)
 			return nil
 		case "cleanup":
 			resp, err := call("POST", "/cleanup")

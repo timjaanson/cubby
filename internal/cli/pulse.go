@@ -20,7 +20,7 @@ func (c *client) pulse(f *flags) error {
 	if err != nil {
 		return err
 	}
-	if p.isPattern() || p.area == "users/*" {
+	if p.isPattern() || p.area == "by/*" {
 		return usageCli("a pulse goes to one key; listen with a pattern using cubby pulses")
 	}
 	var value []byte
@@ -41,7 +41,6 @@ func (c *client) pulse(f *flags) error {
 
 type pulseItem struct {
 	Key   string          `json:"key"`
-	User  string          `json:"user,omitempty"`
 	From  string          `json:"from,omitempty"`
 	To    string          `json:"to,omitempty"`
 	By    string          `json:"by"`
@@ -109,9 +108,6 @@ func emitPulse(pl pulseItem, f *flags, area string) {
 		e.Stdin = bytes.NewReader(rawValue(pl.Value))
 		e.Stdout, e.Stderr = os.Stdout, os.Stderr
 		e.Env = append(os.Environ(), "KV_KEY="+pl.Key, "KV_BY="+pl.By, "KV_TIME="+strconv.FormatInt(pl.T, 10))
-		if pl.User != "" {
-			e.Env = append(e.Env, "KV_USER="+pl.User)
-		}
 		if pl.From != "" {
 			e.Env = append(e.Env, "KV_FROM="+pl.From, "KV_TO="+pl.To)
 		}
@@ -125,7 +121,7 @@ func emitPulse(pl pulseItem, f *flags, area string) {
 		fmt.Println(string(b))
 		return
 	}
-	if pt := partyOf(area, pl.User, pl.From, pl.To); pt != "" {
+	if pt := partyOf(area, pl.By, pl.From, pl.To); pt != "" {
 		fmt.Printf("%s\t%s\t%s\n", pt, pl.Key, compactJSON(pl.Value))
 	} else {
 		fmt.Printf("%s\t%s\n", pl.Key, compactJSON(pl.Value))

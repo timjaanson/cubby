@@ -3,8 +3,8 @@ package store
 import (
 	"crypto/subtle"
 	"database/sql"
-	"encoding/json"
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/timjaanson/cubby/internal/access"
@@ -20,8 +20,8 @@ const (
 	deadTokenKeep = 30 * 24 * time.Hour
 )
 
-// accessCache is a space's settings and grants, loaded once and dropped on
-// any change to them, so the check per request needs no query.
+// accessCache is a space's settings, grants and bans, loaded once and
+// dropped on any change to them, so the check per request needs no query.
 type accessCache struct {
 	settings access.Settings
 	grants   map[string][]access.Grant // visitor -> grants, ended ones included
@@ -54,22 +54,19 @@ func (s *Store) loadAccess(sp *spaceDB) (*accessCache, error) {
 		c.bans[v] = until
 	}
 	brows.Close()
-	rows, err := sp.db.Query(`SELECT id, visitor, owner, allow, source, until, coalesce(last_used_at, 0) FROM grants`)
+	rows, err := sp.db.Query(`SELECT id, visitor, access, source, coalesce(until, 0), coalesce(last_used_at, 0) FROM grants`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var g access.Grant
-		var visitor, allow string
-		var until sql.NullInt64
+		var visitor, level string
 		var lastUsed int64
-		if err := rows.Scan(&g.ID, &visitor, &g.Owner, &allow, &g.Source, &until, &lastUsed); err != nil {
+		if err := rows.Scan(&g.ID, &visitor, &level, &g.Source, &g.Until, &lastUsed); err != nil {
 			return nil, err
 		}
-		json.Unmarshal([]byte(allow), &g.Allow)
-		g.Scopes = access.ParseScopes(g.Allow)
-		g.Until = until.Int64
+		g.Level, _ = access.ParseLevel(level)
 		c.grants[visitor] = append(c.grants[visitor], g)
 		c.used[visitor] = max(c.used[visitor], lastUsed/1000)
 	}
@@ -104,19 +101,15 @@ func (s *Store) Rights(space, visitor string) (*access.Rights, error) {
 	}
 	now := time.Now()
 	for _, g := range c.grants[visitor] {
-		if !g.Live(now) {
-			continue
+		if g.Live(now) {
+			r.Member = max(r.Member, g.Level)
 		}
-		if g.Owner {
-			r.Owner = true
-		}
-		r.Grants = append(r.Grants, g)
 	}
-	if until, ok := c.bans[visitor]; ok && !r.Owner && (until == 0 || until > now.UnixMilli()) {
+	if until, ok := c.bans[visitor]; ok && r.Member != access.Owner && (until == 0 || until > now.UnixMilli()) {
 		r.Banned, r.BannedUntil = true, until
 		return r, nil
 	}
-	if len(r.Grants) > 0 {
+	if r.Member > access.None {
 		s.markUsed(sp, c, visitor, now)
 	}
 	return r, nil
@@ -166,40 +159,41 @@ func (s *Store) withSpace(space string, fn func(tx *sql.Tx) error) error {
 	return nil
 }
 
-// TokenSpec is a new access token. nil pointers mean no limit.
+// TokenSpec is a new invite. nil pointers mean no limit.
 type TokenSpec struct {
 	By       string // the minting visitor
 	Label    string
-	Allow    []string
+	Access   access.Level
 	Uses     *int64
 	Until    *int64 // ms
 	GrantFor *int64 // ms
 }
 
 type TokenInfo struct {
-	ID             string   `json:"id"`
-	Label          string   `json:"label"`
-	Allow          []string `json:"allow"`
-	UsesLeft       *int64   `json:"usesLeft"`
-	Until          *int64   `json:"until"`
-	GrantFor       *int64   `json:"grantFor"`
-	State          string   `json:"state"`
-	Grants         int      `json:"grants"`
-	CreatedAt      int64    `json:"createdAt"`
-	LastRedeemedAt *int64   `json:"lastRedeemedAt"`
-	By             *string  `json:"by"`
+	ID             string       `json:"id"`
+	Label          string       `json:"label"`
+	Access         access.Level `json:"access"`
+	UsesLeft       *int64       `json:"usesLeft"`
+	Until          *int64       `json:"until"`
+	GrantFor       *int64       `json:"grantFor"`
+	State          string       `json:"state"`
+	Members        int          `json:"members"`
+	CreatedAt      int64        `json:"createdAt"`
+	LastRedeemedAt *int64       `json:"lastRedeemedAt"`
+	By             *string      `json:"by"`
 }
 
-type GrantInfo struct {
-	ID         string   `json:"id"`
-	User       string   `json:"user"`
-	Owner      bool     `json:"owner"`
-	Allow      []string `json:"allow"`
-	Source     string   `json:"source"`
-	InvitedBy  *string  `json:"invitedBy"`
-	Until      *int64   `json:"until"`
-	CreatedAt  int64    `json:"createdAt"`
-	LastUsedAt *int64   `json:"lastUsedAt"`
+// Member is one visitor's place in a space: their level from grants, or a
+// ban. Until, Label, InvitedBy and LastUsedAt are for owners. Label and
+// InvitedBy come from the invite that gave the level.
+type Member struct {
+	ID         string       `json:"id"`
+	Access     access.Level `json:"access"`
+	Since      int64        `json:"since"`
+	Until      *int64       `json:"until"`
+	Label      *string      `json:"label"`
+	InvitedBy  *string      `json:"invitedBy"`
+	LastUsedAt *int64       `json:"lastUsedAt"`
 }
 
 func nullable(n sql.NullInt64) *int64 {
@@ -222,18 +216,18 @@ func tokenState(usesLeft, until, revoked sql.NullInt64, now int64) string {
 	return "active"
 }
 
-const tokenCols = `t.id, t.label, t.allow, t.uses_left, t.until, t.grant_for, t.created_at, t.last_redeemed_at,
+const tokenCols = `t.id, t.label, t.access, t.uses_left, t.until, t.grant_for, t.created_at, t.last_redeemed_at,
 	(SELECT count(*) FROM grants g WHERE g.source = t.id), t.minted_by, t.revoked_at`
 
 func scanToken(sc interface{ Scan(...any) error }, now int64) (TokenInfo, error) {
 	var t TokenInfo
-	var allow string
+	var level string
 	var uses, until, grantFor, last, revoked sql.NullInt64
 	var by sql.NullString
-	if err := sc.Scan(&t.ID, &t.Label, &allow, &uses, &until, &grantFor, &t.CreatedAt, &last, &t.Grants, &by, &revoked); err != nil {
+	if err := sc.Scan(&t.ID, &t.Label, &level, &uses, &until, &grantFor, &t.CreatedAt, &last, &t.Members, &by, &revoked); err != nil {
 		return t, err
 	}
-	json.Unmarshal([]byte(allow), &t.Allow)
+	t.Access, _ = access.ParseLevel(level)
 	t.UsesLeft, t.Until, t.GrantFor, t.LastRedeemedAt = nullable(uses), nullable(until), nullable(grantFor), nullable(last)
 	if by.Valid {
 		t.By = &by.String
@@ -249,12 +243,11 @@ func (s *Store) CreateToken(space string, spec TokenSpec) (info TokenInfo, token
 		var n int
 		tx.QueryRow(`SELECT count(*) FROM tokens`).Scan(&n)
 		if n >= MaxTokens {
-			return apierr.Quota("space_quota_exceeded", "This space has as many access tokens as it may hold. Revoke old ones first.", MaxTokens, int64(n))
+			return apierr.Quota("space_quota_exceeded", "This space has as many invites as it may hold. Revoke old ones first.", MaxTokens, int64(n))
 		}
-		allow, _ := json.Marshal(spec.Allow)
 		id := names.NewTokenID()
-		if _, err := tx.Exec(`INSERT INTO tokens (id, hash, label, allow, uses_left, until, grant_for, created_at, minted_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, names.HashSecret(token), spec.Label, string(allow), spec.Uses, spec.Until, spec.GrantFor, now, spec.By); err != nil {
+		if _, err := tx.Exec(`INSERT INTO tokens (id, hash, label, access, uses_left, until, grant_for, created_at, minted_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, names.HashSecret(token), spec.Label, spec.Access.String(), spec.Uses, spec.Until, spec.GrantFor, now, spec.By); err != nil {
 			return err
 		}
 		info, err = scanToken(tx.QueryRow(`SELECT `+tokenCols+` FROM tokens t WHERE id = ?`, id), now)
@@ -298,7 +291,7 @@ type TokenChange struct {
 	Until    *int64 // nil: no end
 }
 
-var tokenNotFound = &apierr.Error{Status: 404, Code: "not_found", Message: "No such access token in this space."}
+var tokenNotFound = &apierr.Error{Status: 404, Code: "not_found", Message: "No such invite in this space."}
 
 // UpdateToken changes a token; with by, only one that visitor minted.
 func (s *Store) UpdateToken(space, id, by string, ch TokenChange) (info TokenInfo, err error) {
@@ -328,7 +321,7 @@ func (s *Store) UpdateToken(space, id, by string, ch TokenChange) (info TokenInf
 	return info, err
 }
 
-// DeleteToken revokes a token and every grant redeemed from it. With by,
+// DeleteToken revokes an invite and every grant redeemed from it. With by,
 // only a token that visitor minted.
 func (s *Store) DeleteToken(space, id, by string) error {
 	return s.withSpace(space, func(tx *sql.Tx) error {
@@ -344,52 +337,36 @@ func (s *Store) DeleteToken(space, id, by string) error {
 	})
 }
 
-const grantCols = `id, visitor, owner, allow, source, until, created_at, last_used_at,
-	(SELECT t.minted_by FROM tokens t WHERE t.id = grants.source)`
-
-func scanGrant(sc interface{ Scan(...any) error }) (GrantInfo, error) {
-	var g GrantInfo
-	var allow string
-	var until, last sql.NullInt64
-	var by sql.NullString
-	if err := sc.Scan(&g.ID, &g.User, &g.Owner, &allow, &g.Source, &until, &g.CreatedAt, &last, &by); err != nil {
-		return g, err
-	}
-	if by.Valid {
-		g.InvitedBy = &by.String
-	}
-	json.Unmarshal([]byte(allow), &g.Allow)
-	if g.Allow == nil {
-		g.Allow = []string{}
-	}
-	g.Until, g.LastUsedAt = nullable(until), nullable(last)
-	return g, nil
+func (s *Store) VisitorExists(id string) bool {
+	var one int
+	return s.srv.QueryRow(`SELECT 1 FROM visitors WHERE id = ?`, id).Scan(&one) == nil
 }
 
-// Redeem turns an access or owner token into a grant for visitor. Every
+func countGrants(tx *sql.Tx) error {
+	var n int64
+	tx.QueryRow(`SELECT count(*) FROM grants`).Scan(&n)
+	if n >= MaxGrants {
+		return apierr.Quota("space_quota_exceeded", "This space has as many members as it may hold.", MaxGrants, n)
+	}
+	return nil
+}
+
+// Joined is what redeeming an invite gave: the visitor's level in the space
+// now, and when the grant from this invite ends.
+type Joined struct {
+	Access access.Level
+	Until  *int64
+}
+
+// Redeem turns an invite or the owner token into a grant for visitor. Every
 // failure is InviteInvalid, so the answer never tells which part was wrong.
-// Redeeming again returns the existing grant and uses nothing.
-func (s *Store) Redeem(space, visitor, token string) (g GrantInfo, err error) {
+// Redeeming again uses nothing.
+func (s *Store) Redeem(space, visitor, token string) (j Joined, err error) {
 	now := NowMs()
 	hash := names.HashSecret(token)
 	err = s.withSpace(space, func(tx *sql.Tx) error {
-		existing := func(source string) bool {
-			got, err := scanGrant(tx.QueryRow(`SELECT `+grantCols+` FROM grants WHERE visitor = ? AND source = ?`, visitor, source))
-			if err != nil {
-				return false
-			}
-			g = got
-			return true
-		}
-		count := func() error {
-			var n int64
-			tx.QueryRow(`SELECT count(*) FROM grants`).Scan(&n)
-			if n >= MaxGrants {
-				return apierr.Quota("space_quota_exceeded", "This space has as many grants as it may hold.", MaxGrants, n)
-			}
-			return nil
-		}
-
+		source, level := "", access.None
+		var gUntil *int64
 		if names.OwnerTokenRe.MatchString(token) {
 			m, err := readMeta(tx)
 			if err != nil {
@@ -398,84 +375,84 @@ func (s *Store) Redeem(space, visitor, token string) (g GrantInfo, err error) {
 			if m.ownerHash == "" || subtle.ConstantTimeCompare([]byte(hash), []byte(m.ownerHash)) != 1 {
 				return apierr.InviteInvalid
 			}
-			if existing("owner-token") {
-				return nil
+			source, level = "owner-token", access.Owner
+		} else {
+			var lv string
+			var uses, until, grantFor, revoked sql.NullInt64
+			var by sql.NullString
+			err := tx.QueryRow(`SELECT id, access, uses_left, until, grant_for, revoked_at, minted_by FROM tokens WHERE hash = ?`, hash).
+				Scan(&source, &lv, &uses, &until, &grantFor, &revoked, &by)
+			if errors.Is(err, sql.ErrNoRows) {
+				return apierr.InviteInvalid
 			}
-			if err := count(); err != nil {
-				return err
-			}
-			id := names.NewGrantID()
-			if _, err := tx.Exec(`INSERT INTO grants (id, visitor, owner, allow, source, created_at) VALUES (?, ?, 1, '[]', 'owner-token', ?)`, id, visitor, now); err != nil {
-				return err
-			}
-			g, err = scanGrant(tx.QueryRow(`SELECT `+grantCols+` FROM grants WHERE id = ?`, id))
-			return err
-		}
-
-		var tid, allow string
-		var uses, until, grantFor, revoked sql.NullInt64
-		var by sql.NullString
-		err := tx.QueryRow(`SELECT id, allow, uses_left, until, grant_for, revoked_at, minted_by FROM tokens WHERE hash = ?`, hash).
-			Scan(&tid, &allow, &uses, &until, &grantFor, &revoked, &by)
-		if errors.Is(err, sql.ErrNoRows) {
-			return apierr.InviteInvalid
-		}
-		if err != nil {
-			return err
-		}
-		if existing(tid) {
-			return nil
-		}
-		if tokenState(uses, until, revoked, now) != "active" {
-			return apierr.InviteInvalid
-		}
-		// A token works only while its minter could still mint it.
-		if by.Valid {
-			r, err := rightsTx(tx, by.String, now)
 			if err != nil {
 				return err
 			}
-			var list []string
-			json.Unmarshal([]byte(allow), &list)
-			if r.Banned || !r.CanInvite() || !r.CanGive(list) {
-				return apierr.InviteInvalid
+			level, _ = access.ParseLevel(lv)
+			var have int
+			if tx.QueryRow(`SELECT 1 FROM grants WHERE visitor = ? AND source = ?`, visitor, source).Scan(&have) == nil {
+				source = "" // already redeemed: nothing to add
+			} else {
+				if tokenState(uses, until, revoked, now) != "active" {
+					return apierr.InviteInvalid
+				}
+				// An invite works only while its minter could still mint it.
+				if by.Valid {
+					r, err := rightsTx(tx, by.String, now)
+					if err != nil {
+						return err
+					}
+					if !r.CanInvite() || !r.CanGive(level) {
+						return apierr.InviteInvalid
+					}
+				}
+				if grantFor.Valid {
+					u := now + grantFor.Int64
+					gUntil = &u
+				}
+				if uses.Valid {
+					left := uses.Int64 - 1
+					var ended any
+					if left <= 0 {
+						ended = now
+					}
+					if _, err := tx.Exec(`UPDATE tokens SET uses_left = ?, ended_at = ? WHERE id = ?`, left, ended, source); err != nil {
+						return err
+					}
+				}
+				if _, err := tx.Exec(`UPDATE tokens SET last_redeemed_at = ? WHERE id = ?`, now, source); err != nil {
+					return err
+				}
 			}
 		}
-		if err := count(); err != nil {
-			return err
-		}
-		var gUntil any
-		if grantFor.Valid {
-			gUntil = now + grantFor.Int64
-		}
-		id := names.NewGrantID()
-		if _, err := tx.Exec(`INSERT INTO grants (id, visitor, owner, allow, source, until, created_at) VALUES (?, ?, 0, ?, ?, ?, ?)`,
-			id, visitor, allow, tid, gUntil, now); err != nil {
-			return err
-		}
-		if uses.Valid {
-			left := uses.Int64 - 1
-			var ended any
-			if left <= 0 {
-				ended = now
-			}
-			if _, err := tx.Exec(`UPDATE tokens SET uses_left = ?, ended_at = ? WHERE id = ?`, left, ended, tid); err != nil {
-				return err
+		if source != "" {
+			var have int
+			if tx.QueryRow(`SELECT 1 FROM grants WHERE visitor = ? AND source = ?`, visitor, source).Scan(&have) != nil {
+				if err := countGrants(tx); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(`INSERT INTO grants (id, visitor, access, source, until, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+					names.NewGrantID(), visitor, level.String(), source, gUntil, now); err != nil {
+					return err
+				}
 			}
 		}
-		if _, err := tx.Exec(`UPDATE tokens SET last_redeemed_at = ? WHERE id = ?`, now, tid); err != nil {
+		r, err := rightsTx(tx, visitor, now)
+		if err != nil {
 			return err
 		}
-		g, err = scanGrant(tx.QueryRow(`SELECT `+grantCols+` FROM grants WHERE id = ?`, id))
-		return err
+		j = Joined{Access: r.Member, Until: gUntil}
+		return nil
 	})
 	if err == nil {
 		s.noteVisitorSpace(visitor, space)
 	}
-	return g, err
+	return j, err
 }
 
-func (s *Store) ListGrants(space, user string) ([]GrantInfo, error) {
+// Members lists a space's members, highest level first, then by when they
+// joined. With bans, banned visitors are included as level banned.
+func (s *Store) Members(space string, bans bool) ([]Member, error) {
 	sp, err := s.Acquire(space)
 	if err != nil {
 		return nil, err
@@ -484,88 +461,138 @@ func (s *Store) ListGrants(space, user string) ([]GrantInfo, error) {
 		return nil, apierr.NoSpace
 	}
 	defer s.Release(sp)
-	q, args := `SELECT `+grantCols+` FROM grants ORDER BY created_at`, []any{}
-	if user != "" {
-		q, args = `SELECT `+grantCols+` FROM grants WHERE visitor = ? ORDER BY created_at`, []any{user}
-	}
-	rows, err := sp.db.Query(q, args...)
+	now := NowMs()
+	rows, err := sp.db.Query(`SELECT g.visitor, g.access, g.until, g.created_at, g.last_used_at, t.minted_by, t.label
+		FROM grants g LEFT JOIN tokens t ON t.id = g.source
+		WHERE g.until IS NULL OR g.until > ? ORDER BY g.created_at`, now)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []GrantInfo{}
+	byID := map[string]*Member{}
+	var order []string
 	for rows.Next() {
-		g, err := scanGrant(rows)
+		var id, level string
+		var until, last sql.NullInt64
+		var created int64
+		var inviter, label sql.NullString
+		if err := rows.Scan(&id, &level, &until, &created, &last, &inviter, &label); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		l, _ := access.ParseLevel(level)
+		from := func(m *Member) {
+			m.InvitedBy, m.Label = nil, nil
+			if inviter.Valid {
+				m.InvitedBy = &inviter.String
+			}
+			if label.Valid && label.String != "" {
+				m.Label = &label.String
+			}
+		}
+		m := byID[id]
+		if m == nil {
+			m = &Member{ID: id, Access: l, Since: created, Until: nullable(until)}
+			from(m)
+			byID[id] = m
+			order = append(order, id)
+		} else {
+			if l > m.Access {
+				m.Access = l
+				from(m)
+			}
+			// The membership lasts as long as its longest grant.
+			if m.Until != nil && (!until.Valid || until.Int64 > *m.Until) {
+				m.Until = nullable(until)
+			}
+		}
+		if last.Valid && (m.LastUsedAt == nil || last.Int64 > *m.LastUsedAt) {
+			m.LastUsedAt = nullable(last)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := []Member{}
+	if bans {
+		brows, err := sp.db.Query(`SELECT visitor, until, created_at FROM bans WHERE until IS NULL OR until > ? ORDER BY created_at`, now)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, g)
-	}
-	return out, rows.Err()
-}
-
-// GrantsOf is a visitor's grants in a space, ended ones left out.
-func (s *Store) GrantsOf(space, visitor string) ([]GrantInfo, error) {
-	all, err := s.ListGrants(space, visitor)
-	if err != nil {
-		return nil, err
-	}
-	now := NowMs()
-	out := all[:0]
-	for _, g := range all {
-		if g.Until == nil || *g.Until > now {
-			out = append(out, g)
+		for brows.Next() {
+			var m Member
+			var until sql.NullInt64
+			if err := brows.Scan(&m.ID, &until, &m.Since); err != nil {
+				brows.Close()
+				return nil, err
+			}
+			m.Access, m.Until = access.Banned, nullable(until)
+			out = append(out, m)
 		}
+		brows.Close()
 	}
+	for _, id := range order {
+		out = append(out, *byID[id])
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Access > out[j].Access })
 	return out, nil
 }
 
-func (s *Store) VisitorExists(id string) bool {
-	var one int
-	return s.srv.QueryRow(`SELECT 1 FROM visitors WHERE id = ?`, id).Scan(&one) == nil
-}
+var errNoVisitor = &apierr.Error{Status: 404, Code: "no_visitor", Message: "No visitor on this server has that ID."}
 
-// AddGrant gives a visitor rights directly, with no token.
-func (s *Store) AddGrant(space, user string, owner bool, allow []string, until *int64) (g GrantInfo, err error) {
+// SetMember gives a visitor exactly one level in a space, replacing every
+// grant they had. Banned removes their grants and keeps them out until the
+// ban ends or an owner sets another level.
+func (s *Store) SetMember(space, user, by string, level access.Level, until *int64) (m Member, err error) {
 	if !s.VisitorExists(user) {
-		return g, &apierr.Error{Status: 404, Code: "not_found", Message: "No such visitor on this server."}
+		return m, errNoVisitor
 	}
 	now := NowMs()
 	err = s.withSpace(space, func(tx *sql.Tx) error {
-		var n int64
-		tx.QueryRow(`SELECT count(*) FROM grants`).Scan(&n)
-		if n >= MaxGrants {
-			return apierr.Quota("space_quota_exceeded", "This space has as many grants as it may hold.", MaxGrants, n)
-		}
-		if owner {
-			allow = []string{}
-		}
-		a, _ := json.Marshal(allow)
-		id := names.NewGrantID()
-		if _, err := tx.Exec(`INSERT INTO grants (id, visitor, owner, allow, source, until, created_at) VALUES (?, ?, ?, ?, 'direct', ?, ?)`,
-			id, user, owner, string(a), until, now); err != nil {
+		if _, err := tx.Exec(`DELETE FROM grants WHERE visitor = ?`, user); err != nil {
 			return err
 		}
-		g, err = scanGrant(tx.QueryRow(`SELECT `+grantCols+` FROM grants WHERE id = ?`, id))
-		return err
+		if _, err := tx.Exec(`DELETE FROM bans WHERE visitor = ?`, user); err != nil {
+			return err
+		}
+		if level == access.Banned {
+			if _, err := tx.Exec(`INSERT INTO bans (visitor, until, by, created_at) VALUES (?, ?, ?, ?)`, user, until, by, now); err != nil {
+				return err
+			}
+		} else {
+			if err := countGrants(tx); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`INSERT INTO grants (id, visitor, access, source, until, created_at) VALUES (?, ?, ?, 'direct', ?, ?)`,
+				names.NewGrantID(), user, level.String(), until, now); err != nil {
+				return err
+			}
+		}
+		m = Member{ID: user, Access: level, Since: now, Until: until}
+		return revokeUngivable(tx)
 	})
-	if err == nil {
+	if err == nil && level != access.Banned {
 		s.noteVisitorSpace(user, space)
 	}
-	return g, err
+	return m, err
 }
 
-func (s *Store) DeleteGrant(space, id string) error {
-	return s.withSpace(space, func(tx *sql.Tx) error {
-		var visitor string
-		if tx.QueryRow(`SELECT visitor FROM grants WHERE id = ?`, id).Scan(&visitor) != nil {
-			return &apierr.Error{Status: 404, Code: "not_found", Message: "No such grant in this space."}
-		}
-		if _, err := tx.Exec(`DELETE FROM grants WHERE id = ?`, id); err != nil {
-			return err
+// RemoveMember removes a visitor's grants and any ban, so they are a
+// stranger again. It reports whether there was anything to remove.
+func (s *Store) RemoveMember(space, user string) (removed bool, err error) {
+	err = s.withSpace(space, func(tx *sql.Tx) error {
+		for _, table := range []string{"grants", "bans"} {
+			res, err := tx.Exec(`DELETE FROM `+table+` WHERE visitor = ?`, user)
+			if err != nil {
+				return err
+			}
+			if n, _ := res.RowsAffected(); n > 0 {
+				removed = true
+			}
 		}
 		return revokeUngivable(tx)
 	})
+	return removed, err
 }
 
 // rightsTx is a visitor's live rights, read inside a transaction.
@@ -575,27 +602,24 @@ func rightsTx(tx *sql.Tx, visitor string, now int64) (*access.Rights, error) {
 		return nil, err
 	}
 	r := &access.Rights{Settings: m.settings}
-	rows, err := tx.Query(`SELECT id, owner, allow, source, coalesce(until, 0) FROM grants WHERE visitor = ? AND (until IS NULL OR until > ?)`, visitor, now)
+	rows, err := tx.Query(`SELECT access FROM grants WHERE visitor = ? AND (until IS NULL OR until > ?)`, visitor, now)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var g access.Grant
-		var allow string
-		if err := rows.Scan(&g.ID, &g.Owner, &allow, &g.Source, &g.Until); err != nil {
+		var level string
+		if err := rows.Scan(&level); err != nil {
 			return nil, err
 		}
-		json.Unmarshal([]byte(allow), &g.Allow)
-		g.Scopes = access.ParseScopes(g.Allow)
-		r.Owner = r.Owner || g.Owner
-		r.Grants = append(r.Grants, g)
+		l, _ := access.ParseLevel(level)
+		r.Member = max(r.Member, l)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	rows.Close()
-	if !r.Owner {
+	if r.Member != access.Owner {
 		var until int64
 		err := tx.QueryRow(`SELECT coalesce(until, 0) FROM bans WHERE visitor = ? AND (until IS NULL OR until > ?)`, visitor, now).Scan(&until)
 		if err == nil {
@@ -607,21 +631,21 @@ func rightsTx(tx *sql.Tx, visitor string, now int64) (*access.Rights, error) {
 	return r, nil
 }
 
-// revokeUngivable ends the open tokens whose minter could no longer mint
-// them: revoked, or the space stopped letting members invite. Grants already
-// redeemed from them stay.
+// revokeUngivable ends the open invites whose minter could no longer mint
+// them: their level dropped, or the space raised its invite level. Grants
+// already redeemed from them stay.
 func revokeUngivable(tx *sql.Tx) error {
 	now := NowMs()
-	rows, err := tx.Query(`SELECT id, minted_by, allow FROM tokens WHERE minted_by IS NOT NULL AND revoked_at IS NULL
+	rows, err := tx.Query(`SELECT id, minted_by, access FROM tokens WHERE minted_by IS NOT NULL AND revoked_at IS NULL
 		AND (uses_left IS NULL OR uses_left > 0) AND (until IS NULL OR until > ?)`, now)
 	if err != nil {
 		return err
 	}
-	type tok struct{ id, by, allow string }
+	type tok struct{ id, by, level string }
 	var open []tok
 	for rows.Next() {
 		var t tok
-		if err := rows.Scan(&t.id, &t.by, &t.allow); err != nil {
+		if err := rows.Scan(&t.id, &t.by, &t.level); err != nil {
 			rows.Close()
 			return err
 		}
@@ -633,9 +657,8 @@ func revokeUngivable(tx *sql.Tx) error {
 		if err != nil {
 			return err
 		}
-		var list []string
-		json.Unmarshal([]byte(t.allow), &list)
-		if r.CanInvite() && r.CanGive(list) {
+		l, _ := access.ParseLevel(t.level)
+		if r.CanInvite() && r.CanGive(l) {
 			continue
 		}
 		if _, err := tx.Exec(`UPDATE tokens SET revoked_at = ? WHERE id = ?`, now, t.id); err != nil {
@@ -643,20 +666,6 @@ func revokeUngivable(tx *sql.Tx) error {
 		}
 	}
 	return nil
-}
-
-// DeleteUserGrants removes everything a visitor holds in a space.
-func (s *Store) DeleteUserGrants(space, user string) (int64, error) {
-	var n int64
-	err := s.withSpace(space, func(tx *sql.Tx) error {
-		res, err := tx.Exec(`DELETE FROM grants WHERE visitor = ?`, user)
-		if err != nil {
-			return err
-		}
-		n, _ = res.RowsAffected()
-		return revokeUngivable(tx)
-	})
-	return n, err
 }
 
 func (s *Store) SetSettings(space string, st access.Settings) error {
@@ -679,10 +688,10 @@ func (s *Store) SetSettings(space string, st access.Settings) error {
 func (s *Store) Settings(space string) (access.Settings, error) {
 	r, err := s.Rights(space, "")
 	if err != nil {
-		return access.Private, err
+		return access.Default, err
 	}
 	if r == nil {
-		return access.Private, apierr.NoSpace
+		return access.Default, apierr.NoSpace
 	}
 	return r.Settings, nil
 }

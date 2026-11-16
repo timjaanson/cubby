@@ -4,6 +4,7 @@
 package apierr
 
 import (
+	"fmt"
 	"math"
 	"time"
 )
@@ -31,22 +32,23 @@ var (
 	// InviteInvalid is every failed join, whatever was wrong.
 	InviteInvalid = &Error{Status: 404, Code: "invite_invalid",
 		Message: "This invite is unknown, expired, used up or revoked, or the space doesn't exist. Ask the space's owner for a new one."}
-	NoAccess = &Error{Status: 403, Code: "no_access",
-		Message: "This visitor may not write here. The space's owner can invite them with more rights, or change who may write."}
 	OwnerOnly = &Error{Status: 403, Code: "owner_only", Message: "Only an owner of this space can do this."}
 )
 
-// NotYours is a write under another visitor's users/{id}/.
+// NoAccess is a write that takes a higher level than the visitor has. need
+// is the level it takes: post for by/ and to/, all for shared/.
+func NoAccess(need fmt.Stringer) *Error {
+	return &Error{Status: 403, Code: "no_access", Extra: map[string]any{"need": need.String()},
+		Message: fmt.Sprintf("Writing here takes access %q or higher. An owner can give it, with an invite or by setting this visitor's level.", need.String())}
+}
+
+// NotYours is a write under another visitor's by/{id}/.
 func NotYours(id string) *Error {
-	return &Error{Status: 403, Code: "not_yours", Message: "Only that visitor can write under users/" + id + "/."}
+	return &Error{Status: 403, Code: "not_yours", Message: "Only that visitor can write under by/" + id + "/."}
 }
 
 func InvalidSettings(msg string) *Error {
 	return &Error{Status: 400, Code: "invalid_settings", Message: msg}
-}
-
-func InvalidScope(msg string) *Error {
-	return &Error{Status: 400, Code: "invalid_scope", Message: msg}
 }
 
 // InvalidSpace is a space name that breaks the naming rule.

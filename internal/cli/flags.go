@@ -10,7 +10,7 @@ import (
 // "cubby set path value --create" works as well as the other order.
 type flags struct {
 	vals  map[string]string
-	multi map[string][]string // every value of a flag given more than once, like --allow
+	multi map[string][]string // every value of a flag given more than once, like --label
 	set   map[string]bool
 	args  []string
 }

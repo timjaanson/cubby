@@ -35,7 +35,7 @@ func (c *Config) TOML(def *Config, dataDirNote string) string {
 	w.set("space_idle_ttl", dur(c.Retention.SpaceIdleTTL), dur(def.Retention.SpaceIdleTTL),
 		"Delete spaces nobody read or wrote for this long. Pinned spaces are kept.")
 	w.set("visitor_idle_ttl", dur(c.Retention.VisitorIdleTTL), dur(def.Retention.VisitorIdleTTL),
-		"Forget visitors idle this long. Their users/ keys become tombstones.")
+		"Forget visitors idle this long. Their by/ keys become tombstones.")
 	w.set("empty_visitor_idle_ttl", dur(c.Retention.EmptyVisitorIdleTTL), dur(def.Retention.EmptyVisitorIdleTTL),
 		"Forget visitors who never stored anything after this long.")
 	w.set("tombstone_ttl", dur(c.Retention.TombstoneTTL), dur(def.Retention.TombstoneTTL),

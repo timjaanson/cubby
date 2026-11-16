@@ -1,6 +1,19 @@
-// Package access holds the rules for who may do what in a space: settings
-// and their public shorthand, scopes and their presets, and the decision for
-// one request. It knows nothing about HTTP or storage.
+// Package access holds the rules for who may do what in a space: one level
+// per visitor, the space's settings, and the decision for one request. It
+// knows nothing about HTTP or storage.
+//
+// Keys are common (shared/) or owned by whoever wrote them (by/{id}/ and the
+// to/ slots). Levels, lowest first:
+//
+//	banned  nothing, whatever else they hold
+//	none    nothing: a stranger in a private space
+//	read    read everything the space shows, and your own inbox
+//	post    also write your own keys: by/me/ and to/
+//	all     also write common keys: shared/
+//	owner   also delete others' by/ keys, change settings, manage members
+//
+// A visitor's level is the highest of their live grants, or the space's
+// anyone level if that is higher. A ban overrides both.
 package access
 
 import (
@@ -8,124 +21,103 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/timjaanson/cubby/internal/names"
 )
 
-// Settings say what a visitor may do without a grant. true means anyone.
-type Settings struct {
-	Read        bool
-	WriteShared bool
-	WriteUsers  bool
-	WriteTo     bool // sending under to/
-	// InviteOwners: only owners mint access tokens. The default, false, lets
-	// every member invite others with rights they hold themselves.
-	InviteOwners bool
-}
+// Level is how far a visitor may go in a space.
+type Level int
 
-// The public shorthand. Private is the default.
-var presets = map[string]Settings{
-	"none":    {},
-	"read":    {Read: true},
-	"respond": {Read: true, WriteUsers: true, WriteTo: true},
-	"all":     {Read: true, WriteShared: true, WriteUsers: true, WriteTo: true},
-}
+// None is the zero value, so an unset level grants nothing.
+const (
+	Banned Level = iota - 1
+	None
+	Read
+	Post
+	All
+	Owner
+)
 
-// Private is the default for new spaces.
-var Private = Settings{}
+var levelNames = [...]string{"banned", "none", "read", "post", "all", "owner"}
 
-// Public names the settings, or "custom".
-func (s Settings) Public() string {
-	s.InviteOwners = false // not part of the shorthand
-	for _, n := range []string{"none", "read", "respond", "all"} {
-		if presets[n] == s {
-			return n
-		}
+func (l Level) String() string {
+	if l < Banned || l > Owner {
+		return "none"
 	}
-	return "custom"
+	return levelNames[l+1]
 }
 
-// Valid: an unreadable space can't take writes from anyone, since an open
-// write would tell a stranger the space exists.
-func (s Settings) Valid() bool {
-	return s.Read || !(s.WriteShared || s.WriteUsers || s.WriteTo)
-}
+func (l Level) MarshalJSON() ([]byte, error) { return json.Marshal(l.String()) }
 
-// WriteAnyone reports the write setting of one area: "shared", "users" or "to".
-func (s Settings) WriteAnyone(area string) bool {
-	switch area {
-	case "shared":
-		return s.WriteShared
-	case "users":
-		return s.WriteUsers
-	case "to":
-		return s.WriteTo
-	}
-	return false
-}
-
-func word(b bool) string {
-	if b {
-		return "anyone"
-	}
-	return "granted"
-}
-
-type settingsJSON struct {
-	Public string            `json:"public"`
-	Read   string            `json:"read"`
-	Write  map[string]string `json:"write"`
-	Invite string            `json:"invite"`
-}
-
-// Invite names who may mint access tokens: "members" or "owners".
-func (s Settings) Invite() string {
-	if s.InviteOwners {
-		return "owners"
-	}
-	return "members"
-}
-
-func (s Settings) MarshalJSON() ([]byte, error) {
-	return json.Marshal(settingsJSON{Public: s.Public(), Read: word(s.Read),
-		Write:  map[string]string{"shared": word(s.WriteShared), "users": word(s.WriteUsers), "to": word(s.WriteTo)},
-		Invite: s.Invite()})
-}
-
-// UnmarshalJSON reads MarshalJSON's form, so clients such as admin can decode it.
-func (s *Settings) UnmarshalJSON(b []byte) error {
-	var j settingsJSON
-	if err := json.Unmarshal(b, &j); err != nil {
+func (l *Level) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
 		return err
 	}
-	*s = Settings{Read: j.Read == "anyone", WriteShared: j.Write["shared"] == "anyone",
-		WriteUsers: j.Write["users"] == "anyone", WriteTo: j.Write["to"] == "anyone", InviteOwners: j.Invite == "owners"}
+	v, ok := ParseLevel(s)
+	if !ok {
+		return fmt.Errorf("unknown level %q", s)
+	}
+	*l = v
 	return nil
 }
 
-// Encode is the compact form stored in a space file.
-func (s Settings) Encode() string {
-	b := func(v bool) byte {
-		if v {
-			return 'a'
+// ParseLevel reads a level's name.
+func ParseLevel(s string) (Level, bool) {
+	for i, n := range levelNames {
+		if n == s {
+			return Level(i - 1), true
 		}
-		return 'g'
 	}
-	inv := byte('m')
-	if s.InviteOwners {
-		inv = 'o'
-	}
-	return string([]byte{b(s.Read), b(s.WriteShared), b(s.WriteUsers), b(s.WriteTo), inv})
+	return None, false
 }
 
-// Decode reads Encode's form. Anything unreadable is private. The four-letter
-// form from before the invite setting means members may invite.
-func Decode(v string) Settings {
-	if len(v) != 4 && len(v) != 5 {
-		return Private
+// LevelError is a level that isn't allowed where it was given.
+type LevelError string
+
+func (e LevelError) Error() string { return string(e) }
+
+// ParseIn reads a JSON level and checks it is one of allowed.
+func ParseIn(raw json.RawMessage, field string, allowed ...Level) (Level, error) {
+	var s string
+	json.Unmarshal(raw, &s)
+	l, ok := ParseLevel(s)
+	for _, a := range allowed {
+		if ok && a == l {
+			return l, nil
+		}
 	}
-	return Settings{Read: v[0] == 'a', WriteShared: v[1] == 'a', WriteUsers: v[2] == 'a', WriteTo: v[3] == 'a',
-		InviteOwners: len(v) == 5 && v[4] == 'o'}
+	names := make([]string, len(allowed))
+	for i, a := range allowed {
+		names[i] = fmt.Sprintf("%q", a.String())
+	}
+	return None, LevelError(fmt.Sprintf("%s is %s or %s.", field, strings.Join(names[:len(names)-1], ", "), names[len(names)-1]))
+}
+
+// Settings are a space's two access settings.
+type Settings struct {
+	// Anyone is the level of every visitor without a higher grant:
+	// none (private, the default), read, post or all.
+	Anyone Level `json:"anyone"`
+	// Invite is the lowest member level that may mint invites: read,
+	// post (the default), all or owner. The anyone level doesn't count.
+	Invite Level `json:"invite"`
+}
+
+// Default is what a new space gets unless its creator says otherwise.
+var Default = Settings{Anyone: None, Invite: Post}
+
+// Encode is the compact form stored in a space file: "anyone invite".
+func (s Settings) Encode() string { return s.Anyone.String() + " " + s.Invite.String() }
+
+// Decode reads Encode's form. Anything unreadable is the default, which is
+// private.
+func Decode(v string) Settings {
+	a, i, ok := strings.Cut(v, " ")
+	anyone, ok1 := ParseLevel(a)
+	invite, ok2 := ParseLevel(i)
+	if !ok || !ok1 || !ok2 {
+		return Default
+	}
+	return Settings{Anyone: anyone, Invite: invite}
 }
 
 // SettingsError is a problem with requested settings, for invalid_settings.
@@ -133,271 +125,31 @@ type SettingsError string
 
 func (e SettingsError) Error() string { return string(e) }
 
-// ApplyInput applies the settings fields of a request body to base: either
-// public, or read and write, and invite. Fields left out keep base's value.
-func ApplyInput(base Settings, public, read, write, invite json.RawMessage) (Settings, error) {
-	s, err := applyAccess(base, public, read, write)
-	if err != nil || invite == nil {
-		return s, err
-	}
-	var v string
-	json.Unmarshal(invite, &v)
-	switch v {
-	case "members":
-		s.InviteOwners = false
-	case "owners":
-		s.InviteOwners = true
-	default:
-		return base, SettingsError(`invite is "members" or "owners".`)
-	}
-	return s, nil
-}
-
-func applyAccess(base Settings, public, read, write json.RawMessage) (Settings, error) {
-	if public != nil {
-		if read != nil || write != nil {
-			return base, SettingsError("Give either public, or read and write, not both.")
-		}
-		var p string
-		if json.Unmarshal(public, &p) != nil {
-			return base, SettingsError(`public is "none", "read", "respond" or "all".`)
-		}
-		s, ok := presets[p]
-		if !ok {
-			return base, SettingsError(`public is "none", "read", "respond" or "all".`)
-		}
-		s.InviteOwners = base.InviteOwners
-		return s, nil
-	}
+// ApplyInput applies the anyone and invite fields of a request body to base.
+// Fields left out keep base's value.
+func ApplyInput(base Settings, anyone, invite json.RawMessage) (Settings, error) {
 	s := base
-	if read != nil {
-		var r string
-		json.Unmarshal(read, &r)
-		switch r {
-		case "anyone":
-			s.Read = true
-		case "granted":
-			s.Read = false
-		default:
-			return base, SettingsError(`read is "anyone" or "granted".`)
+	if anyone != nil {
+		l, err := ParseIn(anyone, "anyone", None, Read, Post, All)
+		if err != nil {
+			return base, SettingsError(err.Error())
 		}
+		s.Anyone = l
 	}
-	if write != nil {
-		var all string
-		if json.Unmarshal(write, &all) == nil {
-			switch all {
-			case "anyone":
-				s.WriteShared, s.WriteUsers, s.WriteTo = true, true, true
-			case "granted":
-				s.WriteShared, s.WriteUsers, s.WriteTo = false, false, false
-			default:
-				return base, SettingsError(`write is "anyone", "granted", or an object like {"shared": "granted"}.`)
-			}
-		} else {
-			var m map[string]string
-			if json.Unmarshal(write, &m) != nil {
-				return base, SettingsError(`write is "anyone", "granted", or an object like {"shared": "granted"}.`)
-			}
-			for area, v := range m {
-				if v != "anyone" && v != "granted" {
-					return base, SettingsError(fmt.Sprintf(`write.%s is "anyone" or "granted".`, area))
-				}
-				switch area {
-				case "shared":
-					s.WriteShared = v == "anyone"
-				case "users":
-					s.WriteUsers = v == "anyone"
-				case "to":
-					s.WriteTo = v == "anyone"
-				default:
-					return base, SettingsError(fmt.Sprintf("write has no area %q. Areas are shared, users and to.", area))
-				}
-			}
+	if invite != nil {
+		l, err := ParseIn(invite, "invite", Read, Post, All, Owner)
+		if err != nil {
+			return base, SettingsError(err.Error())
 		}
-	}
-	if !s.Valid() {
-		return base, SettingsError(`A space with read "granted" can't let anyone write. Use public "read", "respond" or "all" to open it up.`)
+		s.Invite = l
 	}
 	return s, nil
 }
 
-// Scope is one entry of a grant's allow list: AREA[/TARGET]:RIGHTS, and
-// for to/ TO[/RECIPIENT[/TARGET]]:RIGHTS.
-type Scope struct {
-	Area    string // "shared", "users", "to" or "*"
-	Rcpt    string // to/ only: "" for any recipient, "me", "owners" or a visitor ID
-	Prefix  string // the target: a key, or a prefix when Pattern
-	Pattern bool
-	R, W    bool
-}
-
-const MaxScopes = 20
-
-// Presets for allow lists.
-var allowPresets = map[string][]string{
-	"member": {"*:rw"},
-	"viewer": {"shared:r", "users:r"},
-}
-
-// DefaultAllow is what a token or direct grant gets without allow.
-var DefaultAllow = allowPresets["member"]
-
-func ParseScope(s string) (Scope, error) {
-	var sc Scope
-	body, rights, ok := strings.Cut(s, ":")
-	if !ok || strings.Contains(rights, ":") {
-		return sc, fmt.Errorf("%q: a scope is AREA[/TARGET]:RIGHTS, like shared/status.*:w", s)
-	}
-	switch rights {
-	case "r":
-		sc.R = true
-	case "w":
-		sc.W = true
-	case "rw":
-		sc.R, sc.W = true, true
-	default:
-		return sc, fmt.Errorf("%q: rights are r, w or rw", s)
-	}
-	area, target, hasTarget := strings.Cut(body, "/")
-	switch area {
-	case "shared", "users", "*":
-		sc.Area = area
-	case "to":
-		sc.Area = area
-		if hasTarget {
-			rcpt, rest, more := strings.Cut(target, "/")
-			switch {
-			case rcpt == "*":
-			case rcpt == "me" || rcpt == "owners" || names.ValidVisitor(rcpt):
-				sc.Rcpt = rcpt
-			default:
-				return sc, fmt.Errorf("%q: after to/ comes a recipient (me, owners, a visitor ID or *), then the target, like to/owners/answer:w", s)
-			}
-			target, hasTarget = rest, more
-		}
-	case "me":
-		return sc, fmt.Errorf("%q: me/ is now to/me/, so the scope is to/me%s", s, strings.TrimPrefix(s, "me"))
-	default:
-		return sc, fmt.Errorf("%q: the area is shared, users, to or *", s)
-	}
-	if !hasTarget || target == "*" {
-		sc.Pattern = true
-		return sc, nil
-	}
-	switch {
-	case names.ValidPattern(target):
-		sc.Pattern, sc.Prefix = true, strings.TrimSuffix(target, "*")
-	case names.ValidKey(target):
-		sc.Prefix = target
-	default:
-		return sc, fmt.Errorf("%q: the target is a key or a pattern like status.*", s)
-	}
-	return sc, nil
-}
-
-func (sc Scope) String() string {
-	t := ""
-	switch {
-	case sc.Pattern && sc.Prefix == "":
-	case sc.Pattern:
-		t = "/" + sc.Prefix + "*"
-	default:
-		t = "/" + sc.Prefix
-	}
-	r := "r"
-	switch {
-	case sc.R && sc.W:
-		r = "rw"
-	case sc.W:
-		r = "w"
-	}
-	if sc.Area == "to" && (sc.Rcpt != "" || t != "") {
-		rc := sc.Rcpt
-		if rc == "" {
-			rc = "*"
-		}
-		t = "/" + rc + t
-	}
-	return sc.Area + t + ":" + r
-}
-
-// ParseAllow reads an allow field: a preset name or a list of scopes. It
-// returns the scopes in their written form. A nil raw gives the default.
-func ParseAllow(raw json.RawMessage) ([]string, error) {
-	if raw == nil {
-		return DefaultAllow, nil
-	}
-	var preset string
-	if json.Unmarshal(raw, &preset) == nil {
-		if p, ok := allowPresets[preset]; ok {
-			return p, nil
-		}
-		return nil, fmt.Errorf("%q isn't a preset. allow is \"member\", \"viewer\" or a list of scopes", preset)
-	}
-	var list []string
-	if json.Unmarshal(raw, &list) != nil {
-		return nil, fmt.Errorf(`allow is "member", "viewer" or a list of scopes like ["shared/status.*:w"]`)
-	}
-	return NormalizeAllow(list)
-}
-
-// NormalizeAllow checks a list of scopes, expanding presets given as items.
-func NormalizeAllow(list []string) ([]string, error) {
-	var out []string
-	for _, s := range list {
-		if p, ok := allowPresets[s]; ok {
-			out = append(out, p...)
-			continue
-		}
-		sc, err := ParseScope(s)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, sc.String())
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("allow needs at least one scope")
-	}
-	if len(out) > MaxScopes {
-		return nil, fmt.Errorf("at most %d scopes", MaxScopes)
-	}
-	return out, nil
-}
-
-// Op is what a request wants to do.
-type Op struct {
-	Area    string // "shared", "users" or "to"
-	Rcpt    string // to/ only: a visitor ID, "owners", or "*" for every recipient
-	Self    string // the requesting visitor, for scopes naming to/me
-	Key     string // the key, or the prefix of a pattern
-	Pattern bool
-	Write   bool
-}
-
-// Covers reports whether the scope allows op. A key covers only itself; a
-// prefix p covers keys and patterns starting with p.
-func (sc Scope) Covers(op Op) bool {
-	if sc.Area != "*" && sc.Area != op.Area {
-		return false
-	}
-	if op.Write && !sc.W || !op.Write && !sc.R {
-		return false
-	}
-	if sc.Rcpt != "" && sc.Rcpt != op.Rcpt && !(sc.Rcpt == "me" && op.Self != "" && op.Rcpt == op.Self) {
-		return false
-	}
-	if !sc.Pattern {
-		return !op.Pattern && op.Key == sc.Prefix
-	}
-	return strings.HasPrefix(op.Key, sc.Prefix)
-}
-
-// Grant is a visitor's rights in one space.
+// Grant is one way a visitor got a level in a space.
 type Grant struct {
 	ID     string
-	Owner  bool
-	Allow  []string
-	Scopes []Scope
+	Level  Level // read, post, all or owner
 	Source string
 	Until  int64 // ms, 0 for no end
 }
@@ -407,115 +159,61 @@ func (g Grant) Live(now time.Time) bool { return g.Until == 0 || g.Until > now.U
 // Rights is what one visitor holds in one space.
 type Rights struct {
 	Settings Settings
-	Owner    bool
-	Grants   []Grant // live grants only
-	// Banned: an owner banned this visitor from the space. Nothing else
-	// counts while it lasts. Owners are never banned.
+	// Member is the highest level among the visitor's live grants, None
+	// without any.
+	Member Level
+	// Banned: an owner banned this visitor. Nothing else counts while it
+	// lasts.
 	Banned      bool
 	BannedUntil int64 // ms, 0 for no end
 }
 
-// CanRead reports whether the space shows itself to this visitor at all:
-// readable by anyone, or the visitor holds some grant. A write-only grant
-// still makes the space visible, so a sensor's writes don't count as misses.
-func (r *Rights) Visible() bool {
-	return !r.Banned && (r.Settings.Read || r.Owner || len(r.Grants) > 0)
-}
-
-// Allows applies settings, ownership, bans and grants. The fixed rules
-// (users/{id} only by {id}, a to/ slot only by its sender, inbox/ always your
-// own, writes need a visitor) are the caller's.
-func (r *Rights) Allows(op Op) bool {
-	if r.Owner {
-		return true
-	}
+// Level is what the visitor may do: their membership or the anyone level,
+// whichever is higher, unless banned.
+func (r *Rights) Level() Level {
 	if r.Banned {
-		return false
+		return Banned
 	}
-	if op.Write && r.Settings.WriteAnyone(op.Area) || !op.Write && r.Settings.Read {
-		return true
-	}
-	for _, g := range r.Grants {
-		for _, sc := range g.Scopes {
-			if sc.Covers(op) {
-				return true
-			}
-		}
-	}
-	return false
+	return max(r.Member, r.Settings.Anyone)
 }
 
-// CanInvite reports whether this visitor may mint access tokens: owners
-// always, members when the space lets members invite. A ban doesn't change
-// it, so lifting the ban restores exactly what was there; the routes and
-// redeeming check the ban themselves.
+func (r *Rights) Owner() bool { return r.Level() == Owner }
+
+// Visible reports whether the space shows itself to this visitor at all.
+func (r *Rights) Visible() bool { return r.Level() >= Read }
+
+// Op is what a request wants to do.
+type Op struct {
+	Area  string // "shared", "by" or "to"
+	Write bool
+}
+
+// Need is the level an operation takes: reading anything takes read,
+// writing your own keys post, writing common keys all. The fixed rules (by/
+// keys only by their author, a to/ slot only by its sender, inbox/ always
+// your own, writes need a visitor) are the caller's.
+func (op Op) Need() Level {
+	switch {
+	case !op.Write:
+		return Read
+	case op.Area == "shared":
+		return All
+	}
+	return Post
+}
+
+func (r *Rights) Allows(op Op) bool { return r.Level() >= op.Need() }
+
+// CanInvite reports whether this visitor may mint invites: a member at the
+// space's invite level or above. The anyone level doesn't count, so
+// strangers in an open space can't fill it with tokens.
 func (r *Rights) CanInvite() bool {
-	return r.Owner || !r.Settings.InviteOwners && len(r.Grants) > 0
+	return !r.Banned && r.Member >= Read && r.Member >= r.Settings.Invite
 }
 
-// CanGive reports whether every right in allow is one this visitor holds
-// through a grant, so a token with it hands out nothing they don't have.
-// Rights from settings don't count: everyone has them already.
-func (r *Rights) CanGive(allow []string) bool {
-	if r.Owner {
-		return true
-	}
-	for _, a := range allow {
-		sc, err := ParseScope(a)
-		if err != nil {
-			return false
-		}
-		for _, w := range []bool{false, true} {
-			if w && !sc.W || !w && !sc.R {
-				continue
-			}
-			op := Op{Area: sc.Area, Rcpt: sc.Rcpt, Key: sc.Prefix, Pattern: sc.Pattern, Write: w}
-			if sc.Area == "to" && sc.Rcpt == "" || sc.Area == "*" {
-				op.Rcpt = "*" // any recipient: only a scope for any recipient covers it
-			}
-			held := false
-			for _, g := range r.Grants {
-				for _, gs := range g.Scopes {
-					if gs.Covers(op) {
-						held = true
-					}
-				}
-			}
-			if !held {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-// OwnAllow is every scope this visitor's grants hold, for a member's token
-// that names no allow: an invite to have what the inviter has.
-func (r *Rights) OwnAllow() []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, g := range r.Grants {
-		for _, a := range g.Allow {
-			if !seen[a] && len(out) < MaxScopes {
-				seen[a] = true
-				out = append(out, a)
-			}
-		}
-	}
-	return out
-}
-
-// ParseScopes turns stored allow strings back into scopes. Stored lists were
-// checked when written, so a bad entry is skipped.
-func ParseScopes(allow []string) []Scope {
-	out := make([]Scope, 0, len(allow))
-	for _, s := range allow {
-		if sc, err := ParseScope(s); err == nil {
-			out = append(out, sc)
-		}
-	}
-	return out
-}
+// CanGive reports whether this visitor may hand out level l: owners any,
+// members up to their own.
+func (r *Rights) CanGive(l Level) bool { return r.Member == Owner || l <= r.Member }
 
 // ParseTime reads an until value: a duration from now ("7d", "12h"), a date
 // (end of that day, server time zone), an RFC 3339 time with or without

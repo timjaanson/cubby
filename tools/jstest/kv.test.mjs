@@ -8,14 +8,14 @@ const { space, ownerToken } = await createSpace({ label: "family", ...opt("owner
 assert(space.startsWith("family-") && ownerToken.startsWith("ot_"), "createSpace")
 const owner = kv(space, opt("owner"))
 let me = await owner.open({ invite: null })
-assert(me.inside && me.owner && me.settings.public === "none", "owner open " + JSON.stringify(me))
+assert(me.access === "owner" && me.settings.anyone === "none" && me.settings.invite === "post", "owner open " + JSON.stringify(me))
 await owner.shared.set("item.1", { text: "milk" })
 assert((await owner.shared.get("item.1")).text === "milk", "owner read")
 
 // A stranger sees nothing, and open() doesn't throw.
 const stranger = kv(space, opt("stranger"))
 me = await stranger.open({ invite: null })
-assert(!me.inside && !me.can("read", "shared"), "stranger outside")
+assert(me.access === "none" && !me.can("read"), "stranger outside")
 let err = await stranger.shared.get("item.1").catch(e => e)
 assert(err instanceof KvError && err.code === "no_space", "stranger get " + err?.code)
 
@@ -24,7 +24,7 @@ const inv = await owner.share({ label: "Anna", uses: 1, base: "https://example.c
 assert(inv.link.startsWith("https://example.com/list/#list=" + space + "&t=at_") && inv.uses === 1, "share " + inv.link)
 const anna = kv(space, opt("anna"))
 me = await anna.open({ invite: inv.token })
-assert(me.inside && me.joined && !me.owner && me.can("write", "shared", "item.2"), "anna open " + JSON.stringify(me))
+assert(me.access === "all" && me.joined && me.can("write", "shared") && me.can("write", "mine"), "anna open " + JSON.stringify(me))
 await anna.shared.set("item.2", { text: "bread" })
 const { items } = await anna.shared.list("item.*")
 assert(items.length === 2, "anna list")
@@ -39,40 +39,49 @@ await new Promise((res, rej) => {
 
 // The used-up invite fails cleanly.
 me = await stranger.open({ invite: inv.token })
-assert(!me.inside && me.inviteFailed, "used invite")
+assert(!me.can("read") && me.inviteFailed, "used invite")
 
-// Members can't do owner things, but they can invite, within their own rights.
-err = await anna.owner.grants.list().catch(e => e)
+// Members can't do owner things, but they can invite, within their own level.
+err = await anna.owner.settings({ anyone: "read" }).catch(e => e)
 assert(err.code === "owner_only", "member owner call " + err.code)
 assert((await anna.access()).canInvite === true && me.canInvite === false, "member canInvite, stranger not")
 const fromAnna = await anna.share({ label: "ben", uses: 1, base: "https://page.test/board" })
-assert(fromAnna.link.includes("#t=at_") && fromAnna.allow.join() === "*:rw", "member share " + JSON.stringify(fromAnna))
+assert(fromAnna.link.includes("#t=at_") && fromAnna.access === "all", "member share " + JSON.stringify(fromAnna))
 assert((await anna.tokens.list()).length === 1, "member sees own tokens")
 const ben = kv(space, opt("ben"))
 me = await ben.open({ invite: fromAnna.token })
-assert(me.inside && me.joined, "ben joins through anna")
+assert(me.can("read") && me.joined, "ben joins through anna")
 
-// Owner lists and removes Anna.
-const grants = await owner.owner.grants.list()
-const g = grants.find(g => g.source === inv.id)
-const annaId = await anna.id()
-assert(g && g.user === annaId && grants.some(x => x.invitedBy === annaId), "grants list with chain " + JSON.stringify(grants))
-await owner.owner.grants.revokeUser(g.user)
+// Owner lists members, with the invite chain, and removes Anna.
+const members = await owner.members()
+const annaId = await anna.id(), benId = await ben.id()
+const a = members.find(m => m.id === annaId), b = members.find(m => m.id === benId)
+assert(a?.access === "all" && a.label === "Anna" && b?.invitedBy === annaId, "members with chain " + JSON.stringify(members))
+assert((await ben.members()).every(m => !("invitedBy" in m)), "members see less")
+await owner.owner.members.set(benId, "post")
+err = await ben.shared.set("x", 1).catch(e => e)
+assert(err.code === "no_access" && err.details.need === "all", "post can't write shared " + err.code)
+await ben.mine.set("vote", 1)
+assert(await owner.owner.members.remove(annaId) === true, "remove anna")
 err = await anna.shared.get("item.1").catch(e => e)
 assert(err.code === "no_space", "removed member")
 assert((await ben.shared.get("item.1")).text === "milk", "ben stays after anna is removed")
 
 // Settings: open it up for reading.
-const st = await owner.owner.settings({ public: "read" })
-assert(st.public === "read", "settings")
-assert((await stranger.shared.get("item.1")).text === "milk", "public read")
+const st = await owner.owner.settings({ anyone: "read" })
+assert(st.anyone === "read" && st.invite === "post", "settings")
+assert((await stranger.shared.get("item.1")).text === "milk", "anyone reads")
 err = await stranger.shared.set("x", 1).catch(e => e)
-assert(err.code === "no_access", "public write " + err.code)
+assert(err.code === "no_access", "stranger write " + err.code)
+assert((await stranger.open({ invite: null })).access === "read", "stranger level")
+
+// Leaving makes you a stranger again.
+assert(await ben.leave() === true && (await ben.access()).access === "read", "leave")
 
 // Owner token on a second device.
 const laptop = kv(space, opt("laptop"))
 me = await laptop.open({ invite: ownerToken })
-assert(me.owner, "owner token join")
+assert(me.access === "owner", "owner token join")
 const fresh = await laptop.owner.rotateOwnerToken()
 assert(fresh.startsWith("ot_") && fresh !== ownerToken, "rotate")
 
@@ -95,7 +104,7 @@ assert((await fixed.shared.get("item.1")).text === "milk", "fixed read")
   const { space: s2 } = await createSpace({ server: S })
   assert(JSON.parse(mem.get(key)).token !== "vt_" + "x".repeat(43), "stale token replaced")
   const d2 = kv(s2, { server: S })
-  assert((await d2.open({ invite: null })).owner, "owner after stale token")
+  assert((await d2.open({ invite: null })).access === "owner", "owner after stale token")
   const t2 = await d2.share({ base: "https://example.com/" })
   mem.set(key, JSON.stringify({ token: "vt_" + "y".repeat(43), id: "u_bbbbbbbbbbbbbbbb" }))
   assert((await d2.open({ invite: t2.token })).joined, "join after stale token")
@@ -137,10 +146,10 @@ assert((await fixed.shared.get("item.1")).text === "milk", "fixed read")
   assert(!canceled, "clock cancellation")
   db.clock.dispose()
   // This exercises the real binary's one-second sweep, not a manual sweep.
-  await db.user().set("online", true, { ttl: 5 })
+  await db.mine.set("online", true, { ttl: 5 })
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => { stop(); reject(new Error("TTL sweep did not notify watch")) }, 8000)
-    const stop = db.users.watch("online", change => {
+    const stop = db.by.watch("online", change => {
       if (change.expired && change.deleted) { clearTimeout(timeout); stop(); resolve() }
     }, { onError: err => { clearTimeout(timeout); stop(); reject(err) } })
   })

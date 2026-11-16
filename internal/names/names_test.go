@@ -137,7 +137,7 @@ func TestTokenShapes(t *testing.T) {
 	if VisitorTokenRe.MatchString(RandomToken("at_")) {
 		t.Fatal("kinds mix")
 	}
-	if !ValidTokenID(NewTokenID()) || !ValidGrantID(NewGrantID()) || ValidTokenID(NewGrantID()) {
+	if !ValidTokenID(NewTokenID()) || ValidTokenID(NewGrantID()) {
 		t.Fatal("ids")
 	}
 }

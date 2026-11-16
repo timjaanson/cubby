@@ -10,7 +10,8 @@ import (
 )
 
 // migrateSpace brings a space file up to date. Values and versions never
-// change; the me/ area moved to to/me/ in version 3.
+// change; the me/ area moved to to/me/ in version 3, and version 4 replaced
+// scopes and per-area settings with levels and renamed users/ to by/.
 func migrateSpace(db *sql.DB) error {
 	var v int
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
@@ -27,7 +28,12 @@ func migrateSpace(db *sql.DB) error {
 		}
 	}
 	if v < 3 {
-		return migrateMeToTo(db)
+		if err := migrateMeToTo(db); err != nil {
+			return err
+		}
+	}
+	if v < 4 {
+		return migrateLevels(db)
 	}
 	return nil
 }

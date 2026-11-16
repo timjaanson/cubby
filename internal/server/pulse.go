@@ -36,7 +36,7 @@ const (
 
 type pulse struct {
 	seq    int64
-	area   string // as stored: "s", "u:{id}" or "i:{recipient}:{sender}"
+	area   string // as stored: "s", "b:{author}" or "i:{recipient}:{sender}"
 	key    string
 	by     string
 	value  []byte
@@ -47,7 +47,6 @@ type pulse struct {
 
 type pulseJSON struct {
 	Key   string          `json:"key"`
-	User  string          `json:"user,omitempty"`
 	From  string          `json:"from,omitempty"`
 	To    string          `json:"to,omitempty"`
 	By    string          `json:"by"`
@@ -57,9 +56,6 @@ type pulseJSON struct {
 
 func (p *pulse) json() pulseJSON {
 	out := pulseJSON{Key: p.key, By: p.by, Value: jsonValue(p.value, p.isJSON), T: p.t}
-	if strings.HasPrefix(p.area, "u:") {
-		out.User = p.area[2:]
-	}
 	out.To, out.From, _ = store.SplitTo(p.area)
 	return out
 }

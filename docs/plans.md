@@ -15,12 +15,26 @@ Written down so they aren't lost. Each needs a decision first.
 ## Decided against
 
 - **A `mine=false` filter on watches and pulses**, in the server or kv.js. Rejected 2026-11-14. Doing it right needs exceptions nobody would guess: expiry markers carry the original writer, snapshots must stay whole, and two tabs of one visitor would hide each other's edits. Pages write `if (!c.mine)` where they mean it.
-- **`to/all`.** With a slot per sender it is `users/{id}/` again, not `shared/`.
-- **Groups or teams inside a space.** A second permission system, membership, beside grants. Small groups are one `to/` write per member; larger ones are a space each, since visitor IDs are the same in every space and direct grants move people between them.
+- **`to/all`.** With a slot per sender it is `by/{id}/` again, not `shared/`.
+- **Groups or teams inside a space.** A second permission system beside levels. Small groups are one `to/` write per member; larger ones are a space each, since visitor IDs are the same in every space and owners set levels directly.
+- **`lock=owner` on shared keys**, or a `write.shared: owners` setting. Rejected 2026-11-15. `by/` already gives creator-only keys, and `access: "post"` invites keep members out of `shared/`.
+- **Server-ordered keys** (an append verb where the server picks `msg.<time>`). Rejected 2026-11-15. Clock skew is small in practice, and a `PUT` key never changes.
+- **Listing a visitor's spaces** (`GET /v1/spaces`). Held 2026-11-15: it needs an index of grants in `server.db` kept in step with every space file. Maybe later, with a cross-space live connection.
 - **A server-side block list per recipient.** The server would read stored data to decide access, which nothing else does. Pages keep a list in `to/me/` and skip those senders.
 - **Owners deleting in other visitors' inboxes.** There's no path that names both a sender and a recipient besides the two ends, and owners can't read the content anyway. A ban plus the recipient's own delete covers it.
 
 - **kv.js versioned mirror** (`db.shared.mirror(...)`). Rejected 2026-10-27. It is a large primitive for a narrow race. Pages handle it with specific checks instead: keep the version per key from the watch, including deletes, and ignore a write acknowledgement whose version is older than what the watch already delivered.
+
+## Done: levels and by/
+
+Agreed and built 2026-11-15, after a small model built a chat on cubby and put every message in `shared/`, where any member could rewrite them. The plan is in the project notes. Contracts in [spec.md](spec.md#4-spaces-and-access).
+
+- **One level per visitor and space**: `banned < none < read < post < all < owner`. `post` writes your own keys, `all` also common keys. A visitor's level is the highest of their grants, or the space's `anyone` level, and a ban beats both.
+- **Settings are two levels**: `anyone` (strangers, `none` by default) and `invite` (the lowest member level that may invite, `post` by default). Scopes, `read`/`write` per area, the `public` shorthand, `member`/`viewer` presets and `custom` are gone.
+- **Invites give a level**: `access` on `POST /tokens`, `read`, `post` or `all`, default `all` or the minter's own level. A member gives at most their own.
+- **`/members`** replaces `/grants` and `/bans`: members list who's in; owners `PUT` a level (replacing every grant) or `banned`, and `DELETE`; anyone leaves with `DELETE /members/me`. A ban now removes the visitor's grants.
+- **`users/` is `by/`.** Under `by/`, an item's `by` is its author, and the `user` field is gone. kv.js `db.mine`, `db.by`, `db.by(id)`, `db.presence`, `db.members()`, `db.leave()`, `db.owner.members`, `me.access` and `me.can()`. CLI `--anyone`, `--access`, `cubby member`. The owner token field is `ownerToken` everywhere.
+- **Space migration** (user_version 4) maps every grant, invite and setting to the closest level and renames `u:` rows to `b:`. A production scan before building found only owner grants and `*:rw`, so nothing lost precision.
 
 ## Done: device links
 

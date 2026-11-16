@@ -10,7 +10,7 @@ import (
 )
 
 type kvPath struct {
-	space, area string // "shared", "users/<id|me|*>", "to/<rcpt|*>", "inbox/<sender|*>" or "inbox/owners/<sender|*>"
+	space, area string // "shared", "by/<id|me|*>", "to/<rcpt|*>", "inbox/<sender|*>" or "inbox/owners/<sender|*>"
 	name        string // key or pattern
 }
 
@@ -29,7 +29,7 @@ func (p kvPath) url() string {
 
 // needsToken: the path means something only for a known visitor.
 func (p kvPath) needsToken() bool {
-	return p.area == "users/me" || strings.HasPrefix(p.area, "to/") || strings.HasPrefix(p.area, "inbox/")
+	return p.area == "by/me" || strings.HasPrefix(p.area, "to/") || strings.HasPrefix(p.area, "inbox/")
 }
 
 func (p kvPath) isPattern() bool {
@@ -40,7 +40,7 @@ func (c *client) parsePath(s string) (kvPath, error) {
 	s = strings.TrimPrefix(s, "/")
 	s = strings.TrimPrefix(s, "v1/")
 	seg := strings.Split(s, "/")
-	bad := &cliError{code: 5, err: "bad_path", msg: fmt.Sprintf("%q isn't a path like space/shared/key, space/users/me/key, space/to/me/key or space/inbox/*/key", s)}
+	bad := &cliError{code: 5, err: "bad_path", msg: fmt.Sprintf("%q isn't a path like space/shared/key, space/by/me/key, space/to/me/key or space/inbox/*/key", s)}
 	if len(seg) < 3 {
 		return kvPath{}, bad
 	}
@@ -64,12 +64,12 @@ func (c *client) parsePath(s string) (kvPath, error) {
 			return kvPath{}, bad
 		}
 		p.area, p.name = seg[1], seg[2]
-	case "users", "to":
+	case "by", "to":
 		if len(seg) != 4 {
 			return kvPath{}, bad
 		}
 		var err error
-		if seg[1] == "users" {
+		if seg[1] == "by" {
 			err = party(seg[2], "visitor ID")
 		} else {
 			err = party(seg[2], "recipient", "owners")
@@ -90,8 +90,8 @@ func (c *client) parsePath(s string) (kvPath, error) {
 			return kvPath{}, err
 		}
 		p.area, p.name = area+seg[2], seg[3]
-	case "me":
-		return kvPath{}, &cliError{code: 5, err: "bad_path", msg: "There's no me/ area any more. Private keys are under to/me/, as in " + p.space + "/to/me/" + strings.Join(seg[2:], "/") + "."}
+	case "users":
+		return kvPath{}, &cliError{code: 5, err: "bad_path", msg: "users/ is now by/, as in " + p.space + "/by/" + strings.Join(seg[2:], "/") + "."}
 	default:
 		return kvPath{}, bad
 	}

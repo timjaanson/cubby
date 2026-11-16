@@ -9,7 +9,7 @@ Needs Go 1.26 or newer. No C compiler: SQLite is pure Go, so every binary is sta
 ```sh
 go test -race ./...
 go vet ./...
-sh tools/jstest/run.sh   # kv.js, live mode, pulses, rooms, presence, to/ and inbox/, bans and the QR encoder against a fresh local server (needs Node 22+)
+sh tools/jstest/run.sh   # kv.js, live mode, pulses, rooms, presence, to/ and inbox/, members and bans, and the QR encoder against a fresh local server (needs Node 22+)
 ./build.sh          # writes dist/cubby-macos, dist/cubby-linux-amd64, dist/cubby-linux-arm64
 go build .           # just for this machine, writes ./cubby
 ```
@@ -20,10 +20,10 @@ Browser checks run in real engines with [playwright-cli](https://github.com/micr
 
 ```
 main.go             entry point: hands the command line to internal/cli
-internal/access/    who may do what: settings, the public shorthand, scopes, the access rule
+internal/access/    who may do what: levels, settings, the access rule
 internal/cli/       the cubby command: serve, admin, and the client commands
 internal/server/    HTTP API, live connections, rate limits, watches, admin socket handler
-internal/store/     SQLite storage: spaces, keys, series, visitors, tokens, grants, cleanup
+internal/store/     SQLite storage: spaces, keys, series, visitors, invites, grants, bans, cleanup
 internal/config/    config file, defaults, data directory lookup
 internal/names/     name and key validation, random names and tokens, words.txt
 internal/apierr/    the API error type and shared errors
@@ -43,7 +43,7 @@ Dependencies point one way: `cli` uses `server`, `server` uses `store`, and ever
 - **`visitors.db` is called `server.db`.** Besides visitors, it remembers which spaces each visitor wrote to, and the last counter of deleted spaces so a recreated space never reuses versions.
 - **Admin needs the running server.** It doesn't fall back to opening files directly. That keeps one path for every change.
 - **When `watch --from now` hits an expired version** it continues from now instead of replaying the current state, so an `--exec` deploy hook never reruns old requests.
-- **Visitor cleanup turns their `users/` keys into tombstones**, so watchers see them go, instead of deleting rows silently.
+- **Visitor cleanup turns their `by/` keys into tombstones**, so watchers see them go, instead of deleting rows silently.
 - **List, watch and series responses compact JSON values**, so `{"a": 1}` comes back as `{"a":1}`. A plain `GET` returns the bytes exactly as written.
 - **Space size counts the newest point twice** for a series: once as the key's value and once as a point. It's a few bytes per series and keeps the accounting simple.
 - Not built yet: the deferred helpers and candidates in [plans.md](plans.md), proof of work on `/v1/anon`, and everything else under "Later" in the spec, including reading several series at once and `?format=text`.

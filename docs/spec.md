@@ -10,7 +10,7 @@ Contents:
 2. [Names](#2-names)
 3. [Visitors](#3-visitors)
 4. [Spaces and access](#4-spaces-and-access)
-5. [Access tokens and grants](#5-access-tokens-and-grants)
+5. [Invites and members](#5-invites-and-members)
 6. [Managing a space](#6-managing-a-space)
 7. [Values](#7-values)
 8. [Versions](#8-versions)
@@ -35,7 +35,7 @@ Contents:
 - `base64url` means RFC 4648 base64url without padding.
 - Sizes in config are like `64KB`, meaning powers of 1024. Durations are like `30d`.
 - Examples shorten space names to `poll` and leave out headers that aren't the point.
-- "Area" means one of `shared/`, `users/{id}/`, `to/{recipient}/` or `inbox/{sender}/` within a space.
+- "Area" means one of `shared/`, `by/{id}/`, `to/{recipient}/` or `inbox/{sender}/` within a space.
 
 ## 2. Names
 
@@ -57,7 +57,7 @@ Contents:
 | `Poll-cedar-pilot-mango-frost` | no | uppercase |
 | `poll--cedar-pilot` | no | double hyphen |
 
-- Anyone using the same name uses the same space. In a space with `read: anyone`, the name is the only thing between a stranger and its `shared/` and `users/` data, so how hard it is to guess matters. A private space also needs a grant, see [Private spaces](#private-spaces).
+- Anyone using the same name uses the same space. In a space with `anyone` at `read` or above, the name is the only thing between a stranger and its data, so how hard it is to guess matters. A private space also needs an invite, see [Private spaces](#private-spaces).
 - The server only checks length and characters. A hand-picked name like `team-lunch-dashboard` is valid and as easy to guess as it looks. For privacy, let cubby generate the name.
 - A space exists only once someone creates it with [`POST /v1/spaces`](#create-a-space). Writing to a name never creates it.
 - Words like `anon`, `spaces` or `whoami` can never be valid names, so system routes can't collide with spaces.
@@ -109,10 +109,10 @@ What a pattern does on each route, with `shared/` holding `env.temp` = `21.4`, `
 | `GET env.*/series` | none | 400 `invalid_key`. Series are read one key at a time for now, see [Later](#20-later) |
 | `PUT env.*`, `DELETE env.*` | | 405. Writing and deleting take one key |
 
-- "List" in this spec means a `GET` with a `*` anywhere in the path, in the key or in `users/*/`. It isn't a separate action. A `GET` on a single key returns the raw value. A list returns JSON items, because it can match many keys.
+- "List" in this spec means a `GET` with a `*` anywhere in the path, in the key or in `by/*/`. It isn't a separate action. A `GET` on a single key returns the raw value. A list returns JSON items, because it can match many keys.
 - A pattern never returns names alone. List and watch always include the values. There's no keys-only listing.
 - Full key names come back, prefix included: `env.temp`, not `temp`.
-- Under `users/*/`, every item also has `user`. Series keys also have `t`, the time of their newest point, and `value` is that point.
+- Under `by/*/`, every item's `by` is its author. Series keys also have `t`, the time of their newest point, and `value` is that point.
 
 ### Paths
 
@@ -122,7 +122,7 @@ Every data URL has the same shape:
 /v1/{space}/{area}/{target}[/{action}]
 ```
 
-- `{area}` is `shared`, `users/{id}`, `users/*`, `to/{recipient}`, `to/*`, `inbox/{sender}`, `inbox/*`, `inbox/owners/{sender}` or `inbox/owners/*`. In place of `{id}`, `{recipient}` or `{sender}`, `me` means the requesting visitor.
+- `{area}` is `shared`, `by/{id}`, `by/*`, `to/{recipient}`, `to/*`, `inbox/{sender}`, `inbox/*`, `inbox/owners/{sender}` or `inbox/owners/*`. In place of `{id}`, `{recipient}` or `{sender}`, `me` means the requesting visitor.
 - `{target}` is a key or a pattern. It's always there. There's no URL that acts on a whole area without one, so watching an area is `*/watch`.
 - `{action}` is left out, `watch`, `series` or `pulse`. Without it, the request is about the target's current value.
 - Nothing comes after the action.
@@ -134,9 +134,8 @@ Besides data URLs, each space has a few routes of its own. Their names aren't ar
 | `PATCH`, `DELETE /v1/{space}` | settings, deleting the space | [Managing a space](#6-managing-a-space) |
 | `GET /v1/{space}/access` | what the requesting visitor may do | [What can I do here](#what-can-i-do-here) |
 | `POST /v1/{space}/join` | redeem an access or owner token | [Redeeming: join](#redeeming-join) |
-| `/v1/{space}/tokens[/{id}]` | mint, list, change and revoke access tokens | [Minting](#minting), [Managing tokens](#managing-tokens) |
-| `/v1/{space}/grants[/{id}]` | list, add and revoke grants | [Managing grants](#managing-grants) |
-| `/v1/{space}/bans[/{id}]` | ban and unban visitors | [Bans](#bans) |
+| `/v1/{space}/tokens[/{id}]` | mint, list, change and revoke invites | [Minting](#minting), [Managing invites](#managing-invites) |
+| `/v1/{space}/members[/{id}]` | list members, set a level, ban, remove, leave | [Members](#members), [Bans](#bans) |
 | `POST /v1/{space}/owner-token` | rotate the owner token | [Owner token](#owner-token) |
 
 The method and the action together say what happens:
@@ -152,7 +151,7 @@ A 405 names the methods that work and, where it helps, the route you probably me
 
 ## 3. Visitors
 
-A visitor is an anonymous identity: a browser, a script, a device, or several of them [linked](#devices-and-links) into one. Everything a request is allowed to do follows from who the visitor is and which grants they hold in the space, see [Access](#4-spaces-and-access).
+A visitor is an anonymous identity: a browser, a script, a device, or several of them [linked](#devices-and-links) into one. Everything a request is allowed to do follows from the visitor's level in the space, see [Access](#4-spaces-and-access).
 
 ### Getting a visitor token
 
@@ -178,17 +177,17 @@ Authorization: Bearer vt_4Jx9...
 
 or `?token=vt_4Jx9...` where a header can't be set, such as a browser tab, or where a header would cost a CORS preflight on every watch. The header wins if both are given. The scheme name `Bearer` is case-insensitive. A token that doesn't have the shape `vt_` plus 43 base64url characters is treated as unknown without a lookup. The server must not log query strings containing `token`.
 
-**This is the only credential ever sent on a request.** Access tokens and owner tokens are redeemed once with `join` and never travel again.
+**This is the only credential ever sent on a request.** Invites and owner tokens are redeemed once with `join` and never travel again.
 
 ### When a visitor token is needed
 
 | Request | Visitor token |
 |---|---|
 | any write or delete | yes |
-| anything in `to/` or `inbox/`, and `users/me/` | yes |
-| anything in a space with `read: granted` | yes |
+| anything in `to/` or `inbox/`, and `by/me/` | yes |
+| anything in a private space (`anyone: none`) | yes |
 | owner routes, `GET /v1/whoami` | yes |
-| reads of `shared/` and `users/` in a space with `read: anyone` | no |
+| reads in a space with `anyone` at `read` or above | no |
 | `GET /v1/{space}/access` | no |
 | `POST /v1/anon`, `POST /v1/spaces`, `POST /v1/{space}/join` | no, one is created if missing |
 | `POST /v1/links/redeem` | no; one that's sent is replaced |
@@ -212,7 +211,7 @@ For clients that kept the token but lost the ID.
 
 ### Devices and links
 
-A visitor can be on several devices: a phone, a laptop, a script. Each device has its own visitor token, and all of them act as the same visitor ID, with the same grants and data in every space. This is different from sharing. An [invite](#5-access-tokens-and-grants) gives another person a grant in one space; a link makes another device *you*, everywhere, ownership included.
+A visitor can be on several devices: a phone, a laptop, a script. Each device has its own visitor token, and all of them act as the same visitor ID, with the same grants and data in every space. This is different from sharing. An [invite](#5-invites-and-members) gives another person a level in one space; a link makes another device *you*, everywhere, ownership included.
 
 ```
 device A ── POST /v1/links ──> code K7M2X-9Q4PA ── QR, link or typed ──> device B: POST /v1/links/redeem ──> B's own token for A's visitor
@@ -249,7 +248,7 @@ Authorization: Bearer vt_B...       optional
 ```
 
 - **The code** is accepted with or without `lk_`, in any case, with dashes and spaces ignored, O read as 0 and I or L as 1. A body that doesn't start with `{` is the code, so `curl -d K7M2X-9Q4PA` works.
-- **Redeeming always replaces.** If the request carries a visitor token, that device leaves its visitor: its token stops working. If that visitor has no other device left, it is deleted at once with everything it had, exactly as [expiry](#expiry) would: `users/` data, what it sent and received under `to/`, grants and bans in every space. `previous` names the old visitor, `deleted` says whether it went. A page must ask the person before redeeming. An unknown or expired token in the request is ignored.
+- **Redeeming always replaces.** If the request carries a visitor token, that device leaves its visitor: its token stops working. If that visitor has no other device left, it is deleted at once with everything it had, exactly as [expiry](#expiry) would: `by/` data, what it sent and received under `to/`, grants and bans in every space. `previous` names the old visitor, `deleted` says whether it went. A page must ask the person before redeeming. An unknown or expired token in the request is ignored.
 - **A client must save `token` before anything else**, as with `join`.
 - **Errors.** An unknown code is 404 `bad_link`. A known one that can't be used any more is 410 `link_used`, `link_expired` or `link_cancelled`. A device that already is the link's visitor gets 409 `same_visitor`, and the code stays unused.
 - **Guessing.** Every `bad_link` counts against the IP (IPv6 by /64): after 10 in 10 minutes, redeeming answers 429 until the budget refills. With 50-bit codes that live minutes, that makes guessing hopeless.
@@ -290,28 +289,30 @@ Each item:
 #### Signing out
 
 - A signed-out device's token is unknown from then on: 401 `invalid_token` where a token is needed, as for any unknown token.
-- Its live connections stay open but lose their identity, as if they had sent a bad token: reads go on without a visitor, writes answer `invalid_token`, and watches on `inbox/`, `to/` and `users/me/` end with `identity_changed`. A page that just redeemed a link sends `auth` with its new token and goes on. Last wills stay and fire as they would.
+- Its live connections stay open but lose their identity, as if they had sent a bad token: reads go on without a visitor, writes answer `invalid_token`, and watches on `inbox/`, `to/` and `by/me/` end with `identity_changed`. A page that just redeemed a link sends `auth` with its new token and goes on. Last wills stay and fire as they would.
 - Nothing in any space changes. The visitor and its other devices are untouched.
 
 ### Expiry
 
 - A visitor counts as seen whenever a request carries a valid token of any of their devices, reads included.
 - A device unseen for `visitor_idle_ttl` is signed out on its own. Ended links are deleted a day after they end.
-- After 365 days unseen (`visitor_idle_ttl`), a cleanup job deletes the visitor, their token, their grants and bans, their `users/` data, and everything they sent or received under `to/` in every space. What others sent them is deleted too, and stops counting against the senders.
+- After 365 days unseen (`visitor_idle_ttl`), a cleanup job deletes the visitor, their token, their grants and bans, their `by/` data, and everything they sent or received under `to/` in every space. What others sent them is deleted too, and stops counting against the senders.
 - Visitors who never stored anything and hold no grant are deleted after 30 days unseen (`empty_visitor_idle_ttl`).
 - `visitor_idle_ttl` should stay longer than `space_idle_ttl`. Otherwise a visitor's votes or grants could vanish from a space that's still in use.
 - Shared keys they wrote stay. Their bytes stop counting against any visitor and keep counting against the space.
-- A client that gets 401 `invalid_token` must drop the token, get a new one and retry once. The new token is a new visitor with a new ID and no grants, so in a space that needs grants the retry fails with `no_access` or `no_space`, and the page should ask for a new invite.
+- A client that gets 401 `invalid_token` must drop the token, get a new one and retry once. The new token is a new visitor with a new ID and no grants, so in a private space the retry fails with `no_space`, and the page should ask for a new invite.
 
 ## 4. Spaces and access
+
+Access fits in two ideas. **Keys** are common, or owned by whoever wrote them. **Visitors** have one level per space, which says how far they may go.
 
 ### Areas
 
 | Area | Path | Holds |
 |---|---|---|
-| shared | `/v1/{space}/shared/{key}` | the space's common data |
-| a visitor | `/v1/{space}/users/{id}/{key}` | one visitor's public data. Only that visitor writes it |
-| all visitors | `/v1/{space}/users/*/{key or pattern}` | the same key across every visitor. Read-only |
+| shared | `/v1/{space}/shared/{key}` | common keys: the space's own data. Nobody owns them |
+| by an author | `/v1/{space}/by/{id}/{key}` | one visitor's own keys. Only that visitor writes them, everyone who can read the space reads them |
+| by everyone | `/v1/{space}/by/*/{key or pattern}` | the same key across every author. Read-only |
 | sent | `/v1/{space}/to/{recipient}/{key}` | what the requesting visitor sent one recipient. Only the sender writes it |
 | all sent | `/v1/{space}/to/*/{key or pattern}` | what the requesting visitor sent, across recipients. Read-only |
 | received | `/v1/{space}/inbox/{sender}/{key}` | what one sender sent the requesting visitor. Read and delete |
@@ -319,11 +320,21 @@ Each item:
 
 All areas support read, write, delete, list, watch, series and pulses, except that the `*` forms are read-only and don't read series yet (see [Later](#20-later)), and `inbox/` only reads and deletes.
 
-- **shared/** is for things the group works on together: lists, boards, documents, room settings, game state, a poll's question.
-- **users/{id}/** is for things that belong to one visitor and everyone who can read the space may see: a vote, a display name, a score, messages they wrote. Writing or deleting under another visitor's ID returns 403 `not_yours`, whatever their grants. Only the space's owner may delete there, as moderation. The data goes away with the visitor.
-- **users/*/** reads one key, or one pattern, across every visitor. Each item includes `user`. Only `GET`, `HEAD` and watch; other methods return 405.
+Every key has an owner and an audience:
+
+| Area | Owner: who writes | Audience: who reads |
+|---|---|---|
+| `shared/` | nobody: anyone at level `all` | the space |
+| `by/{id}/` | `{id}` | the space |
+| `to/{recipient}/` | the sender | the recipient and the sender |
+| `to/owners/` | the sender | the space's owners and the sender |
+| `to/me/` | you | you |
+
+- **shared/** is for things the group edits together: lists, boards, documents, a room's title, game state, a poll's question.
+- **by/{id}/** is for things one person posts that everyone may see: messages, comments, votes, a display name, a score. Writing or deleting under another visitor's ID returns 403 `not_yours`, whatever their level. Owners may delete there, as moderation. The data goes away with the visitor. Chat and comments belong here, not in `shared/`: then nobody can edit or delete someone else's message.
+- **by/*/** reads one key, or one pattern, across every author, sorted by key and then author. Only `GET`, `HEAD` and watch; other methods return 405.
 - **to/** and **inbox/** are one store seen from its two ends, below.
-- `me` in place of a visitor ID means the requesting visitor: `users/me/name`, `to/me/draft`, `inbox/me/draft`. It needs a visitor token.
+- `me` in place of a visitor ID means the requesting visitor: `by/me/name`, `to/me/draft`, `inbox/me/draft`. It needs a visitor token.
 
 ### to/ and inbox/
 
@@ -341,69 +352,86 @@ DELETE /v1/quiz/inbox/u_p1r8t3w6k7m2x9q4/answer     recipient deletes it
 - **Recipients** are a visitor ID, `me` or `owners`. Sending to an ID that no visitor has returns 404 `no_visitor`.
 - **`to/me/`** is the slot you fill for yourself: private data nobody else can address, owners included. `inbox/me/` is the same entry from the other end, and your own notes show up in `inbox/*/`, from you.
 - **`to/owners/`** goes to the owners group. Every owner, including owners added later, reads it under `inbox/owners/{sender}/` and `inbox/owners/*/`, which answer 403 `owner_only` to anyone else. Mail to the group isn't in an owner's own `inbox/*/`.
-- **Who writes.** Only the sender writes their slot. They may also delete it, as may the recipient. Nobody else can address it: an owner can't read or delete another visitor's slots.
+- **Who writes and deletes.** The sender owns the slot: they write it and may delete it. The recipient is its audience: they read it and may delete it. Nobody else can address it. Owners can't read or delete other visitors' slots, so moderation covers only keys whose audience is the whole space.
 - **Items** under `to/` and `inbox/`, in lists, watches and pulses, carry `from` (the sender) and `to` (the recipient ID or `owners`). Pages match them however they like.
 - **`inbox/` takes `GET`, `HEAD`, watch, pulse listening, series reads and `DELETE`.** Sending goes through `to/`, so `PUT` or `POST` there returns 405.
 - **Pulses** sent to `to/{recipient}/{key}/pulse` reach only listeners on that recipient's `inbox/`, and the sender's own `to/` listeners. This is enough for signaling between two pages, such as WebRTC offers and ICE candidates, without everyone seeing them.
 - The entry counts against the sender's quota, like any value they write. It goes when either the sender or the recipient is deleted.
 - **Two senders, one key.** Bob and Cara each send `message` to Alice: Alice's `inbox/*/message` lists two items. A second `message` from Bob replaces his first. For a history, give each message its own key, such as `msg.1794646400123.a8k2`, or add points to a series.
 
+### Levels
+
+Every visitor has one level in each space. Lowest first:
+
+| Level | May |
+|---|---|
+| `banned` | nothing, whatever else they hold. See [Bans](#bans) |
+| `none` | nothing: a stranger in a private space |
+| `read` | read everything whose audience is the space, and their own inbox |
+| `post` | also write their own keys: `by/me/`, and send under `to/`, and delete from their inbox |
+| `all` | also write common keys: `shared/` |
+| `owner` | also delete others' `by/` keys, change settings, manage members and every invite, rotate the owner token, delete the space |
+
+A visitor's level is:
+
+1. `banned` while an owner's ban lasts.
+2. Otherwise the highest of their live grants, or the space's `anyone` level if that is higher.
+
+Grants come from [invites](#5-invites-and-members), from [setting a member's level](#members), from the owner token, and from creating the space.
+
 ### Settings
 
-Every space has two access settings and one about invites. The access settings decide what a visitor may do without a grant. **A new space is private unless its creator says otherwise:** only its owners and visitors they invite can read or write it.
-
-| Setting | Values | Default |
-|---|---|---|
-| `read` | `anyone`, `granted` | `granted` |
-| `write` | per area: `{"shared": ..., "users": ..., "to": ...}`, each `anyone` or `granted` | `granted` for all three |
-| `invite` | `members`, `owners`: who may mint [access tokens](#minting) | `members` |
-
-- `read` covers every area: `shared/`, `users/`, `to/` and `inbox/`. `granted` makes the space [private](#private-spaces).
-- `write` covers `PUT`, `DELETE` and `POST` in that area. `to` covers sending, to anyone, and deleting from your inbox. `"write": "granted"` is shorthand for all three areas `granted`, and `"write": "anyone"` for all three `anyone`.
-- `read: granted` requires `write: granted` in every area. Anything else returns 400 `invalid_settings`, because an open write into an unreadable space would tell a stranger the space exists.
-- `invite: members` lets anyone holding a grant invite others, never with more than they hold. See [Invites from members](#invites-from-members). `owners` keeps minting to owners.
-- The owner changes settings at any time with [`PATCH /v1/{space}`](#settings-and-deletion). Data and grants stay as they are.
-
-### The public shorthand
-
-Opening a space up has to be a decision someone makes and can see in the code. `public` names the four useful combinations in one word:
-
-| `public` | `read` | `write` | For |
+| Setting | Values | Default | Means |
 |---|---|---|---|
-| `none` (default) | `granted` | `granted` | people who know each other: a family list, a team board, a journal, notes between friends, a game among friends |
-| `read` | `anyone` | `granted` | publishing: status pages, schedules, sensor readings, script output |
-| `respond` | `anyone` | `shared` granted, `users` and `to` anyone | one author or a few editors, everyone responds: polls, quizzes, RSVPs, sign-up sheets, contact forms |
-| `all` | `anyone` | `anyone` | anyone with the link reads and writes: a public chat room, a party playlist, a demo |
+| `anyone` | `none`, `read`, `post`, `all` | `none` | the level of every visitor without a higher grant |
+| `invite` | `read`, `post`, `all`, `owner` | `post` | the lowest member level that may mint invites |
 
-- `POST /v1/spaces` and `PATCH /v1/{space}` take either `public` or `read`/`write`, not both. Both together return 400 `invalid_settings`.
-- Every response with settings has all three fields, `public` being the matching name or `custom`:
+**A new space is private unless its creator says otherwise.** Opening one up has to be a decision someone makes and can see in the code, so it's a separate word:
+
+| `anyone` | For |
+|---|---|
+| `none` (default) | people who know each other: a family list, a team board, a journal, a game among friends |
+| `read` | publishing: status pages, schedules, sensor readings, script output |
+| `post` | one author or a few editors, everyone responds: polls, quizzes, RSVPs, sign-up sheets, contact forms, a public guestbook |
+| `all` | anyone with the name reads and writes: a public chat room, a party playlist, a demo |
 
 ```json
-{"public": "respond", "read": "anyone", "write": {"shared": "granted", "users": "anyone", "to": "anyone"}}
+{"anyone": "post", "invite": "post"}
 ```
+
+- `POST /v1/spaces` takes both, and an owner changes either with [`PATCH /v1/{space}`](#settings-and-deletion). Data and grants stay as they are.
+- `invite` counts a member's own level only. The `anyone` level doesn't count, so strangers in an open space can't fill it with invites.
 
 ### The access rule
 
-First, a visitor an owner has [banned](#bans) gets 403 `banned` for every request in the space, and nothing below counts for them.
+A request is allowed when the visitor's level reaches what it needs:
 
-Otherwise a request is allowed when any of these holds:
-
-1. The space's setting for this kind of request is `anyone`.
-2. The visitor holds a live grant in the space with a scope covering the request. See [Scopes](#scopes).
-3. The visitor owns the space.
+| Request | Needs |
+|---|---|
+| any read, list, watch or pulse listen | `read` |
+| write, delete, add a point or send a pulse under `by/me/` or `to/`, delete from `inbox/` | `post` |
+| the same under `shared/` | `all` |
+| delete under another visitor's `by/{id}/`, settings, members, other people's invites | `owner` |
 
 On top of that, and never overridden:
 
 - Writes need a visitor token, so every entry has a `by`.
-- `users/{id}/` is written only by visitor `{id}`. The owner may also delete there.
+- `by/{id}/` is written only by visitor `{id}`. Owners may also delete there.
 - A `to/` slot is written only by its sender. The sender and the recipient may delete it.
 - `inbox/` is always the requesting visitor's own, and `inbox/owners/` only owners'.
 
-A write that isn't allowed returns 403 `no_access`. In a private space the visitor can't read, every request answers as if the space didn't exist.
+A write the level doesn't reach returns 403 `no_access` with `need`, the level it takes:
+
+```
+403
+{"error": "no_access", "need": "all", "message": "Writing here takes access \"all\" or higher. ..."}
+```
+
+Below `read`, every request answers as if the space didn't exist.
 
 ### Private spaces
 
-A space with `read: granted` is private, which is the default. To a request without a grant that covers reading, it doesn't exist:
+A space with `anyone: none` is private, which is the default. To a visitor below `read`, it doesn't exist:
 
 - Every route answers exactly as for a space that doesn't exist, with the same status, body and headers. That includes reads, lists, watches, writes, `access` and owner routes:
 
@@ -416,32 +444,31 @@ A space with `read: granted` is private, which is the default. To a request with
 - A failed `join` answers 404 `invite_invalid`, the same as for a space that doesn't exist.
 - Such a request costs a miss under the [guessing limit](#guessing-space-names), like any request for a missing space.
 
-So someone trying names learns nothing, whether the space exists or not. A visitor with a grant that covers only writing, like a sensor's `shared/env.*:w`, can write but gets `no_space` on reads.
+So someone trying names learns nothing, whether the space exists or not.
 
 ### Owners
 
 - Whoever creates a space owns it. Creating gives the creator an owner grant and returns an [owner token](#owner-token) once.
-- An owner may do everything in the space: read and write every area as allowed for any visitor, delete in anyone's `users/{id}/`, change settings, mint and revoke access tokens, add and revoke grants, rotate the owner token and delete the space.
-- A space can have several owners, through the owner token or a direct grant with `"owner": true`.
-- Owning is a grant, so it ends like one: when it's revoked, or when the visitor is deleted after `visitor_idle_ttl`. The owner token is how an owner gets back in.
+- A space can have several owners, through the owner token or by an owner [setting someone's level](#members) to `owner`.
+- Owning is a grant, so it ends like one: when an owner changes or removes it, or when the visitor is deleted after `visitor_idle_ttl`. The owner token is how an owner gets back in.
 
 ### Who wrote what
 
-Every entry records `by`, the visitor who last wrote or deleted it. Owners act with their visitor identity like anyone else, so an owner's moderation delete shows the owner's ID.
+Every entry has `by`. Under `by/{id}/` it is always `{id}`, the author, even after an owner's moderation delete. Elsewhere it is the visitor who last wrote or deleted the key; owners act with their visitor identity like anyone else.
 
-## 5. Access tokens and grants
+## 5. Invites and members
 
-An access token is an invite. A grant is what redeeming it leaves behind: "visitor X has these scopes in this space". The token is used once per visitor and then no longer matters to that visitor. The grant is what every later request is checked against.
+An invite is a link that gives a level. Redeeming it leaves a grant: "visitor X has level L in this space". The invite is used once per visitor and then no longer matters to that visitor. The grant is what every later request is checked against.
 
 ```
-owner or member ── mints ──> access token at_... ── link, chat, QR ──> visitor redeems with join ──> grant on the visitor
+owner or member ── mints ──> invite at_... ── link, chat, QR ──> visitor redeems with join ──> grant on the visitor
 ```
 
 ### Minting
 
 ```
 POST /v1/{space}/tokens
-Authorization: Bearer vt_...           an owner, or a member when the space allows it
+Authorization: Bearer vt_...           an owner, or a member at the invite level
 
 {"label": "anna"}
 ```
@@ -452,7 +479,7 @@ Authorization: Bearer vt_...           an owner, or a member when the space allo
   "id": "t_3k9f2m7q",
   "token": "at_Qz7r...",
   "label": "anna",
-  "allow": ["*:rw"],
+  "access": "all",
   "uses": 10,
   "until": 1792054400000,
   "grantFor": null
@@ -461,29 +488,30 @@ Authorization: Bearer vt_...           an owner, or a member when the space allo
 
 | Field | Means | Default |
 |---|---|---|
-| `label` | a note for the owner, at most 63 characters | none |
-| `allow` | scopes the grant will have, see [Scopes](#scopes), or a preset name: `member` or `viewer` | from an owner `member`, i.e. `["*:rw"]`; from a member, the scopes of their own grants |
+| `label` | a note for the owner, at most 63 characters. Owners see it next to the member it brought in | none |
+| `access` | the level the grant will have: `read`, `post` or `all` | `all`, or the minter's own level if that is lower |
 | `uses` | how many visitors can redeem it, 1 or more, or `null` for no limit | `10` |
 | `until` | until when it can be redeemed: a duration like `7d`, a date, an RFC 3339 time, or `null` for no end | `7d` |
-| `grantFor` | how long each grant lasts after its redemption: a duration, or `null` for until revoked | `null` |
+| `grantFor` | how long each grant lasts after its redemption: a duration, or `null` for until removed | `null` |
 
-- **The defaults make a token that cleans up after itself.** A link someone forgot in a chat stops working after a week or ten people, whichever comes first. Unlimited uses or no end have to be asked for with an explicit `null`.
-- **Limits apply to redeeming only.** The token is the invite. How long someone stays is the grant's business: until revoked by default, or `grantFor` after they joined.
+- **The defaults make an invite that cleans up after itself.** A link someone forgot in a chat stops working after a week or ten people, whichever comes first. Unlimited uses or no end have to be asked for with an explicit `null`.
+- **Limits apply to redeeming only.** The invite is the way in. How long someone stays is the grant's business: until removed by default, or `grantFor` after they joined.
+- **Nobody gives more than they have.** A member asking for a higher `access` than their own gets 403 `exceeds_rights`. Invites can't give `owner`; owners [set that level](#members) directly.
 - The token is shown once. The server stores only its SHA-256 hash. It's `at_` plus 32 random bytes in base64url.
 - `until` as a date means the end of that day in the server's time zone. A time without an offset is also in the server's time zone. The response always gives milliseconds.
-- `uses` and `until` can be changed later, see [Managing tokens](#managing-tokens). `allow` and `grantFor` can't, so every grant matches the token it came from.
-- The response and the token list carry `by`, the visitor who minted it.
+- `uses` and `until` can be changed later, see [Managing invites](#managing-invites). `access` and `grantFor` can't, so every grant matches the invite it came from.
+- The invite list carries `by`, the visitor who minted it.
 
 ### Invites from members
 
-Unless the space's `invite` setting is `owners`, every visitor holding a grant may mint access tokens. It's the same `POST /v1/{space}/tokens`, with two rules:
+Members whose level reaches the space's `invite` setting (`post` unless changed) may mint invites. It's the same `POST /v1/{space}/tokens`, with two rules:
 
-- **Nothing beyond your own rights.** Every scope in `allow` must be covered by the minter's own grants. Rights everyone has through `public` don't count. A member who asks for more gets 403 `exceeds_rights`. Leaving `allow` out gives the invitee what the inviter holds.
-- **A token works only while its minter could still mint it.** Redeeming checks the minter's rights again. When an owner revokes the minter, a grant they relied on ends, or the space switches to `invite: owners`, the minter's open tokens end with state `revoked`.
+- **At most their own level.** Leaving `access` out gives `all` or the member's own level, whichever is lower.
+- **An invite works only while its minter could still mint it.** Redeeming checks the minter's level again. When an owner lowers or removes the minter, bans them, or raises the space's `invite` level, the minter's open invites end with state `revoked`.
 
-Everyone a member invited keeps their grant when the member is removed. Grants stand on their own, as they already outlive the token they came from. An owner removes invitees separately if they want to, and can follow who invited whom: each grant in [`GET /grants`](#managing-grants) has `invitedBy`, the minter of the token it came from.
+Everyone a member invited keeps their grant when the member is removed. Grants stand on their own, as they already outlive the invite they came from. An owner removes invitees separately if they want to, and can follow who invited whom: each member in [`GET /members`](#members) has `invitedBy`.
 
-Members list, change and revoke only the tokens they minted. Revoking one removes the grants redeemed from it, as for owners, so a member can take back their own invite. Everything else under [Managing a space](#6-managing-a-space) stays with owners.
+Members list, change and revoke only the invites they minted. Revoking one removes the grants redeemed from it, as for owners, so a member can take back their own invite.
 
 ### Handing it out
 
@@ -496,9 +524,9 @@ https://example.com/chat/#room=room-slate-hinge-cocoa-pilot&t=at_Qz7r...
 
 - The fragment never reaches any server and isn't sent in `Referer`.
 - After redeeming, the page removes `t` from the address bar with `history.replaceState`, so it isn't kept in history or passed on when someone copies the URL.
-- Nobody keeps the access token after redeeming. If a person might need it again, on a new device or after clearing their browser, they keep the link.
+- Nobody keeps the invite after redeeming. If a person might need it again, on a new device or after clearing their browser, they keep the link.
 
-A token written into a public page's source belongs to anyone who can load the page. That's the same as opening the space to everyone for those scopes, with the difference that the owner can revoke it. For "everyone may respond", use the space's `write` setting instead.
+An invite written into a public page's source belongs to anyone who can load the page. That's the same as giving everyone its level, with the difference that the owner can revoke it. For "everyone may post", set `anyone` instead.
 
 ### Redeeming: join
 
@@ -511,103 +539,81 @@ Authorization: Bearer vt_...           optional
 
 ```
 200                                    with a visitor token: the grant is added to that visitor
-{"space": "poll-amber-lotus-quill-ridge", "id": "u_k7m2x9q4p1r8t3w6", "owner": false,
- "allow": ["*:rw"], "until": null,
- "settings": {"public": "respond", "read": "anyone", "write": {"shared": "granted", "users": "anyone", "to": "anyone"}}}
+{"space": "poll-amber-lotus-quill-ridge", "id": "u_k7m2x9q4p1r8t3w6", "access": "all", "until": null,
+ "settings": {"anyone": "post", "invite": "post"}}
 
 201                                    without one: a new visitor is created and gets the grant
 {"token": "vt_8Rn2...", "id": "u_p1r8t3w6k7m2x9q4", ...same fields...}
 ```
 
-- **Send the visitor token you have.** Without one, `join` creates a new visitor. A page that already has an identity and leaves it out splits one person into two: the new one has the grant, the old one has their `users/` data.
+- **Send the visitor token you have.** Without one, `join` creates a new visitor. A page that already has an identity and leaves it out splits one person into two: the new one has the grant, the old one has their `by/` data.
 - **A client must save a returned `token` before doing anything else.** If the response is lost, so is the identity holding the grant, and with `uses: 1` the invite too.
-- **Redeeming is idempotent per visitor.** Redeeming a token the visitor has already redeemed returns 200 with the existing grant and doesn't use up a use, even if the token has since run out. Reloading a page with the link still in it is harmless.
+- **Redeeming is idempotent per visitor.** Redeeming an invite the visitor has already redeemed returns 200 and doesn't use up a use, even if the invite has since run out. Reloading a page with the link still in it is harmless.
 - Each redemption by a new visitor uses one use. The grant gets `until` = now + `grantFor`, or `null`.
-- `allow`, `owner` and `until` in the response describe this grant. The visitor's full rights are in [`access`](#what-can-i-do-here).
-- An unknown, expired, used-up or revoked token, or a space that doesn't exist, returns 404 `invite_invalid` and costs one miss under the [guessing limit](#guessing-space-names). The response doesn't say which, so a stranger can't tell a real space from a missing one.
-- An [owner token](#owner-token) is redeemed the same way and gives an owner grant.
+- `access` in the response is the visitor's member level now, the highest of their grants. `until` is when this invite's grant ends.
+- An unknown, expired, used-up or revoked invite, or a space that doesn't exist, returns 404 `invite_invalid` and costs one miss under the [guessing limit](#guessing-space-names). The response doesn't say which, so a stranger can't tell a real space from a missing one.
+- A banned visitor gets 403 `banned`, through any invite.
+- An [owner token](#owner-token) is redeemed the same way and gives level `owner`.
 
 ### Grants
 
-- **A visitor can hold any number of grants in a space.** One per redeemed token, plus any [direct grants](#direct-grants) from an owner.
-- **They add up.** A request is allowed if any live grant covers it. There are no deny rules, so no grant can take away what another gives, and order never matters.
-- **Each lives on its own.** A grant has its source (a token ID, `direct`, `owner-token` or `create`), its own `until`, and a last-used time. Revoking one doesn't touch the others.
-- **A grant ends** when its `until` passes, when it's revoked, when the token it came from is revoked, or when the visitor is deleted. An ended grant stops working at once. A watch already waiting is answered normally, and the next request fails.
-- A grant never changes. To give someone different rights, add a grant or revoke one.
+- **A visitor can hold several grants in a space**, one per redeemed invite. Their member level is the highest live one; order never matters.
+- **Each lives on its own.** A grant has its level, its source (an invite ID, `direct`, `owner-token` or `create`), its own `until`, and a last-used time. Revoking an invite removes the grants it gave and leaves the others.
+- **A grant ends** when its `until` passes, when an owner sets the member's level or removes them, when the invite it came from is revoked, or when the visitor is deleted. An ended grant stops working at once. A watch already waiting is answered normally, and the next request fails.
 
-### Scopes
+### Members
 
 ```
-AREA[/TARGET]:RIGHTS
-to[/RECIPIENT[/TARGET]]:RIGHTS
+GET    /v1/{space}/members
+PUT    /v1/{space}/members/{id}     {"access": "post"}, {"access": "banned", "until": "1h"}
+DELETE /v1/{space}/members/{id}     → 200 {"removed": true}
 ```
 
-| Part | Values | If left out |
-|---|---|---|
-| `AREA` | `shared`, `users`, `to` or `*` | required |
-| `TARGET` | a key or a pattern, see [Names](#2-names) | `*` |
-| `RIGHTS` | `r`, `w` or `rw` | required |
-| `RECIPIENT` | `to` only: a visitor ID, `me`, `owners` or `*` | `*`, any recipient |
-
-Two presets can be given instead of a list, as `"allow": "member"`. Responses always show the scopes they stand for.
-
-| Preset | Scopes | For |
-|---|---|---|
-| `member` (default) | `["*:rw"]` | someone who joins to take part: read, write, their own `users/`, `to/` and `inbox/` |
-| `viewer` | `["shared:r", "users:r"]` | someone who should only look, in a private space: a wall screen, a relative following a trip |
-
-| Scope | Allows |
-|---|---|
-| `*:rw` | everything a visitor can do, in every area. A full member |
-| `shared:r` | reading `shared/`, in a private space |
-| `shared/*:rw` | reading and writing all of `shared/` |
-| `shared/status.*:w` | writing keys starting with `status.` and nothing else, for a script |
-| `shared/config:w` | writing exactly the key `config` |
-| `users:w` | writing your own `users/{id}/` |
-| `to:rw` | sending to anyone, reading your inbox and what you sent |
-| `to/me:rw` | your own private slot, and reading your inbox |
-| `to/owners/*:w` | sending to the owners and nothing else, for a contact form |
-| `to/owners/answer:w` | sending only `answer` to the owners |
-
-Rules:
-
-- `r` covers `GET` and `HEAD`: reading, listing, watching, reading series and listening for pulses. It only matters in a private space, since elsewhere reading is open.
-- `w` covers `PUT`, `DELETE` and `POST`: writing, deleting, adding points and sending pulses. It doesn't include reading, but write responses still return versions and times, so conditional writes work.
-- `users` covers both `users/{id}/` and `users/*/`. Writing is always only into your own ID.
-- `to` covers both ends. For sending, the scope's recipient must match. For reading your inbox, the recipient is you, so `to:r` and `to/me:r` cover it and `to/owners/*:r` doesn't. Reading `to/*/` needs a scope for any recipient. After `to/` always comes a recipient: `to/answer:w` is 400 `invalid_scope`.
-- A key covers only itself. A pattern `p*` covers every key that starts with `p`, and every pattern `q*` where `q` starts with `p`. `env.*` covers `env.temp`, `env.*` and `env.t*`, but not `*` or `e*`.
-- A request with a pattern needs one scope that covers the whole pattern. Scopes don't add up across keys: `env.temp:r` and `env.rh:r` together don't allow `GET env.*`. A batch `POST env.*/series` needs `w` on a scope covering `env.*`.
-- A scope only adds what the [access rule](#the-access-rule) allows. It never lets anyone write another visitor's `users/{id}/` or `to/` slot, or read another's inbox.
-- An invalid scope returns 400 `invalid_scope` naming it, and nothing is created.
-
-### Direct grants
-
-An owner can grant rights to a visitor ID they already know, with no token involved. For example, promoting someone whose vote is visible in `users/*/` to editor:
+`GET` lists the visitors holding a grant, highest level first:
 
 ```
-POST /v1/{space}/grants
-Authorization: Bearer vt_...           an owner
-
-{"user": "u_p1r8t3w6k7m2x9q4", "allow": ["shared/*:rw"]}
+200
+{"items": [
+  {"id": "u_k7m2x9q4p1r8t3w6", "access": "owner", "since": 1791449600000},
+  {"id": "u_p1r8t3w6k7m2x9q4", "access": "post", "since": 1791450000000}
+]}
 ```
 
+- **Members** (level `read` or higher through a grant) see `id`, `access` and `since`. Visitor IDs are already public under `by/*/`, so this adds only members who never wrote anything. Strangers get 403 `not_member`, even in an open space.
+- **Owners** also see `until` (when the membership ends, `null` for never), `label` and `invitedBy` (from the invite that gave the level), `lastUsedAt`, and banned visitors with `"access": "banned"`.
+- Names aren't cubby's business. Pages keep them under `by/{id}/`, such as `by/me/name`.
+
+`PUT` (owners) gives a visitor exactly one level, replacing every grant they had: `read`, `post`, `all` or `owner`, with an optional `until` in the same forms as invites. `banned` [bans them](#bans). The visitor must exist, otherwise 404 `no_visitor`. It answers 200 with the member.
+
+`DELETE` removes a visitor's grants and any ban, so they're a stranger again: the `anyone` level. Owners remove anyone. Everyone may remove themselves, which is leaving: `DELETE /v1/{space}/members/me`.
+
+### Bans
+
+`PUT /v1/{space}/members/{id}` with `{"access": "banned"}` shuts one visitor out of one space. Only owners ban, and nobody bans themselves.
+
+- **Every request** that carries the banned visitor's token, in that space, answers the same way, reads and `access` included, private or public:
+
 ```
-201 {"id": "g_7d2kq9wm", "user": "u_p1r8t3w6k7m2x9q4", "owner": false, "allow": ["shared/*:rw"],
-     "source": "direct", "until": null}
+403
+{"error": "banned", "message": "This visitor is banned from this space.", "until": 1794650000000}
 ```
 
-- `allow` defaults to `member`, and takes the same presets. `until` is optional, in the same forms as for tokens.
-- `"owner": true` instead of `allow` makes the visitor an owner.
-- The visitor must exist on the server, otherwise 404 `not_found`.
+- `until` is `null` for a ban without end. `until` in the request takes a duration, a date, an RFC 3339 time or milliseconds. A ban with an end lapses by itself, leaving a stranger.
+- **Deliberately explicit.** In a private space the answer is still `banned`, not `no_space`. The visitor was let in once, so the space's existence is no secret to them. If an owner bans an ID that never joined, that visitor learns the space exists once they try its name.
+- **A ban removes their grants.** Their open invites end too. Their data stays; deleting their entries in `by/{id}/` is separate moderation. Lifting the ban with `DELETE` or another `PUT` doesn't bring the old grants back.
+- **Joining** is refused while banned, through any invite.
+- **Live connections** of the visitor to the space get a `banned` frame and close with 4403. Their last wills don't fire.
+- **Reading an open space without a token** still works. A ban stops an identity, not anonymous reading. A banned visitor can come back as a new visitor; the per-IP visitor limit slows that down, and private spaces need a new invite.
+- Per-person blocking ("I don't want messages from X") is the page's job: keep a list in `to/me/`, skip those senders, delete what they sent. The server never reads stored data to decide access.
 
 ### Owner token
 
 `POST /v1/spaces` returns an owner token, `ot_` plus 32 random bytes in base64url, once. It's the recovery key for the space:
 
-- Redeeming it with `join` makes the redeeming visitor an owner. That's how an owner gets in from a new device, a cleared browser, or after their visitor expired.
+- Redeeming it with `join` gives the redeeming visitor level `owner`. That's how an owner gets in from a new device, a cleared browser, or after their visitor expired.
 - It has no use limit and no end.
 - It must never be in a page. Keep it in a password manager.
-- An owner rotates it with `POST /v1/{space}/owner-token`, which returns a new one and invalidates the old one at once. Rotating also removes every owner grant that came from the old token, except the caller's, because a rotation usually means the old one leaked. Owner grants from creating the space or from direct grants stay.
+- An owner rotates it with `POST /v1/{space}/owner-token`, which returns a new one and invalidates the old one at once. Rotating also removes every owner grant that came from the old token, except the caller's, because a rotation usually means the old one leaked. Owner grants from creating the space or set directly stay.
 - If every owner is gone and the token is lost, the server operator can issue a new one with `cubby admin owner-token <space>`.
 
 ### What can I do here
@@ -621,36 +627,34 @@ Authorization: Bearer vt_...           optional
 200
 {
   "id": "u_k7m2x9q4p1r8t3w6",
-  "owner": false,
+  "access": "post",
   "canInvite": true,
-  "settings": {"public": "respond", "read": "anyone", "write": {"shared": "granted", "users": "anyone", "to": "anyone"}, "invite": "members"},
-  "grants": [
-    {"id": "g_7d2kq9wm", "allow": ["shared/poll.*:rw"], "source": "t_3k9f2m7q", "until": null},
-    {"id": "g_m4x8r2pt", "allow": ["shared/notes.*:rw"], "source": "t_9wq4n6zd", "until": 1794646400000}
-  ]
+  "settings": {"anyone": "read", "invite": "post"},
+  "usage": {...},
+  "limits": {...}
 }
 ```
 
-- Without a visitor token, `id` is `null` and `grants` is empty. The answer then says what anyone may do.
+- `access` is the caller's level. Without a visitor token, `id` is `null` and `access` is the `anyone` level.
 - A page uses it to show or hide edit controls without waiting for a 403. `canInvite` says whether this visitor may mint invites.
-- In a private space without a readable grant, it returns 404 `no_space` like everything else.
+- In a private space below `read`, it returns 404 `no_space` like everything else.
 
 ## 6. Managing a space
 
-Every route here needs a visitor token of an owner. Anyone else gets 403 `owner_only`, or 404 `no_space` if they can't read the space. The exception is tokens: members who [may invite](#invites-from-members) manage their own.
+Every route here needs an owner's visitor token. Anyone else gets 403 `owner_only`, or 404 `no_space` if they can't read the space. The exceptions: members at the invite level manage their own invites, members list members, and anyone leaves.
 
 ### Settings and deletion
 
 ```
-PATCH  /v1/{space}        {"public": "read"}                     → 200 {"settings": {...}}
-PATCH  /v1/{space}        {"write": {"users": "anyone"}}
+PATCH  /v1/{space}        {"anyone": "read"}                     → 200 {"settings": {...}}
+PATCH  /v1/{space}        {"invite": "owner"}
 DELETE /v1/{space}                                                → 200 {}
 ```
 
-- `PATCH` takes either `public`, which replaces both access settings, or `read` and `write`, both optional, and `invite` alongside either. `write` may be the shorthand string or an object with some areas. Areas left out keep their value. The result must be valid, see [Settings](#settings).
-- `DELETE` deletes the space with all its data, tokens and grants. Waiting watches get 404 `no_space`. The name is free again afterwards.
+- `PATCH` takes `anyone`, `invite` or both. Fields left out keep their value.
+- `DELETE` deletes the space with all its data, invites and grants. Waiting watches get 404 `no_space`. The name is free again afterwards.
 
-### Managing tokens
+### Managing invites
 
 ```
 GET    /v1/{space}/tokens
@@ -661,75 +665,22 @@ DELETE /v1/{space}/tokens/{id}
 ```
 200
 {"items": [
-  {"id": "t_3k9f2m7q", "label": "anna", "allow": ["*:rw"], "usesLeft": 9, "until": 1792054400000,
-   "grantFor": null, "state": "active", "grants": 1, "createdAt": 1791449600000, "lastRedeemedAt": 1791450000000,
+  {"id": "t_3k9f2m7q", "label": "anna", "access": "all", "usesLeft": 9, "until": 1792054400000,
+   "grantFor": null, "state": "active", "members": 1, "createdAt": 1791449600000, "lastRedeemedAt": 1791450000000,
    "by": "u_k7m2x9q4p1r8t3w6"}
 ]}
 ```
 
-- Token values are never shown again. The list has what the owner needs to recognise them. Owners see every token, members only their own.
-- `by` is the visitor who minted the token, `null` for tokens from before this was recorded.
-- `state` is `active`, `expired`, `used_up` or `revoked` (its member minter can no longer give it). A token that can't be redeemed stays listed while any grant from it exists, and for 30 days after it ended.
+- Invite values are never shown again. The list has what the owner needs to recognise them. Owners see every invite, members only their own.
+- `members` counts the grants redeemed from it that still exist.
+- `state` is `active`, `expired`, `used_up` or `revoked` (its member minter can no longer give it). An invite that can't be redeemed stays listed while any grant from it exists, and for 30 days after it ended.
 - `PATCH` changes only `uses` (uses left from now) and `until`. It extends an invite or ends it early. `{"uses": 0}` stops new redemptions and keeps everyone who already joined.
-- `DELETE` removes the token and every grant redeemed from it.
-
-### Managing grants
-
-```
-GET    /v1/{space}/grants
-GET    /v1/{space}/grants?user=u_p1r8t3w6k7m2x9q4
-POST   /v1/{space}/grants                       see Direct grants
-DELETE /v1/{space}/grants/{id}
-DELETE /v1/{space}/grants?user=u_p1r8t3w6k7m2x9q4
-```
-
-```
-200
-{"items": [
-  {"id": "g_7d2kq9wm", "user": "u_p1r8t3w6k7m2x9q4", "owner": false, "allow": ["*:rw"],
-   "source": "t_3k9f2m7q", "invitedBy": "u_k7m2x9q4p1r8t3w6", "until": null, "createdAt": 1791450000000, "lastUsedAt": 1791459600000}
-]}
-```
-
-- Owner grants are in the list with `"owner": true`.
-- `invitedBy` is the minter of the token the grant came from, `null` for direct grants and older tokens. Following it gives the chain of invites.
-- `DELETE ...?user=` removes everything that visitor holds in the space, ownership included.
-- An owner can remove their own owner grant. The owner token still works afterwards.
-
-### Bans
-
-```
-PUT    /v1/{space}/bans/{id}        {"until": "1h"}, or {} for no end
-DELETE /v1/{space}/bans/{id}        → 200 {"lifted": true}
-GET    /v1/{space}/bans
-```
-
-```
-201
-{"user": "u_p1r8t3w6k7m2x9q4", "until": 1794650000000, "by": "u_k7m2x9q4p1r8t3w6", "t": 1794646400000}
-```
-
-A ban shuts one visitor out of one space. Only owners ban, and owners can't be banned: `PUT` on an owner returns 409 `is_owner`. Remove their owner grant first.
-
-- **Every request** that carries the banned visitor's token, in that space, answers the same way, reads and `access` included, private or public:
-
-```
-403
-{"error": "banned", "message": "This visitor is banned from this space.", "until": 1794650000000}
-```
-
-- `until` is `null` for a ban without end. `until` in the request takes what grants take: a duration, a date, an RFC 3339 time or milliseconds. A ban with an end lapses by itself. `PUT` again replaces it: 201 for a new ban, 200 for a replaced one.
-- **Deliberately explicit.** In a private space the answer is still `banned`, not `no_space`. The visitor was let in once, so the space's existence is no secret to them. If an owner bans an ID that never joined, that visitor learns the space exists once they try its name.
-- **Nothing else changes.** A ban deletes no data and revokes no grant or token. `DELETE` restores exactly what the visitor had. Cleaning up is separate: delete their entries in `users/{id}/` as moderation.
-- **Joining** is refused while banned, through any invite. A banned member's own invites stop working until the ban ends.
-- **Live connections** of the visitor to the space get a `banned` frame and close with 4403. Their last wills don't fire.
-- **Reading a public space without a token** still works. A ban stops an identity, not anonymous reading. A banned visitor can come back as a new visitor; the per-IP visitor limit slows that down, and private spaces need a new invite.
-- Per-person blocking ("I don't want messages from X") is the page's job: keep a list in `to/me/`, skip those senders, delete what they sent. The server never reads stored data to decide access.
+- `DELETE` removes the invite and every grant redeemed from it.
 
 ### Rotating the owner token
 
 ```
-POST /v1/{space}/owner-token          → 200 {"owner": "ot_..."}
+POST /v1/{space}/owner-token          → 200 {"ownerToken": "ot_..."}
 ```
 
 See [Owner token](#owner-token).
@@ -772,7 +723,7 @@ In list and watch responses, JSON values appear as themselves and text values as
 
 - Each space has one counter. Every successful write or delete in the space, in any area, raises it.
 - Each key stores the counter value of its last write: its version.
-- Each key also records `by`, the ID of the visitor whose write or delete gave it that version. Reads, lists and watches return it, so a page can tell who changed `shared/` data and recognise its own writes coming back through a watch. Visitor IDs are already public under `users/*/`, so this reveals nothing new.
+- Each key also records `by`, the ID of the visitor whose write or delete gave it that version. Reads, lists and watches return it, so a page can tell who changed `shared/` data and recognise its own writes coming back through a watch. Under `by/{id}/` it is always the author. Visitor IDs are already public under `by/*/`, so this reveals nothing new.
 - Versions only grow and aren't contiguous per key. `0` means "doesn't exist".
 - A new space's counter starts at the current Unix time in milliseconds. Clients must treat versions as opaque increasing numbers. They stay below 2^53, so they're exact in JavaScript.
 - A new space has no keys but already has a counter. Lists and watches on it return the counter as `version`, so a client watching an empty space picks up the first write with no special case.
@@ -781,7 +732,7 @@ In list and watch responses, JSON values appear as themselves and text values as
 
 ## 9. Endpoints
 
-`{area}` stands for `shared`, `users/{id}`, `to/{recipient}` or (read and delete) `inbox/{sender}`.
+`{area}` stands for `shared`, `by/{id}`, `to/{recipient}` or (read and delete) `inbox/{sender}`.
 
 ### Create a space
 
@@ -789,16 +740,16 @@ In list and watch responses, JSON values appear as themselves and text values as
 POST /v1/spaces
 Authorization: Bearer vt_...           optional
 
-{"label": "poll", "public": "respond"}
+{"label": "poll", "anyone": "post"}
 ```
 
 ```
 201
 {
   "space": "poll-cedar-pilot-mango-frost",
-  "owner": "ot_8Hq3vT...",
+  "ownerToken": "ot_8Hq3vT...",
   "id": "u_k7m2x9q4p1r8t3w6",
-  "settings": {"public": "respond", "read": "anyone", "write": {"shared": "granted", "users": "anyone", "to": "anyone"}}
+  "settings": {"anyone": "post", "invite": "post"}
 }
 ```
 
@@ -808,8 +759,8 @@ The body is optional. An empty body creates a private space with a generated nam
 |---|---|
 | `label` | generate a name with this label in front. At most 35 characters |
 | `name` | create exactly this name instead. It must follow the [naming rule](#space-name). Can't be combined with `label` |
-| `public` | `none`, `read`, `respond` or `all`, see [The public shorthand](#the-public-shorthand). Left out: `none`, private |
-| `read`, `write` | the space's [settings](#settings) in full, instead of `public` |
+| `anyone` | `none`, `read`, `post` or `all`, see [Settings](#settings). Left out: `none`, private |
+| `invite` | the lowest member level that may invite: `read`, `post`, `all` or `owner`. Left out: `post` |
 | `invite` | `members` (default) or `owners`, who may mint invites |
 
 - The caller becomes the space's owner. The response has the [owner token](#owner-token), shown once, and the caller's visitor `id`.
@@ -877,7 +828,7 @@ PUT /v1/poll/{area}/question?ifVersion=0
 - Lists and watches include `expires` on expiring live entries. GET and PUT responses include `KV-Expires`. Identical-value renewals keep version, `by` and `t`; they update expiry silently. A cached watch entry's `expires` can therefore be stale. Fetch the key for current expiry; do not drive a countdown from a watch's cached expiry.
 - Expiry removes the value's bytes from the writer's usage and leaves only the key-sized tombstone in the space quota. TTL renewals spend the usual write budget and keep the space active.
 
-Presence uses `users/{id}/here` with `ttl=30`, renewed every 15 to 20 seconds. Watch `users/*/here` to see arrivals and expiry deletions. `to/me/` is private and is unsuitable for a shared roster.
+Presence uses `by/{id}/here` with `ttl=30`, renewed every 15 to 20 seconds. Watch `by/*/here` to see arrivals and expiry deletions. `to/me/` is private and is unsuitable for a shared roster.
 
 A lease works through ordinary conditional requests. Choose a unique holder value for each actor:
 
@@ -946,35 +897,35 @@ DELETE /v1/poll/{area}/question?ifVersion=1791449600042
 GET /v1/poll/{area}/msg.*
 GET /v1/poll/{area}/msg.*?limit=50&order=desc
 GET /v1/poll/{area}/msg.*?after=msg.1791449600123
-GET /v1/poll/users/*/vote
+GET /v1/poll/by/*/vote
 ```
 
 ```
 200
 {
   "items": [
-    {"key": "vote", "value": "tacos", "version": 1791449600041, "user": "u_k7m2x9q4p1r8t3w6", "by": "u_k7m2x9q4p1r8t3w6"},
-    {"key": "vote", "value": "pizza", "version": 1791449600044, "user": "u_p1r8t3w6k7m2x9q4", "by": "u_p1r8t3w6k7m2x9q4"}
+    {"key": "vote", "value": "tacos", "version": 1791449600041, "by": "u_k7m2x9q4p1r8t3w6"},
+    {"key": "vote", "value": "pizza", "version": 1791449600044, "by": "u_p1r8t3w6k7m2x9q4"}
   ],
   "version": 1791449600057,
   "next": null
 }
 ```
 
-- Items have `key`, `value`, `version` and `by`. Under `users/*/` they also have `user`, which is always the same as `by` there. Series keys also have `t`, the time of the newest point, and `value` is that point.
-- Sorted by key, ascending unless `order=desc`. Under `users/*/` ties are sorted by `user`.
+- Items have `key`, `value`, `version` and `by`. Under `by/*/`, `by` is the author. Series keys also have `t`, the time of the newest point, and `value` is that point.
+- Sorted by key, ascending unless `order=desc`. Under `by/*/` ties are sorted by author.
 - `limit` is 1 to 1000, default 1000. A page also ends once it holds 4 MB of keys and values, with `next` set, so a page of large values can have fewer items than `limit`. The first item always comes.
 - `next` is a cursor when more pages exist, otherwise `null`. Pass it back as `after`.
 - `version` is the space's counter when the list was read. Watching from it continues exactly after this list.
 - Listing in a space that doesn't exist, or that the request can't read, returns 404 `no_space`. A pattern with no matches returns an empty list.
-- A target without `*` lists that exact key: zero or one item, or one per visitor under `users/*/`.
+- A target without `*` lists that exact key: zero or one item, or one per visitor under `by/*/`.
 
 ### Watch
 
 ```
 GET /v1/poll/{area}/question/watch?version=1791449600041
 GET /v1/poll/{area}/msg.*/watch?version=0
-GET /v1/poll/users/*/vote/watch
+GET /v1/poll/by/*/vote/watch
 ```
 
 See [Watching](#10-watching).
@@ -999,7 +950,7 @@ See [Series](#11-series).
 | `GET /health` | 200 `{"ok": true, "version": "vX.Y.Z"}` |
 | `OPTIONS` anything | the CORS preflight response |
 | `/v1/anon`, `/v1/whoami`, `/v1/spaces` | see [Visitors](#3-visitors) and [Create a space](#create-a-space) |
-| `/v1/{space}` and its `access`, `join`, `tokens`, `grants`, `owner-token` | see [Paths](#paths) |
+| `/v1/{space}` and its `access`, `join`, `tokens`, `members`, `owner-token` | see [Paths](#paths) |
 | anything else, including `/` and `/v1` | 404 `{"error": "not_found", "message": "No such route."}` |
 
 The server doesn't describe itself. Unknown routes all get the same 404 with no hints, so a stray visitor learns nothing about the API. Clients and these docs are where the paths are explained.
@@ -1021,15 +972,15 @@ A watch asks: "what changed in this key or pattern after version N?" The server 
 ```json
 {
   "changes": [
-    {"key": "msg.1791449600999.b2k7", "value": {"text": "hey"}, "version": 1791449600058, "user": "u_k7m2x9q4p1r8t3w6", "by": "u_k7m2x9q4p1r8t3w6"},
-    {"key": "vote", "deleted": true, "version": 1791449600059, "user": "u_p1r8t3w6k7m2x9q4", "by": "u_p1r8t3w6k7m2x9q4"}
+    {"key": "msg.1791449600999.b2k7", "value": {"text": "hey"}, "version": 1791449600058, "by": "u_k7m2x9q4p1r8t3w6"},
+    {"key": "vote", "deleted": true, "version": 1791449600059, "by": "u_p1r8t3w6k7m2x9q4"}
   ],
   "version": 1791449600059,
   "more": false
 }
 ```
 
-- `changes` is ordered by version. Each key appears at most once, with its current state. Every entry carries `by`; for a deleted key it's whoever deleted it. Under `users/*/` entries also carry `user`. Series keys carry `t`, and their value is the newest point.
+- `changes` is ordered by version. Each key appears at most once, with its current state. Every entry carries `by`; for a deleted key it's whoever deleted it, except under `by/`, where it's always the author. Series keys carry `t`, and their value is the newest point.
 - `version` is what the client sends next. It's a position in the space's changes, not any key's version, and it can be far ahead of a watched key's own version. For `ifVersion`, always use the `version` inside a change entry.
 - On timeout: 200 with `"changes": []` and the space's current counter as `version`.
 - `more: true` means more changes were ready than fit in one response, 1000 or 4 MB of keys and values. `version` is then the last included entry's, and the next request returns at once with the rest.
@@ -1061,7 +1012,7 @@ GET /v1/{space}/live        Upgrade: websocket
 
 One WebSocket per space carries reads, writes and watches. It's the same store as HTTP: a write over either wakes watchers on both, versions are shared, and a `curl` script and a page on a socket see each other's changes as they happen. Watched changes are pushed with no request per change. HTTP stays the basic way, and keeps every feature.
 
-Only data goes over the socket: get, set, delete, list, watch, series and pulses, under `shared/`, `users/`, `to/` and `inbox/`. Creating spaces, visitors, `join`, `access`, settings, tokens, grants, `owner-token`, `whoami`, `/limits` and `/time` stay HTTP only.
+Only data goes over the socket: get, set, delete, list, watch, series and pulses, under `shared/`, `by/`, `to/` and `inbox/`. Creating spaces, visitors, `join`, `access`, settings, invites, members, `owner-token`, `whoami`, `/limits` and `/time` stay HTTP only.
 
 #### Connecting and auth
 
@@ -1071,7 +1022,7 @@ Only data goes over the socket: get, set, delete, list, watch, series and pulses
 - Both together are fine, and `auth` may come again at any time, for example after the page creates a visitor for its first write. Each message runs as the visitor from the latest `auth` (or the header).
 - `auth` answers `200 {"id":"u_..."}`, or `{"id":null}` for `{"op":"auth"}` without a token. A bad token answers 401 `invalid_token`, and what follows behaves exactly like HTTP with a bad token: reads run without a visitor, writes answer `invalid_token`.
 - Access is checked per message, never at connect, so a page may connect before it joins and use a grant the moment it gets one. A space the caller can't see answers each message with `no_space`, exactly like a missing space, and costs the same [miss](#guessing-space-names).
-- Switching to a different visitor ends watches and pulse listeners on `to/`, `inbox/` and `users/me/` with 409 `identity_changed`. They meant the old visitor's. Start them again from their last version.
+- Switching to a different visitor ends watches and pulse listeners on `to/`, `inbox/` and `by/me/` with 409 `identity_changed`. They meant the old visitor's. Start them again from their last version.
 - When an owner bans the connection's visitor, the server sends a 403 `banned` frame without an id, then closes with 4403. Their wills don't fire.
 
 #### Messages
@@ -1211,7 +1162,7 @@ GET /v1/home/shared/temp/series?since=1791440000000     the first 1000 after tha
 - A series keeps its newest 20,000 points (`max_series_points`). Adding one more deletes the oldest in the same transaction, so a series never fails for being long.
 - 20,000 points is about 14 days at one point a minute, or 2 days at one every 10 seconds.
 - 20,000 points of the largest size, with their keys, stay under the 100 MB space quota, so a full series at a steady rate can't fill a space by itself.
-- Points have no expiry of their own. They live as long as the key, which lives as long as its space, or its visitor under `users/` and `to/`.
+- Points have no expiry of their own. They live as long as the key, which lives as long as its space, or its visitor under `by/` and `to/`.
 
 ### Series storage
 
@@ -1241,15 +1192,15 @@ GET  /v1/{space}/{area}/{key or pattern}/pulse?after=SEQ                 → {"p
 ### Sending
 
 - The body follows the rules for a value: UTF-8, JSON or text, not empty. At most 4 KB (`max_pulse_size`). The route takes no parameters.
-- It needs the right to write that key. Under `users/{id}/` only that visitor sends; owners can't send as someone else. A pulse to `to/{recipient}/` reaches only that recipient's `inbox/` listeners and your own `to/` listeners. `to/me/` reaches only your own, such as your other tabs and devices.
+- It needs the right to write that key. Under `by/{id}/` only that visitor sends; owners can't send as someone else. A pulse to `to/{recipient}/` reaches only that recipient's `inbox/` listeners and your own `to/` listeners. `to/me/` reaches only your own, such as your other tabs and devices.
 - The answer is `202 Accepted` with the server time `t`, whether or not anyone listens. There's no version, `ETag` or `RateLimit` header.
 - Pulses have their own rate limits, separate from writes: 60 per second per visitor with a burst of 120, and 300 per second per IP. Sending pulses never uses up the write budget, and writes never use up the pulse budget.
-- A pulse goes to one key. Patterns, `users/*/`, `to/*/` and `inbox/` are for listening.
+- A pulse goes to one key. Patterns, `by/*/`, `to/*/` and `inbox/` are for listening.
 
 ### Listening
 
 - `GET .../pulse` is a long poll, like a watch. Without `after` it listens from now. It answers as soon as pulses after its cursor exist, or after `timeout` seconds (1 to 55, default 25) with none.
-- The answer is `{"pulses": [{"key", "user", "by", "value", "t"}], "seq", "missed"}`. `user` is set under `users/*/`. Text values are JSON strings, as in lists. Pulses come in the order the server received them, including the listener's own.
+- The answer is `{"pulses": [{"key", "by", "value", "t"}], "seq", "missed"}`, with `from` and `to` under `to/` and `inbox/`. Text values are JSON strings, as in lists. Pulses come in the order the server received them, including the listener's own.
 - Pass `seq` back as `after`. Pulses sent between two requests arrive with the next one.
 - Over HTTP, once a pulse arrives the server waits 50 ms before answering, to take the ones right behind it in the same answer.
 - It needs the right to read the key or pattern. One request costs one read and counts as an open watch while it waits.
@@ -1266,11 +1217,11 @@ Pulses aren't stored, but each space keeps the most recent ones in memory for a 
 ### On a live connection
 
 ```
-→ {"id":1,"method":"POST","path":"users/u_k7m2x9q4p1r8t3w6/cursor/pulse","body":{"x":120,"y":40}}
+→ {"id":1,"method":"POST","path":"by/u_k7m2x9q4p1r8t3w6/cursor/pulse","body":{"x":120,"y":40}}
 ← {"id":1,"status":202,"body":{"t":1791449600123}}
-→ {"id":"c","method":"GET","path":"users/*/cursor/pulse"}
+→ {"id":"c","method":"GET","path":"by/*/cursor/pulse"}
 ← {"id":"c","status":200,"body":{"pulses":[],"seq":1793107200000001,"missed":false}}
-← {"id":"c","status":200,"body":{"pulses":[{"key":"cursor","user":"u_...","by":"u_...","value":{"x":120,"y":40},"t":...}],"seq":...,"missed":false}}
+← {"id":"c","status":200,"body":{"pulses":[{"key":"cursor","by":"u_...","value":{"x":120,"y":40},"t":...}],"seq":...,"missed":false}}
 → {"op":"stop","watch":"c"}
 ```
 
@@ -1283,9 +1234,9 @@ Pulses aren't stored, but each space keeps the most recent ones in memory for a 
 A live connection can leave pulses for the server to send when the connection ends, borrowed from MQTT's last will. A page uses it to say "I'm gone" when its tab closes or its network drops, which it can't send itself.
 
 ```
-→ {"id":7,"op":"will","path":"users/u_k7m2x9q4p1r8t3w6/here/pulse","body":{"left":true}}
+→ {"id":7,"op":"will","path":"by/u_k7m2x9q4p1r8t3w6/here/pulse","body":{"left":true}}
 ← {"id":7,"status":200,"body":{}}
-→ {"id":8,"op":"will","path":"users/u_k7m2x9q4p1r8t3w6/here/pulse"}        clears it
+→ {"id":8,"op":"will","path":"by/u_k7m2x9q4p1r8t3w6/here/pulse"}        clears it
 ```
 
 - `path` is a pulse path, `{area}/{key}/pulse`, and `body` or `text` the value, as for sending. One will per path: registering again replaces it, and leaving out the value clears it. At most 8 per connection; another answers 429 `too_many_wills`.
@@ -1327,11 +1278,10 @@ A key's size is its key length plus its value length. Tombstones count as their 
 
 | Limit | Default | Error |
 |---|---|---|
-| Access tokens per space, listed ones included | 1000 | 507 `space_quota_exceeded` |
+| Invites per space, listed ones included | 1000 | 507 `space_quota_exceeded` |
 | Grants per space | 10,000 | 507 `space_quota_exceeded` |
-| Scopes per token or grant | 20 | 400 `invalid_scope` |
 
-A token with `uses: null` in a public page could otherwise make a grant per visitor forever. When a space is full of grants, redeeming fails and existing grants keep working.
+An invite with `uses: null` in a public page could otherwise make a grant per visitor forever. When a space is full of grants, redeeming fails and existing grants keep working.
 
 ### Rates
 
@@ -1382,7 +1332,7 @@ Only the request that would go over fails. Nothing stored is touched, and reads 
 
 - **Created** only by `POST /v1/spaces`, which gives it an owner. Reads, writes, lists and watches never create a space.
 - **Active** whenever it's read, listed, watched or written. Reads count, so a status page that's read daily but updated twice a year stays alive.
-- **Deleted** by an owner with `DELETE /v1/{space}`, by the operator with `cubby admin delete`, or after 180 days without activity (`space_idle_ttl`), file and all, unless pinned. Its tokens and grants go with it.
+- **Deleted** by an owner with `DELETE /v1/{space}`, by the operator with `cubby admin delete`, or after 180 days without activity (`space_idle_ttl`), file and all, unless pinned. Its invites and grants go with it.
 - **Pinned** spaces are listed in config. They get their own limits and are never deleted automatically.
 
 Most pages are used now and then, not constantly: a poll before each team lunch, a packing list before each trip. The retention defaults are long for that reason. The cost is that spam also lingers longer. Quotas cap how much there can be, and `cubby admin delete` removes it by hand.
@@ -1395,7 +1345,7 @@ Most pages are used now and then, not constantly: a poll before each team lunch,
 | Visitor not seen | 365 days | `visitor_idle_ttl` |
 | Visitor not seen who never stored anything and holds no grant | 30 days | `empty_visitor_idle_ttl` |
 | Delete markers for watchers | 7 days | `tombstone_ttl` |
-| Access token that can no longer be redeemed and has no grants left | 30 days after it ended | fixed |
+| Invite that can no longer be redeemed and has no grants left | 30 days after it ended | fixed |
 | Grant past its `until` | removed by the next cleanup, stops working at once | fixed |
 
 A watcher that comes back after more than 7 days gets 410 and reloads its snapshot, which is cheap. A longer `tombstone_ttl` would only avoid that reload.
@@ -1478,23 +1428,23 @@ Through `cubby admin`, see [Admin](#admin) in the CLI section. There is no admin
 | 400 | `empty_value` | empty `PUT` or `POST` body | |
 | 400 | `json_too_deep` | JSON nested over 64 levels | |
 | 400 | `batch_needs_object` | a batch body that isn't a JSON object with 1 to 100 members | |
-| 400 | `invalid_parameter` | bad `limit`, `order`, `after`, `since`, `t`, `timeout`, `version`, `ifVersion`, `ttl`, `ifBefore`, `label`, `name`, `uses`, `until`, `grantFor`, `wait`, `others`, `code`, or a malformed JSON body | `parameter` |
-| 400 | `invalid_settings` | unknown setting or value, `public` together with `read` or `write`, or `read: granted` with any area writable by anyone | |
-| 400 | `invalid_scope` | malformed scope or unknown preset, or more than 20 scopes | `scope` |
+| 400 | `invalid_parameter` | bad `limit`, `order`, `after`, `since`, `t`, `timeout`, `version`, `ifVersion`, `ttl`, `ifBefore`, `label`, `name`, `access`, `uses`, `until`, `grantFor`, `wait`, `others`, `code`, an unknown field, or a malformed JSON body | `parameter` |
+| 400 | `invalid_settings` | an unknown `anyone` or `invite` value | |
 | 401 | `missing_token` | visitor token needed but missing | |
 | 401 | `invalid_token` | visitor token needed, unknown or expired | |
-| 403 | `no_access` | a write the space's settings and the visitor's grants don't allow, in a space the request can read | |
+| 403 | `no_access` | a write the visitor's level doesn't reach, in a space the request can read | `need` |
 | 403 | `owner_only` | an owner route, called by someone who isn't an owner but can read the space | |
 | 403 | `not_yours` | write under another visitor's ID | |
+| 403 | `not_member` | listing members without a grant in the space | |
+| 403 | `exceeds_rights` | an invite with a higher `access` than the minter's own level | |
 | 403 | `banned` | any request from a visitor an owner banned from the space | `until` |
-| 404 | `no_visitor` | sending under `to/` to an ID no visitor has | |
-| 404 | `not_found` | key, route, token ID, grant ID or visitor doesn't exist | |
+| 404 | `no_visitor` | sending under `to/`, or setting a member's level, for an ID no visitor has | |
+| 404 | `not_found` | key, route or invite ID doesn't exist | |
 | 404 | `no_space` | the space doesn't exist, or it's private and the request can't read it. The message says both, see [Private spaces](#private-spaces) | |
 | 404 | `invite_invalid` | `join` with a token that's unknown, expired, used up or revoked, or for a space that doesn't exist | |
 | 404 | `bad_link` | redeeming a link code that doesn't exist | |
-| 405 | `method_not_allowed` | wrong method for the route, such as `PUT` under `users/*/` or `inbox/`, or `POST` on a key without `/series` | `allow` |
+| 405 | `method_not_allowed` | wrong method for the route, such as `PUT` under `by/*/` or `inbox/`, or `POST` on a key without `/series` | `allow` |
 | 409 | `space_exists` | `POST /v1/spaces?name=` with a taken name | `space` |
-| 409 | `is_owner` | banning an owner | |
 | 409 | `same_visitor` | redeeming a link as the visitor who made it | |
 | 409 | `too_many_links` | a fourth open device link | `limit` |
 | 409 | `last_device` | signing out a visitor's only device | |
@@ -1578,14 +1528,29 @@ Many pages using cubby are written by coding agents for people who don't know wh
 ```js
 // cubby client. A guide for whoever writes code with this, person or coding agent.
 //
-// Spaces are PRIVATE by default. Only the creator (the owner) and people they
-// invite can read or write. Everyone else gets 404 no_space, exactly as if the
-// space didn't exist, so a missing invite looks like a wrong name. Check both.
+// Spaces are PRIVATE by default: only the creator (the owner) and people they
+// invite get in. Everyone else gets 404 no_space, exactly as if the space
+// didn't exist, so a missing invite looks like a wrong name. Check both.
 //
 // Every page starts the same way:
 //   const db = kv(SPACE)
-//   const me = await db.open()     // redeems an invite link (#t=...), says what you may do
-//   if (!me.inside) { /* show: "ask the owner for an invite link" */ }
+//   const me = await db.open()     // redeems an invite link (#t=...)
+//   if (!me.can("read")) { /* show: "ask the owner for an invite link" */ }
+//
+// Everyone has one level per space. me.access is yours ("none" outside):
+//   read    read the space, and your own inbox
+//   post    also write your own keys: db.mine, db.to()
+//   all     also write common keys: db.shared
+//   owner   also moderate, change settings, manage members
+//
+// Where data goes:
+//   db.shared             common keys, for "all": a title, a list, a board
+//   db.mine               your own keys: only you write them, everyone reads them
+//   db.by.list("msg.*")   everyone's own keys together; each item's by is its author
+//   db.to(id)             for one reader: a visitor ID, "owners", or "me" (yourself)
+// Messages, comments, votes and names go in db.mine and are read with db.by,
+// never in db.shared, so nobody can edit or delete someone else's. Owners can
+// still delete them, as moderation.
 //
 // Creating a space (once from a shell with `cubby new`, or per room in the page):
 //   const { space, ownerToken } = await createSpace()
@@ -1593,41 +1558,33 @@ Many pages using cubby are written by coding agents for people who don't know wh
 // A page that is a room, shared by its link? openRoom("board") creates or finds
 // the space, opens it and gives await room.link(). Members can share it too.
 //
-// Sharing with specific people, the usual case:
-//   const { link } = await db.share({ label: "Anna" })       // member, 10 uses, 7 days
-//   const { link } = await db.share({ allow: "viewer", uses: 1 })
-//   Ready-made UI with link, QR code and member list: import "<server>/share.js"
+// Inviting. An invite gives a level, at most your own:
+//   const { link } = await db.share()                    // all, 10 uses, 7 days
+//   const { link } = await db.share({ access: "post" })  // can't change db.shared
+//   Ready-made UI with link, QR code and members: import "<server>/share.js"
 //   and put <cubby-share space="..."></cubby-share> in the page.
+// Members: db.members(). Owners: db.owner.members.set(id, level, { until }) with
+// "read", "post", "all", "owner" or "banned", and .remove(id). Anyone: db.leave().
 //
-// Make a space public only when the user asked for it:
-//   createSpace({ public: "read" })     anyone reads, invited people write: status pages
-//   createSpace({ public: "respond" })  anyone reads and adds their own entry: polls, RSVPs
-//   createSpace({ public: "all" })      anyone with the name reads and writes
+// Open a space to everyone only when the user asked for it:
+//   createSpace({ anyone: "read" })   anyone reads: status pages
+//   createSpace({ anyone: "post" })   anyone reads and posts their own: polls, RSVPs
+//   createSpace({ anyone: "all" })    anyone with the name reads and writes
 //
-// Lots of live interaction (a shared board, a quiz, game state)? Use
-//   kv(SPACE, { live: true })
-// Same API and results; data and watches go over one WebSocket, falling back
-// to HTTP by itself. Write limits stay the same.
+// Live interaction (a board, a quiz, a game)? kv(SPACE, { live: true }): the same
+// API over one WebSocket, falling back to HTTP by itself.
+// Pulses are values that are never stored, for cursors and reactions:
+//   db.mine.pulse("cursor", { x, y })
+//   db.by.onPulse("cursor", p => draw(p.by, p.value))
+//   db.presence("here", { value: { name } })     // .peers, .onJoin, .onLeave
 //
-// Cursors, drags, reactions? Pulses are values that are never stored:
-//   db.user().pulse("cursor", { x, y })              // to whoever listens now
-//   db.users.onPulse("cursor", p => draw(p.user, p.value))
-// Anything a late joiner needs still goes in a stored key. Who's here:
-//   db.users.presence("here", { value: { name } })   // .peers, .onJoin, .onLeave
+// Another device of the same person isn't sharing: devices().link() and accept().
 //
-// db.user() is public to everyone in the space. For one reader, send it:
-//   db.to("owners").set("answer", 3)     // quiz answers, contact forms: db.inbox.owners
-//   db.to(playerId).set("hand", cards)   // only that player reads it, in db.inbox
-//   db.to("me").set("draft", text)       // private to you
-// Moderation: db.owner.bans.add(id). A banned visitor's open() has banned: { until }.
+// Never put an invite (at_...) or owner token (ot_...) in page source: anyone
+// who loads the page could use it. Invite links are for sending to people.
 //
-// The same person on another device is not sharing. devices() links them: one
-// device shows (await devices().link()).url, the other asks, then accept()s.
-//
-// Never put an access token (at_...) or owner token (ot_...) in page source.
-// Anyone who can load the page could use it. Invite links are for sending to people.
-//
-// Docs: docs/agents.md in the cubby repository.
+// Docs: docs/agents.md in the cubby repository. Exports: kv, createSpace,
+// openRoom, devices, takeInvite, inviteLink, newName, validSpace, KvError.
 ```
 
 ### Setup
@@ -1656,13 +1613,13 @@ These eight are the module's only exports. There is no default export.
 
 - `kv()` makes no request, and throws at once for an invalid name, with the server's `suggestion`.
 - Several `kv()` instances for different spaces share one visitor.
-- A page that only reads a public space never gets a visitor token. Every other page needs one, since spaces are private by default.
+- A page that only reads an open space never gets a visitor token. Every other page needs one, since spaces are private by default.
 
 ### Identity
 
 - The first call that needs a visitor token gets one: a write, anything in `to/` or `inbox/`, an owner call, or a read in a private space. Concurrent calls share that request.
 - `createSpace` and `join` called without a stored token create the visitor through their own response and store it before returning.
-- On 401 `invalid_token` the client drops the token, gets a new one and retries once. The new visitor has no grants. In a space that needs them, the retry fails with `no_access` or `no_space`, and the page should ask for a new invite.
+- On 401 `invalid_token` the client drops the token, gets a new one and retries once. The new visitor has no grants. In a private space the retry fails with `no_space`, and the page should ask for a new invite.
 - With the `token` option the client never creates visitors. A 401 throws without a retry.
 - If localStorage throws, the token lives in memory and the visitor is new on every page load. The client warns once.
 
@@ -1670,63 +1627,64 @@ These eight are the module's only exports. There is no default export.
 
 - Writes, `join` and owner calls send the token as `Authorization`.
 - Reads, lists and watches send it as `?token=` whenever the client has one, so a private space works with no extra option and reads stay free of CORS preflights.
-- With no token at all, reads go out without one. They work in a public space, and get `no_space` in a private one, which is right: a visitor without a token can't hold a grant.
+- With no token at all, reads go out without one. They work in an open space, and get `no_space` in a private one, which is right: a visitor without a token can't hold a grant.
 
 ### Opening, creating and sharing
 
 ```ts
-createSpace(opts?: { label?, name?, public?, read?, write?, invite?, server? }): Promise<{ space: string, ownerToken: string }>
+createSpace(opts?: { label?, name?, anyone?, invite?, server? }): Promise<{ space: string, ownerToken: string }>
 takeInvite(param = "t"): string | null        // reads #t=... from location.hash and removes it from the address bar
 inviteLink(token: string, base = location.href): string   // base with t=token added to its fragment
 
 db.open(opts?: { invite?: string | null }): Promise<Access>   // the first call on every page
 db.join(token: string | null): Promise<Access | null>         // null token: does nothing, returns null
 db.access(): Promise<Access>
-db.share(opts?: { label?, allow?, uses?, until?, grantFor?, base? }): Promise<Invite>   // owners
+db.share(opts?: { label?, access?, uses?, until?, grantFor?, base? }): Promise<Invite>
+
+type Level = "banned" | "none" | "read" | "post" | "all" | "owner"
 
 type Access = {
-  inside: boolean,               // false: no such space, private and this visitor isn't in it, or banned
-  banned: { until: number | null } | null,   // an owner banned this visitor; inside is false
+  access: Level,                 // "none": no such space, or private and this visitor isn't in it
+  until: number | null,          // when access is "banned": when the ban ends, null for never
   joined: boolean,               // an invite was redeemed by this call
   inviteFailed: boolean,         // the link had an invite that was unknown, expired or used up
-  id: string | null, owner: boolean,
-  canInvite: boolean,            // may mint invites: an owner, or a member when the space allows it
-  settings: { public: "none" | "read" | "respond" | "all" | "custom", read: "anyone" | "granted", write: { shared, users, to }, invite: "members" | "owners" } | null,
-  grants: { id, allow: string[], source: string, until: number | null }[],
-  can(method: "read" | "write", area: "shared" | "users" | "to/{recipient}", key?: string): boolean   // evaluated locally
+  id: string | null,
+  canInvite: boolean,            // may mint invites: a member at the space's invite level
+  settings: { anyone: Level, invite: Level } | null,
+  can(method?: "read" | "write", area?: "shared" | "mine" | "to"): boolean   // from access, evaluated locally
 }
 
-type Invite = { link: string, token: string, id: string, allow: string[], uses: number | null, until: number | null }
+type Invite = { link: string, token: string, id: string, access: Level, uses: number | null, until: number | null }
 ```
 
-- **`db.open()`** is how every page starts. It takes an invite from the URL with `takeInvite()` unless `invite` is given, redeems it with `join` if there is one, then asks `access`. It never throws for `no_space`, `invite_invalid` or `banned`. It returns `inside: false`, `inviteFailed: true` or `banned: { until }`, so the page can show a plain message. A page opened by the space's owner, a member, or anyone in a public space gets `inside: true`.
-- **`createSpace`** makes the caller the owner and defaults to private. `public` takes `none`, `read`, `respond` or `all`. Show `ownerToken` to the person once and tell them to keep it. The client doesn't store it.
-- **`db.share()`** mints an access token (owners, and members who may invite) and returns the link to send, built with `inviteLink(token, base)`. `base` defaults to the current page. It takes the server's defaults: `member`, 10 uses, 7 days. `allow` takes `"member"`, `"viewer"` or a list of scopes.
+- **`db.open()`** is how every page starts. It takes an invite from the URL with `takeInvite()` unless `invite` is given, redeems it with `join` if there is one, then asks `access`. It never throws for `no_space`, `invite_invalid` or `banned`. It returns `access: "none"`, `inviteFailed: true` or `access: "banned"`, so the page can show a plain message.
+- **`me.can()`** answers from the level: `can("read")` (the default) needs `read`, `can("write", "mine")` and `can("write", "to")` need `post`, `can("write", "shared")` needs `all`. Pages use it to show and hide controls.
+- **`createSpace`** makes the caller the owner and defaults to private. `anyone` takes `none`, `read`, `post` or `all`. Show `ownerToken` to the person once and tell them to keep it. The client doesn't store it.
+- **`db.share()`** mints an invite (owners, and members at the invite level) and returns the link to send, built with `inviteLink(token, base)`. `base` defaults to the current page. It takes the server's defaults: access `all` or the minter's own level if lower, 10 uses, 7 days.
 - `takeInvite` keeps other fragment parameters, so `#room=...&t=at_...` becomes `#room=...`. `inviteLink` keeps them too: `inviteLink(token)` on a page at `/chat/#room=x` gives `/chat/#room=x&t=at_...`.
 - `db.join` sends the stored visitor token if there is one, as the server requires. Use it directly only for tokens that don't come from the URL, such as one typed into a form.
-- `access().can()` applies the [access rule](#the-access-rule) to the answer locally, for showing and hiding controls.
 
 ### Rooms
 
 For the common "this page is a room, its link lets people in" setup:
 
 ```ts
-openRoom(label: string, opts?: { param?, create?, space?, invite?, public?, ...kvOptions }): Promise<Room>
+openRoom(label: string, opts?: { param?, create?, space?, invite?, anyone?, ...kvOptions }): Promise<Room>
 
 type Room = {
   db: Db | null,                 // kv(space, kvOptions); null only with create: false and no room
   me: Access,                    // from db.open()
   space: string | null,
   created: boolean,              // this call created the space
-  link(opts?: { base? }): Promise<string>,   // a reusable invite link to this room
+  link(opts?: { base?, access? }): Promise<string>,   // a reusable invite link to this room
   forget(): void,                // drop the remembered room, for "start a new room"
 }
 ```
 
-- It takes the space from the address fragment (`#s=...`, `param` changes the name), else the space this browser last opened under `label`, else creates one with that label (`public` passed on, private by default). `create: false` creates nothing. `space` and `invite` replace the address outside browsers.
-- It calls `db.open()`, which redeems `#t=...`. When the visitor is inside, it remembers the space in localStorage under `label` and puts `#s=<space>` in the address, so a reload or a bookmark stays in the room.
-- `me.inside === false` means the room is gone or the link didn't work. The page decides what to show, and `forget()` before creating a new one.
-- `link()` mints an invite with no use limit and no end, once per visitor and room, and keeps it in localStorage. It checks the token still works before reusing it, and mints a new one otherwise. Owners and members can both call it, so nobody keeps someone else's token. The link is the page with `#s=<space>&t=<token>`.
+- It takes the space from the address fragment (`#s=...`, `param` changes the name), else the space this browser last opened under `label`, else creates one with that label (`anyone` passed on, private by default). `create: false` creates nothing. `space` and `invite` replace the address outside browsers.
+- It calls `db.open()`, which redeems `#t=...`. When the visitor can read it, it remembers the space in localStorage under `label` and puts `#s=<space>` in the address, so a reload or a bookmark stays in the room.
+- `me.can("read") === false` means the room is gone or the link didn't work. The page decides what to show, and `forget()` before creating a new one.
+- `link()` mints an invite with no use limit and no end, once per visitor, room and `access`, and keeps it in localStorage. `access: "post"` makes a link for people who add their own things but can't change the room's shared keys. It checks the token still works before reusing it, and mints a new one otherwise. Owners and members can both call it, so nobody keeps someone else's token. The link is the page with `#s=<space>&t=<token>`.
 - Every kv option works, such as `live: true`.
 
 ### Devices
@@ -1780,40 +1738,39 @@ cancel()                                    // optional cancellation
 
 Use `opensAt` a little in the future to start a round together, and `ifBefore: closesAt` to enforce its deadline. Plain-key `t` is server processing time; series `t` remains point time and may be supplied by the caller. A quiz should use plain answer keys when server timestamps matter.
 
-### Invites and owner calls
+### Invites, members and owner calls
 
 ```ts
-db.tokens.create(opts?: { label?, allow?, uses?, until?, grantFor? }): Promise<{ id, token, by, ... }>
-db.tokens.list(): Promise<TokenInfo[]>          // owners: every token; members: their own
+db.tokens.create(opts?: { label?, access?, uses?, until?, grantFor? }): Promise<{ id, token, access, ... }>
+db.tokens.list(): Promise<TokenInfo[]>          // owners: every invite; members: their own
 db.tokens.update(id, { uses?, until? }): Promise<TokenInfo>
 db.tokens.revoke(id): Promise<void>
+db.members(): Promise<Member[]>                 // members; owners get more fields and bans
+db.leave(): Promise<boolean>                    // remove your own grants
 ```
 
-`db.tokens` and `db.share()` work for owners, and for members unless the space says `invite: "owners"` (`access().canInvite`). A member's token gives at most what they hold; without `allow` it gives exactly that. See [Invites from members](#invites-from-members).
+`db.tokens` and `db.share()` work for owners, and for members at the space's invite level (`access().canInvite`). An invite gives at most the minter's own level. See [Invites from members](#invites-from-members).
 
 Every `db.owner` method needs the visitor to be an owner and throws `owner_only` otherwise.
 
 ```ts
-db.owner.settings(patch: { public?, invite? } | { read?, write?, invite? }): Promise<Settings>
+db.owner.settings(patch: { anyone?, invite? }): Promise<Settings>
 db.owner.deleteSpace(): Promise<void>
 db.owner.rotateOwnerToken(): Promise<string>
-db.owner.grants.list(opts?: { user? }): Promise<Grant[]>
-db.owner.grants.add(user, opts?: { allow?, until?, owner? }): Promise<Grant>
-db.owner.grants.revoke(id): Promise<void>
-db.owner.grants.revokeUser(user): Promise<void>
-db.owner.bans.add(user, opts?: { until? }): Promise<Ban>
-db.owner.bans.remove(user): Promise<boolean>     // true if a ban was lifted
-db.owner.bans.list(): Promise<Ban[]>
+db.owner.members.set(id, access: "read" | "post" | "all" | "owner" | "banned", opts?: { until? }): Promise<Member>
+db.owner.members.remove(id): Promise<boolean>   // true if there was a grant or ban to remove
 ```
 
-Defaults are the server's: a token with no options is a full member, 10 uses, 7 days. `until` and `grantFor` take a duration string, a `Date`, milliseconds, or `null`. `db.share()` is `tokens.create` plus the link.
+Defaults are the server's: an invite with no options gives `all` (or the minter's own level if lower), 10 uses, 7 days. `until` and `grantFor` take a duration string, a `Date`, milliseconds, or `null`. `db.share()` is `tokens.create` plus the link.
 
 ### Areas
 
 ```ts
 db.shared: Area
-db.user(id?: string): Area      // no id: your own; another visitor's id: writes throw not_yours, delete works for owners
-db.users: { list(target, opts?), watch(target, onChange, opts?), onPulse(target, onPulse, opts?), presence(key, opts?) }    // across all visitors
+db.mine: Area                   // your own by/ keys
+db.by(id: string): Area         // one author's: writes throw not_yours, delete works for owners
+db.by: { list(target, opts?), watch(target, onChange, opts?), onPulse(target, onPulse, opts?) }   // across every author, items' by is the author
+db.presence(key, opts?): Presence
 db.to(recipient: string): Area  // a visitor ID, "me" (private to you) or "owners": what you send them
 db.sent: { list, watch, onPulse }                                  // to/*/: everything you sent, items carry to
 db.inbox: { list, watch, onPulse, from(sender): Inbox, owners: { list, watch, onPulse, from(sender) } }
@@ -1826,7 +1783,7 @@ db.id(): Promise<string>        // your visitor ID, gets a token if needed
 
 ```ts
 get(key): Promise<any | null>
-getEntry(key): Promise<Entry | null>                                // without key and user
+getEntry(key): Promise<Entry | null>                                // without key
 set(key, value, opts?: { ifVersion?: number, ttl?: number, ifBefore?: number }): Promise<number>
 add(target, value, opts?: { t?: number, ifBefore?: number }): Promise<{ version, t, keys? }>
 series(key, opts?: { since?: number, limit?: number }): Promise<{ key, points: Point[], version, next } | null>
@@ -1856,7 +1813,7 @@ type WatchOptions = {
 
 - **`get`** parses JSON values and returns text as strings, `null` for a missing key. `getEntry` tells a missing key from a stored `null`.
 - **`set`** always sends `JSON.stringify(value)`. Values that can't be serialized throw before any request.
-- **Local checks.** Writing to someone else's `db.user(id)` throws `not_yours` without a request, unless it's a delete by an owner. Everything else about access is left to the server.
+- **Local checks.** Writing to someone else's `db.by(id)` throws `not_yours` without a request, unless it's a delete by an owner. Everything else about access is left to the server.
 - **`delete`** returns `false` for a missing key.
 - **`add`** with a key, like `add("temp", 21.4)`, adds one point and sends `JSON.stringify(value)`, so an object is one point. With a pattern, like `add("env.*", { temp: 21.4, rh: 45 })`, `value` must be a plain object and each property becomes a point in its own series. The target decides, never the shape of the value.
 - **`series`** makes one request and returns the response as is, or `null` if the key doesn't exist. To read further, pass `next` back as `since`.
@@ -1880,16 +1837,16 @@ type WatchOptions = {
   - When the socket drops, requests in flight fail with a retryable `network_error` and are never resent. Watches resume from their last version, over HTTP until the socket is back, so nothing is lost. Reconnects back off from 1 to 30 seconds after failures.
   - The client pings every 25 seconds and drops the socket after 10 seconds of silence, and pings with a 3-second limit when the page becomes visible again. A phone that slept can hold a socket that looks open and is dead.
   - The socket closes on `pagehide`, so the page can enter the back/forward cache, and after 5 minutes hidden. It reopens when needed after `pageshow` or when visible.
-  - If the socket fails twice before ever opening (a proxy that blocks WebSockets, Chrome's Local Network Access rules for a public page calling a local server, an older server), the client stays on HTTP for that `kv()` without an error.
+  - If the socket fails twice before ever opening (a proxy that blocks WebSockets, Chrome's Local Network Access rules for a page on a public site calling a local server, an older server), the client stays on HTTP for that `kv()` without an error.
   - `db.live.status` is `"http"` (live off, or fell back), `"connecting"`, `"open"`, `"closed"` (not needed right now, or between retries) or `"offline"`. Assign `db.live.onStatus` to hear changes. Pages don't need either.
 
 ### Last will and presence
 
 ```ts
-const clear = await db.user().will("here", { left: true })   // sent for you when your connection ends
+const clear = await db.mine.will("here", { left: true })   // sent for you when your connection ends
 clear()                                                       // not any more
 
-const here = db.users.presence("here", { value: { name: "Anna" }, interval?: 2000, timeout?: 6000 })
+const here = db.presence("here", { value: { name: "Anna" }, interval?: 2000, timeout?: 6000 })
 here.peers        // Map: visitor id -> { value, since, seen }, never yourself
 here.onJoin = (id, value) => {}
 here.onLeave = id => {}
@@ -1899,7 +1856,7 @@ here.stop()       // leave now
 ```
 
 - **`will`** registers a [last will](#last-will) on the live connection. The client keeps it and registers it again whenever a socket opens, so it survives reconnects. Errors such as `not_yours` reject at registration. Without `live: true`, or while the client is on HTTP, it's kept and does nothing, so the same code runs either way.
-- **`presence`** is built from pulses to `users/{you}/{key}`: your value every `interval`, a leave pulse on `stop()` and on `pagehide`, and a will with the same leave. Over a live connection a closed tab leaves within a round trip. A peer that's silent for `timeout` counts as gone, which is how leaving shows over HTTP. The page code is the same either way.
+- **`presence`** is built from pulses to `by/{you}/{key}`: your value every `interval`, a leave pulse on `stop()` and on `pagehide`, and a will with the same leave. Over a live connection a closed tab leaves within a round trip. A peer that's silent for `timeout` counts as gone, which is how leaving shows over HTTP. The page code is the same either way.
 - When a peer joins, you send your value at once, so a newcomer sees everyone within a round trip rather than an interval.
 - Its pulses are `{"v": value}` and `{"left": true}`. Other pulses on the same key are ignored, so keep fast data like cursors on keys of their own.
 - Values are whatever JSON you pass, kept small: they go out every interval. Anything a late joiner needs from before they came belongs in a stored key.
@@ -1908,7 +1865,7 @@ here.stop()       // leave now
 
 kv.js limits pulses per key, so a page that pulses on every `pointermove` stays under the server's pulse limit instead of running into 429s.
 
-- At most `pulseRate` (default 20) pulses per second per key, counted per path, such as `users/u_.../cursor`. `pulse(key, value, { maxRate })` sets it for one call. `0` sends at once with no limit.
+- At most `pulseRate` (default 20) pulses per second per key, counted per path, such as `by/u_.../cursor`. `pulse(key, value, { maxRate })` sets it for one call. `0` sends at once with no limit.
 - A pulse sent too soon waits for the next slot. If another arrives while one waits, the newer replaces it. The newest value is always sent, so the last position is never lost, only the ones in between.
 - `pulse()` resolves `true` once its value was sent and `false` if a newer one replaced it first. Errors from the send reject it as usual.
 - Pulses that must all arrive, such as button presses, stay under the rate or pass `maxRate: 0` and take the server's limit (60 per second per visitor, burst 120).
@@ -1944,15 +1901,15 @@ What it shows depends on who's looking:
 
 | Visitor | Shows |
 |---|---|
-| an owner | a "Share" button that opens the panel |
-| a member, with `members` set | "Shared with you by the owner", and nothing to click |
+| an owner, or a member at the space's invite level | a "Share" button that opens the panel |
+| another member, with `members` set | "Shared with you by the owner", and nothing to click |
 | anyone else | nothing |
 
 The panel has four parts:
 
-1. **Invite.** Name the person, then pick "one person" (1 use, 7 days), "a group link" (10 uses, 7 days) or "view only" (`viewer`, 1 use, 7 days). It shows the link with Copy, Share (`navigator.share` where the browser has it) and a QR code. Custom uses and dates are behind "More options", where unlimited needs a second click that says what it means.
-2. **People.** Members listed by the label of the invite they used, with when they joined and were last active. Each has Remove (`revokeUser`). Pending invites show uses left and expiry, with Extend and Cancel. Giving each person their own one-use invite is what makes this list readable, which is why "one person" is the first choice.
-3. **Who can see this.** The current `public` value in plain words, and the four choices. Choosing anything but `none` asks for confirmation with a sentence like "Anyone who has the address will be able to read everything here."
+1. **Invite.** Name the person, then pick "one person" (1 use, 7 days), "a group link" (10 uses, 7 days) or "view only" (access `read`, 1 use, 7 days). Other invites give `all`, or the minter's own level if lower. It shows the link with Copy, Share (`navigator.share` where the browser has it) and a QR code. Custom uses and dates are behind "More options", where unlimited needs a second click that says what it means.
+2. **People** (owners). Members listed by the label of the invite they used, with when they joined and were last active. Each has a level to pick (can look, can add their own, can change everything, owner) and Remove, or Lift ban for a banned visitor. Pending invites show uses left and expiry, with Extend and Cancel. Giving each person their own one-use invite is what makes this list readable, which is why "one person" is the first choice.
+3. **Who can see this** (owners). The current `anyone` level in plain words, and the four choices. Choosing anything but `none` asks for confirmation with a sentence like "Anyone who has the address will be able to read everything here."
 4. **Recovery key.** Rotating the owner token, with the new one shown once. Set the token from `createSpace` as the `ownerToken` property, and the panel opens at this step, once, so the person saves it.
 
 | Attribute or property | Default | Purpose |
@@ -1987,9 +1944,9 @@ Commands take paths that mirror the URL after `/v1/`:
 
 ```
 poll-cedar-pilot-mango-frost/shared/question
-poll-cedar-pilot-mango-frost/users/u_k7m2x9q4p1r8t3w6/vote
-poll-cedar-pilot-mango-frost/users/*/vote
-poll-cedar-pilot-mango-frost/users/me/vote          your own users/ area
+poll-cedar-pilot-mango-frost/by/u_k7m2x9q4p1r8t3w6/vote
+poll-cedar-pilot-mango-frost/by/*/vote
+poll-cedar-pilot-mango-frost/by/me/vote             your own by/ area
 poll-cedar-pilot-mango-frost/to/me/draft            private to you
 poll-cedar-pilot-mango-frost/to/owners/answer       sent to the owners
 poll-cedar-pilot-mango-frost/inbox/*/answer         what everyone sent you
@@ -1999,7 +1956,7 @@ poll-cedar-pilot-mango-frost/shared/msg.*
 
 `me` goes to the server as it is. Paths with `me`, `to/` or `inbox/` send the visitor token, and get one if there isn't one yet. Lists across several areas print the user, sender or recipient as the first column, and `--exec` gets `KV_FROM` and `KV_TO` under `to/` and `inbox/`.
 
-Paths containing `*` must be quoted, as in `cubby ls 'poll-cedar-pilot-mango-frost/users/*/vote'`. Otherwise the shell tries to expand them as file names, and zsh stops with "no matches found".
+Paths containing `*` must be quoted, as in `cubby ls 'poll-cedar-pilot-mango-frost/by/*/vote'`. Otherwise the shell tries to expand them as file names, and zsh stops with "no matches found".
 
 ### Configuration
 
@@ -2035,10 +1992,10 @@ The server URL defaults to `http://localhost:28229`. A bare port (`9000` or `:90
 | `series <path>` | read a series' points | one line per point, see Output |
 | `pulse <path> [value]` | send a pulse | nothing |
 | `pulses <path or pattern> [--exec CMD] [--json]` | print pulses as they arrive, from now on | one line per pulse |
-| `new [label or name] [--public P]` | create a space with `POST /v1/spaces`, as its owner. Private unless `--public read\|respond\|all`. A full space name is created as is, anything else is a label | the name, then the owner token on a second line. Keep it, it's shown once |
+| `new [label or name] [--anyone L] [--invite L]` | create a space with `POST /v1/spaces`, as its owner. Private unless `--anyone read\|post\|all`. A full space name is created as is, anything else is a label | the name, then the owner token on a second line. Keep it, it's shown once |
 | `name [label]` | generate a valid space name locally, no request | the name |
-| `join <space> <token or link>` | redeem an access or owner token. A link is searched for `t=` in its fragment | your scopes from this grant, one per line |
-| `access <space>` | what you may do here | `owner` or `member`, then one line per grant: ID, `until` or `-`, scopes |
+| `join <space> <token or link>` | redeem an invite or the owner token. A link is searched for `t=` in its fragment | your level now |
+| `access <space>` | your level here | `banned`, `none`, `read`, `post`, `all` or `owner` |
 | `whoami [--show-token]` | your visitor ID, or with `--show-token` your visitor token, for use with `curl` | the ID or the token |
 | `url <path>` | the full URL for a path, for `curl` or a browser | the URL |
 | `device link [--ttl D] [--link URL] [--no-wait]` | make a one-use [device link](#devices-and-links), then wait until it's used | the code as `K7M2X-9Q4PA`, with `--link` also `URL#link=CODE` |
@@ -2047,44 +2004,44 @@ The server URL defaults to `http://localhost:28229`. A bare port (`9000` or `:90
 | `device name <label> [id]` | label this device or another | nothing |
 | `device rm <id>`, `device rm --others` | sign out one device, or every other one | the removed IDs with `--others` |
 
-Owner commands, each for one space:
+Commands for a space's invites, members and settings. Most are for owners; members at the invite level use `token`, members use `member ls`, anyone uses `member rm <space> me`:
 
 | Command | Does | Prints |
 |---|---|---|
-| `settings <space> [--public P \| --read R --write W]` | print the settings, or change them. `W` is `anyone`, `granted`, or a list like `shared=granted,me=granted` | the settings after the change, as `public`, `read`, `write.shared`, `write.users`, `write.me`, one `name<TAB>value` per line |
+| `settings <space> [--anyone L] [--invite L]` | print the settings, or change them | `anyone` and `invite`, one `name<TAB>value` per line |
 | `drop <space>` | delete the space and everything in it. Asks for the name again unless `--yes` | nothing |
 | `owner-token <space>` | rotate the owner token | the new owner token |
-| `token new <space>` | mint an access token, flags below | the token, or with `--link URL` the link to share |
-| `token ls <space>` | list access tokens | one line per token: ID, state, uses left or `-`, until or `-`, grants, label, scopes |
+| `token new <space>` | mint an invite, flags below | the token, or with `--link URL` the link to share |
+| `token ls <space>` | list invites | one line per invite: ID, state, uses left or `-`, until or `-`, members, label, access |
 | `token set <space> <id> [--uses N\|unlimited] [--until T\|never]` | change how long and how often it can still be redeemed | nothing |
-| `token rm <space> <id>` | revoke a token and every grant from it | nothing |
-| `grant ls <space> [--user ID]` | list grants | one line per grant: ID, user, `owner` or `member`, source, until or `-`, scopes |
-| `grant add <space> <user> [--allow S ...] [--until T] [--owner]` | a direct grant | the grant ID |
-| `grant rm <space> <grant-id>`, `grant rm <space> --user ID` | revoke one grant, or all of a visitor's | nothing |
+| `token rm <space> <id>` | revoke an invite and every grant from it | nothing |
+| `member ls <space>` | list members, highest level first | one line per member: ID, access, since, until or `-` |
+| `member set <space> <id> <level> [--until T]` | give a visitor exactly one level, or `banned` | nothing |
+| `member rm <space> <id\|me>` | remove a member's grants and any ban, or leave with `me` | nothing |
 
 `token new` flags, all optional, defaults from the server:
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--allow SCOPE`, repeatable | `member` | what the grant allows: scopes, or the preset `member` or `viewer` |
+| `--access L` | `all`, or your own level if lower | the level the grant gives: `read`, `post` or `all` |
 | `--uses N\|unlimited` | 10 | how many visitors can redeem it |
 | `--until T\|never` | `7d` | how long it can be redeemed: `12h`, `30d`, `2027-01-31`, or an RFC 3339 time |
 | `--grant-for D` | until revoked | how long each grant lasts after redeeming |
-| `--label L` | none | a note for the token list |
+| `--label L` | none | a note for the invite list, shown next to the member it brought in |
 | `--link URL` | none | print `URL` with `t=TOKEN` added to its fragment instead of the bare token |
 
 ### Identities for machines
 
-A CI runner, a cron job on another machine or a microcontroller needs a fixed visitor token that holds a grant. Redeem an access token once without an identity and keep the visitor token it returns:
+A CI runner, a cron job on another machine or a microcontroller needs a fixed visitor token that holds a grant. Redeem an invite once without an identity and keep the visitor token it returns. A machine that only reports gets `post` and writes its own `by/` keys, so a leaked token can't touch anything else:
 
 ```
-$ cubby token new homelab-maple-quilt-tundra-cobalt --allow 'shared/deploy:w' --uses 1 --until 1h --label ci
+$ cubby token new homelab-maple-quilt-tundra-cobalt --access post --uses 1 --until 1h --label ci
 at_Qz7r...
 $ curl -s -X POST -d '{"token": "at_Qz7r..."}' https://kv.example.com/v1/homelab-maple-quilt-tundra-cobalt/join
 {"token": "vt_8Rn2...", "id": "u_p1r8t3w6k7m2x9q4", ...}
 ```
 
-Store `vt_8Rn2...` as the CI secret `CUBBY_TOKEN`, or flash it to the device. The access token is used up and worthless. The grant shows up in `cubby grant ls` labelled by its source token, and `cubby token rm` revokes the machine.
+Store `vt_8Rn2...` as the CI secret `CUBBY_TOKEN`, or flash it to the device. The invite is used up and worthless. The machine shows up in `cubby member ls`, and `cubby member rm` or `cubby token rm` removes it. Readers find its keys under `by/*/` without knowing its ID.
 
 Flags:
 
@@ -2106,8 +2063,9 @@ Flags:
 | `--raw` | `watch` | for one key: print each new value raw, followed by a newline. Values that contain newlines are ambiguous this way, so use `--json` or `--exec` for those |
 | `--exec CMD` | `watch`, `update` | see below |
 | `--label L` | `new` | as in `POST /v1/spaces` |
-| `--public P` | `new` | `none` (default), `read`, `respond` or `all` |
-| `--read R`, `--write W` | `new` | the space's settings in full, instead of `--public` |
+| `--anyone L` | `new`, `settings` | `none` (default), `read`, `post` or `all` |
+| `--invite L` | `new`, `settings` | the lowest member level that may invite: `read`, `post` (default), `all` or `owner` |
+| `--until T` | `member set` | when the level or ban ends |
 | `--yes` | `drop` | don't ask for confirmation |
 
 ### Series from the CLI
@@ -2128,7 +2086,7 @@ cubby series home-cedar-pilot-mango-frost/shared/env.temp --since 24h
 
 ```
 key<TAB>value
-user<TAB>key<TAB>value        under users/*/
+author<TAB>key<TAB>value      under by/*/
 ```
 
 - The value is written as compact JSON. Text values become JSON strings, so a value with newlines still fits on one line.
@@ -2141,7 +2099,7 @@ user<TAB>key<TAB>value        under users/*/
 `watch --exec CMD` runs `CMD` through `sh -c` once per change, one at a time, in version order:
 
 - the value on stdin, raw, or empty for a delete
-- `KV_KEY`, `KV_VERSION`, `KV_DELETED` (`0` or `1`) and, under `users/*/`, `KV_USER` in the environment
+- `KV_KEY`, `KV_VERSION`, `KV_DELETED` (`0` or `1`), `KV_BY`, and under `to/` and `inbox/` `KV_FROM` and `KV_TO` in the environment
 - `KV_TIME`, the value time for every key, or the newest point time for a series
 
 If the command fails, the CLI prints a warning and carries on. With `--state`, the version is saved only after every command for that response has run, so a crash means repeating changes, never skipping them.
@@ -2186,8 +2144,8 @@ cubby admin stats                  totals, visitors, largest spaces
 - If the server is running, admin commands talk to it through a Unix socket in the data directory, readable only by the server's user. The server does the work, so files are never changed under it.
 - If the server isn't running, they open the data files directly.
 - There is no admin HTTP API.
-- `owner-token` invalidates the old owner token like a rotation, and removes the owner grants that came from it. Grants from creating the space and direct grants stay.
-- `admin spaces` shows each space's settings in two columns: `read`, and `write` as `anyone`, `granted`, or a list like `shared=granted`.
+- `owner-token` invalidates the old owner token like a rotation, and removes the owner grants that came from it. Grants from creating the space and owner levels set directly stay.
+- `admin spaces` shows each space's settings in two columns, `anyone` and `invite`.
 
 ## 19. Implementation notes
 
@@ -2247,7 +2205,7 @@ CREATE TABLE kv (
 
 CREATE INDEX kv_by_version ON kv (area, version);
 CREATE INDEX kv_expiry ON kv (expires) WHERE expires > 0 AND value IS NOT NULL;
-CREATE INDEX kv_users ON kv (key, area) WHERE area >= 'u:' AND area < 'u;';
+CREATE INDEX kv_by ON kv (key, area) WHERE area >= 'b:' AND area < 'b;';
 
 CREATE TABLE usage (writer TEXT PRIMARY KEY, bytes INTEGER NOT NULL);
 
@@ -2264,7 +2222,7 @@ CREATE TABLE points (
 - A write is one transaction: check `ifVersion`, raise `seq`, upsert, adjust `usage` for the old and new writer.
 - Adding a point is one transaction too: insert into `points`, delete the oldest points beyond `max_series_points`, and if the point is the newest, raise `seq` and upsert the `kv` row with the point as value, `t` and `n`. Then check quotas on the net growth. A batch does this for every member in one transaction.
 - Point sizes go into the space's `bytes` in `meta`, next to the `kv` rows. `usage` holds the series key as a plain key of its newest value, so points never count towards a visitor.
-- Existing v0.10 space files receive the expiry columns and index transactionally at startup, with PRAGMA user_version recording the migration. Old plain-key timestamps are backfilled from updated_at in whole seconds converted to ms; their original millisecond write time is unavailable. Values, versions and access grants are preserved. New writes record milliseconds.
+- Space files are migrated transactionally at startup, with PRAGMA user_version recording each step. Version 1 added the expiry columns, backfilling plain-key `t` from `updated_at` in whole seconds. Version 2 recorded invite minters. Version 3 moved `me/` to `to/me/`. Version 4 moved `users/` (`u:`) to `by/` (`b:`), gave every grant and invite the level closest to its old scopes, turned the settings into `anyone` and `invite`, and dropped the grants of banned visitors. Values and versions are never changed.
 - Reading points is `WHERE area = ? AND key = ? AND t > ? ORDER BY t LIMIT ?` with `since`, or `ORDER BY t DESC LIMIT ?` reversed without it. Both use the primary key.
 - Deleting a series key deletes its `points` rows in the same transaction.
 - Visitor totals across spaces are the sum of their `usage` rows. See [In-memory state](#in-memory-state).
@@ -2279,20 +2237,21 @@ CREATE TABLE tokens (
   id          TEXT PRIMARY KEY,        -- t_ + 8 base32
   hash        BLOB NOT NULL UNIQUE,    -- SHA-256 of the at_ token
   label       TEXT,
-  allow       TEXT NOT NULL,           -- JSON array of scopes, as given
+  access      TEXT NOT NULL,           -- the level it gives: read, post or all
   uses_left   INTEGER,                 -- NULL: no limit
   until       INTEGER,                 -- ms, NULL: no end
   grant_for   INTEGER,                 -- ms, NULL: grants last until revoked
   created_at  INTEGER NOT NULL,
   ended_at    INTEGER,                 -- when it stopped being redeemable, for cleanup
-  last_redeemed_at INTEGER
+  last_redeemed_at INTEGER,
+  minted_by   TEXT,                    -- the visitor who minted it
+  revoked_at  INTEGER                  -- ms, when its minter could no longer give it
 ) WITHOUT ROWID;
 
 CREATE TABLE grants (
   id          TEXT PRIMARY KEY,        -- g_ + 8 base32
   visitor     TEXT NOT NULL,
-  owner       INTEGER NOT NULL DEFAULT 0,
-  allow       TEXT NOT NULL,           -- JSON array of scopes; [] for owner grants
+  access      TEXT NOT NULL,           -- read, post, all or owner
   source      TEXT NOT NULL,           -- 'create', 'owner-token', 'direct', or a token id
   until       INTEGER,                 -- ms, NULL: until revoked
   created_at  INTEGER NOT NULL,
@@ -2301,11 +2260,19 @@ CREATE TABLE grants (
 
 CREATE INDEX grants_by_visitor ON grants (visitor);
 CREATE UNIQUE INDEX grants_once ON grants (visitor, source) WHERE source <> 'direct';
+
+CREATE TABLE bans (
+  visitor     TEXT PRIMARY KEY,
+  until       INTEGER,                 -- ms, NULL: until lifted
+  by          TEXT NOT NULL,           -- the owner who banned
+  created_at  INTEGER NOT NULL
+) WITHOUT ROWID;
 ```
 
 - **Redeeming** is one transaction: find the token by hash; if a grant for (visitor, token id) exists, return it; otherwise check `until` and `uses_left`, insert the grant, decrement `uses_left`, set `ended_at` when it reaches 0. The unique index makes a double click safe.
 - **Owner token**: `owner_hash` in `meta`. Redeeming it inserts an owner grant with source `owner-token`. Rotating replaces the hash and deletes `owner-token` grants except the caller's.
-- **The access check** runs after the path is parsed and the visitor found, and before any data is touched: settings, then grants, then the fixed rules. Keep each open space's settings and a map of visitor to parsed grants in memory, dropped whenever that space's tokens, grants or settings change. The check per request is then a few string prefix comparisons.
+- **Setting a level** deletes the visitor's grants and ban and inserts one `direct` grant, or a ban, in one transaction. Then open invites whose minter can no longer give them get `revoked_at`.
+- **The access check** runs after the path is parsed and the visitor found, and before any data is touched: the visitor's level (ban, highest live grant, `anyone`) against what the request needs, then the fixed rules. Keep each open space's settings, grants and bans in memory, dropped whenever any of them change. The check per request is then a map lookup and a comparison.
 - **Grant `until`** is checked on every request, so an ended grant stops at once without waiting for cleanup.
 - **visitors.db** tracks which spaces a visitor holds grants in, next to where they have data, so deleting a visitor reaches every grant.
 - **No existence oracle.** Code paths for "space missing" and "space private, no read grant" must return the same response, including headers, and take the same miss-limit path. Test this directly.
@@ -2318,9 +2285,9 @@ SELECT key, value, is_json, version FROM kv
 WHERE area = ? AND version > ? AND key >= ? AND key < ?
 ORDER BY version LIMIT 1001;
 
--- users/*/
+-- by/*/
 SELECT area, key, value, is_json, version FROM kv
-WHERE area >= 'u:' AND area < 'u;' AND version > ? AND key >= ? AND key < ?
+WHERE area >= 'b:' AND area < 'b;' AND version > ? AND key >= ? AND key < ?
 ORDER BY version LIMIT 1001;
 ```
 
@@ -2331,9 +2298,9 @@ Each space has an in-memory notifier. Writers signal it after committing, and wa
 Hourly:
 
 1. Write pending "last seen" and "last active" times from memory to disk.
-2. Delete visitors unseen past `visitor_idle_ttl`, or past `empty_visitor_idle_ttl` if they never stored anything and hold no grant, with their `u:` and `m:` rows, points and grants in every space they used.
+2. Delete visitors unseen past `visitor_idle_ttl`, or past `empty_visitor_idle_ttl` if they never stored anything and hold no grant, with their `b:` rows, the `i:` slots they sent or received, points, grants and bans in every space they used.
 3. Sign out devices unseen past `visitor_idle_ttl`, and delete device links a day after they ended.
-4. Delete grants past their `until`, and access tokens that can't be redeemed, have no grants left and ended over 30 days ago.
+4. Delete grants past their `until`, and invites that can't be redeemed, have no grants left and ended over 30 days ago.
 5. Delete tombstones older than `tombstone_ttl` and update `tombstone_floor`.
 6. Delete space files without activity past `space_idle_ttl`, unless pinned.
 7. Drop idle rate-limit buckets and cache entries, as described below.
@@ -2349,7 +2316,7 @@ Everything held in memory has a bound, and nothing in it has to survive a restar
 | Notifier per space | one per space with waiting watches | when the last watch on that space ends | watches reconnect and continue from their version |
 | Waiting watches | 50 per IP, 1000 total | on answer, timeout or disconnect | clients reconnect |
 | Rate-limit buckets, per IP and per visitor | 100,000 entries | by the hourly job once full and untouched for an hour, or least recently used when the cap is reached | everyone starts with a full bucket again |
-| Settings and parsed grants per space | one per open space file | with the space file, or when its access changes | reloaded from the space file |
+| Settings, grants and bans per space | one per open space file | with the space file, or when its access changes | reloaded from the space file |
 | Storage used per visitor | 100,000 entries | least recently used | recounted from that visitor's `usage` rows on their next write |
 | Pending "last seen" and "last active" times | one entry per active visitor and space | written to disk by the hourly job and on shutdown | up to an hour of activity isn't recorded, which only matters for retention measured in months |
 
@@ -2364,13 +2331,13 @@ Ideas from the design discussion that were left out to keep the first version sm
 ### Abuse protection
 
 - **Proof of work on `/v1/anon`.** The server answers 428 with a signed challenge and a difficulty. The client finds a nonce so that `SHA-256(challenge + nonce)` has that many leading zero bits, and posts it back. A real visitor pays well under a second once. Minting tokens in bulk costs CPU per token, independent of IPs. Switching it on is one config value, so the JS client should handle 428 from the start.
-- **Who may create spaces.** Today any visitor can, within the new-space limits. A config switch could require a creator token issued by the operator (`cubby admin creator new`), redeemed like an access token, which gives the visitor the right to call `POST /v1/spaces`. That's the remaining part of the old "closed server" idea: everything else about it is covered by private spaces. Server-wide default settings for new spaces would go with it.
-- **Origin allowlists** per space: only requests from listed `Origin`s accepted. Weak against scripts, which set any header, but it stops other sites embedding a public space.
+- **Who may create spaces.** Today any visitor can, within the new-space limits. A config switch could require a creator token issued by the operator (`cubby admin creator new`), redeemed like an invite, which gives the visitor the right to call `POST /v1/spaces`. That's the remaining part of the old "closed server" idea: everything else about it is covered by private spaces. Server-wide default settings for new spaces would go with it.
+- **Origin allowlists** per space: only requests from listed `Origin`s accepted. Weak against scripts, which set any header, but it stops other sites embedding an open space.
 
 ### Key options
 
-- **`lock=owner`** on shared keys: only the creator of a key may change it. Mostly covered by `users/`.
-- **An `add` right** in scopes, for create-only writes. Considered with grants and not needed: `users/{id}/` already gives "add your own, nobody else can touch it", and owners can delete anything. The one real gap is "anyone adds, only the owner reads", which is the `inbox` area below.
+- **`lock=owner`** on shared keys: only the creator of a key may change it. Rejected: `by/` is exactly that, with the author in the path.
+- **Finer access than levels.** Grants once held scopes per area and key prefix (`shared/status.*:w`), and settings were per area. Levels replaced both because nobody used the precision and every page got the model wrong. If a real page needs "this person may write only `shared/config`", it comes back as an exception, not as the default model.
 
 ### Sharing and identity
 
@@ -2380,10 +2347,10 @@ Ideas from the design discussion that were left out to keep the first version sm
 
 ### Access
 
-- **Short invite codes.** An access token as a short code like `K7M2-X9Q4`, for typing into a device or reading out loud. It needs a tighter use limit and expiry, and redeem attempts limited per space, since 40 bits can be guessed where 256 can't.
+- **Short invite codes.** An invite as a short code like `K7M2-X9Q4`, for typing into a device or reading out loud. It needs a tighter use limit and expiry, and redeem attempts limited per space, since 40 bits can be guessed where 256 can't.
 - **Signed owner keys.** The owner keeps an Ed25519 private key and the space stores only the public key. The owner signs grants on their own machine, and the server never holds anything that can make an owner, so a leaked database can't take over spaces. Plain signatures over a small payload, or Biscuit if holders should narrow tokens offline. JWT is the wrong fit: tokens here are redeemed once and turned into server state, so stateless verification buys nothing, and JWT adds size and known pitfalls.
 - **Signed requests** for devices that can't do TLS. `Authorization: KV-HMAC id=..., t=..., sig=...`, signing method, path, time and body hash with a per-visitor secret. The secret never crosses the network and captured requests can't be replayed outside a short window. Values are still readable in transit.
-- **Per-grant quotas and rate limits**, for a trusted device that writes more than an anonymous visitor may.
+- **Quotas and rate limits per member**, for a trusted device that writes more than an anonymous visitor may.
 
 ### More areas
 
@@ -2396,7 +2363,7 @@ Ideas from the design discussion that were left out to keep the first version sm
 
 ### Series
 
-- **Reading several series in one request**, `GET env.*/series`, returning `{"items": [{"key": "env.temp", "points": [...]}], "version": ..., "next": ...}` in the shape of a list. Also `users/*/{key}/series` and `inbox/*/{key}/series`.
+- **Reading several series in one request**, `GET env.*/series`, returning `{"items": [{"key": "env.temp", "points": [...]}], "version": ..., "next": ...}` in the shape of a list. Also `by/*/{key}/series` and `inbox/*/{key}/series`.
 - **Downsampling with `?step=1h`**, returning the average, minimum, maximum and count per bucket for points that are JSON numbers. The only feature that would make the server calculate, so it waits until a page actually can't cope with raw points.
 - **Time-based retention per series**, as an alternative to the point count.
 
@@ -2412,7 +2379,7 @@ env.rh	45
 env.temp	21.4
 #version	1791449600051
 
-$ curl -s "$S/users/*/vote?format=text"
+$ curl -s "$S/by/*/vote?format=text"
 u_k7m2x9q4p1r8t3w6	vote	tacos
 u_p1r8t3w6k7m2x9q4	vote	pizza
 #version	1791449600057

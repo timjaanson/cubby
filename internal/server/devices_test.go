@@ -103,12 +103,12 @@ func TestDeviceLink(t *testing.T) {
 
 func TestDeviceLinkReplaces(t *testing.T) {
 	c := newTest(t)
-	alice := c.create(`{"public":"all"}`, "")
+	alice := c.create(`{"anyone":"all"}`, "")
 	sp := "/v1/" + alice.Space
 
 	// Bob has an identity with data, then links himself to alice.
 	bobTok, bobID := c.anon()
-	c.req("PUT", sp+"/users/me/name", `"bob"`, bearer(bobTok)...)
+	c.req("PUT", sp+"/by/me/name", `"bob"`, bearer(bobTok)...)
 	l := c.link(alice.Token, `{"ttl":60}`)
 	s, r, b := c.redeem(`{"code":"`+l.Code+`","label":"Bob's phone"}`, bearer(bobTok)...)
 	if s != 201 || r.ID != alice.ID || r.Previous == nil || *r.Previous != bobID || !r.Deleted {
@@ -118,7 +118,7 @@ func TestDeviceLinkReplaces(t *testing.T) {
 	if s, _, b := c.req("GET", "/v1/whoami", "", bearer(bobTok)...); s != 401 || errCode(b) != "invalid_token" {
 		t.Fatalf("old token: %d %s", s, b)
 	}
-	if s, _, _ := c.req("GET", sp+"/users/"+bobID+"/name", ""); s != 404 {
+	if s, _, _ := c.req("GET", sp+"/by/"+bobID+"/name", ""); s != 404 {
 		t.Fatalf("bob's data: %d", s)
 	}
 	if d := c.devices(alice.Token); len(d.Items) != 2 || d.Items[1].Label != "Bob's phone" {
@@ -219,7 +219,7 @@ func TestLinkStatusWaits(t *testing.T) {
 
 func TestSignOutDevices(t *testing.T) {
 	c := newTest(t)
-	alice := c.create(`{"public":"all"}`, "")
+	alice := c.create(`{"anyone":"all"}`, "")
 	_, phone, _ := c.redeem(c.link(alice.Token, "").Code)
 	_, laptop, _ := c.redeem(c.link(alice.Token, "").Code)
 
@@ -264,7 +264,7 @@ func TestSignOutDevices(t *testing.T) {
 		t.Fatalf("other's device: %d", s)
 	}
 	// Owner rights came along.
-	if s, _, b := c.req("GET", "/v1/"+alice.Space+"/access", "", bearer(laptop.Token)...); !strings.Contains(b, `"owner":true`) {
+	if s, _, b := c.req("GET", "/v1/"+alice.Space+"/access", "", bearer(laptop.Token)...); !strings.Contains(b, `"access":"owner"`) {
 		t.Fatalf("laptop access: %d %s", s, b)
 	}
 }

@@ -6,8 +6,8 @@ It's for the things that are too small for a real back-end: a poll for the group
 
 - **Live updates.** Watch a key or a pattern and changes arrive as they happen, over one WebSocket per page or plain HTTP long polling.
 - **No sign-up.** Each browser gets an anonymous identity by itself. One request creates a space. A one-use code links a second device to the same identity.
-- **Private unless you say so.** Spaces are invite-only. One word (`public: "read"`, `"respond"`, `"all"`) opens them up.
-- **Safe with many writers.** Every value has a version, and `ifVersion` refuses a write if someone got there first. Each visitor has an area only they can write, so votes and names can't be faked.
+- **Private unless you say so.** Spaces are invite-only. Everyone in a space has one level: `read`, `post` (their own keys), `all` (common keys too) or `owner`. One word (`anyone: "read"`, `"post"`, `"all"`) opens a space to strangers.
+- **Safe with many writers.** Every value has a version, and `ifVersion` refuses a write if someone got there first. Each visitor has keys only they can write, so votes, messages and names can't be faked.
 - **Pulses for the fast stuff.** Cursors, drags, reactions and game inputs go out as pulses: values that are never stored, reach whoever is listening right now, and can be sent dozens of times a second.
 - **Live primitives.** Expiring keys for presence and locks, a shared server clock, write deadlines, and time series for sensor readings.
 - **Plain HTTP underneath.** A browser client at `/kv.js`, a CLI in the same binary, and `curl` for everything else.
@@ -21,24 +21,24 @@ It's for the things that are too small for a real back-end: a poll for the group
 import { kv, createSpace } from "https://cubby.example.com/kv.js"
 
 // One poll per link: the space name lives in the URL fragment.
-const space = location.hash.slice(1) || (await createSpace({ public: "respond" })).space
+const space = location.hash.slice(1) || (await createSpace({ anyone: "post" })).space
 location.hash = space
 const db = kv(space, { live: true })
 
-// A vote sits in the voter's own users/ area, so nobody else can change it.
+// A vote is the voter's own key, so nobody else can change it.
 for (const b of document.querySelectorAll("button"))
-  b.onclick = () => db.user().set("vote", b.textContent)
+  b.onclick = () => db.mine.set("vote", b.textContent)
 
 // Every open page sees votes the moment they're cast.
 const votes = new Map()
-db.users.watch("vote", c => c.deleted ? votes.delete(c.user) : votes.set(c.user, c.value), {
+db.by.watch("vote", c => c.deleted ? votes.delete(c.by) : votes.set(c.by, c.value), {
   onSync: () => results.textContent = ["Pizza", "Tacos"]
     .map(v => `${v} ${[...votes.values()].filter(x => x === v).length}`).join(", "),
 })
 </script>
 ```
 
-Open it, send the link around, and the counts move on every screen as people tap. For something that moves rather than something to keep, like everyone's cursor, send pulses: `db.user().pulse("cursor", { x, y })` on every mouse move, and `db.users.onPulse("cursor", p => draw(p.user, p.value))` on every screen. A page that only needs to save something is shorter still: `await db.shared.set("list", items)` and `await db.shared.get("list")`.
+Open it, send the link around, and the counts move on every screen as people tap. For something that moves rather than something to keep, like everyone's cursor, send pulses: `db.mine.pulse("cursor", { x, y })` on every mouse move, and `db.by.onPulse("cursor", p => draw(p.by, p.value))` on every screen. A page that only needs to save something is shorter still: `await db.shared.set("list", items)` and `await db.shared.get("list")`.
 
 ## Install and run
 
@@ -69,8 +69,8 @@ Hello there
 
 ```
 space                 notes-cedar-pilot-mango-frost   one per app or room
-├── shared/{key}      common data
-├── users/{id}/{key}  each visitor's public part; only they write it
+├── shared/{key}      common keys, written at level all
+├── by/{id}/{key}     each visitor's own keys: posts, votes, names; only they write them
 └── to/{id}/{key}     sent to one visitor, read in their inbox/; to/me/ is private, to/owners/ goes to the owners
 ```
 

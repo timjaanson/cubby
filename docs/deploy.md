@@ -226,7 +226,7 @@ admin.sock              how `cubby admin` reaches the running server
 A space file is self-contained: its keys, version counter, settings, invites and grants. So spaces are easy to handle one by one:
 
 - **Delete one** with `cubby admin delete <space>`, which also tells watchers it's gone. Removing the file by hand works too, but stop the server first.
-- **Move or copy one** to another server by copying `spaces/{name}.db`, with the source server stopped or after `sqlite3 {name}.db "PRAGMA wal_checkpoint(TRUNCATE)"`. The other server picks it up on the next request for that space. Versions continue where they were, and settings and invites come along. Visitor tokens don't travel, since they live in `server.db`: grants and `users/` data stay, but nobody holds those visitors' tokens on the new server. The owner token still works, so the owner redeems it there to get back in.
+- **Move or copy one** to another server by copying `spaces/{name}.db`, with the source server stopped or after `sqlite3 {name}.db "PRAGMA wal_checkpoint(TRUNCATE)"`. The other server picks it up on the next request for that space. Versions continue where they were, and settings and invites come along. Visitor tokens don't travel, since they live in `server.db`: grants and `by/` data stay, but nobody holds those visitors' tokens on the new server. The owner token still works, so the owner redeems it there to get back in.
 - **Back up** by copying the whole directory with the server stopped, or with `sqlite3 file.db ".backup copy.db"` per file while it runs.
 
 ## Admin

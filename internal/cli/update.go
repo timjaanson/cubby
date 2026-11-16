@@ -14,7 +14,7 @@ func (c *client) update(f *flags) error {
 	if err != nil {
 		return err
 	}
-	if p.isPattern() || p.area == "users/*" {
+	if p.isPattern() || p.area == "by/*" {
 		return usageCli("update works on one key")
 	}
 	cmd := f.str("exec")

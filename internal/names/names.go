@@ -25,7 +25,6 @@ var (
 	AccessTokenRe  = regexp.MustCompile(`^at_[A-Za-z0-9_-]{43}$`)
 	OwnerTokenRe   = regexp.MustCompile(`^ot_[A-Za-z0-9_-]{43}$`)
 	tokenIDRe      = regexp.MustCompile(`^t_[a-z2-7]{8}$`)
-	grantIDRe      = regexp.MustCompile(`^g_[a-z2-7]{8}$`)
 	deviceIDRe     = regexp.MustCompile(`^d_[a-z2-7]{8}$`)
 	linkIDRe       = regexp.MustCompile(`^l_[a-z2-7]{8}$`)
 )
@@ -229,7 +228,6 @@ func DisplayLinkCode(code string) string {
 }
 
 func ValidTokenID(id string) bool { return tokenIDRe.MatchString(id) }
-func ValidGrantID(id string) bool { return grantIDRe.MatchString(id) }
 
 func RandomToken(prefix string) string {
 	b := make([]byte, 32)

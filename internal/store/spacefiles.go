@@ -29,7 +29,7 @@ type queryer interface {
 }
 
 func readMeta(q queryer) (spaceMeta, error) {
-	var m spaceMeta
+	m := spaceMeta{settings: access.Default}
 	rows, err := q.Query(`SELECT k, v FROM meta`)
 	if err != nil {
 		return m, err
@@ -130,8 +130,11 @@ func (s *Store) initSpace(db *sql.DB, name string, ns newSpace) error {
 			return err
 		}
 	}
-	if _, err := tx.Exec(`INSERT INTO grants (id, visitor, owner, allow, source, created_at) VALUES (?, ?, 1, '[]', 'create', ?)`,
+	if _, err := tx.Exec(`INSERT INTO grants (id, visitor, access, source, created_at) VALUES (?, ?, 'owner', 'create', ?)`,
 		names.NewGrantID(), ns.owner, NowMs()); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, spaceVersion)); err != nil {
 		return err
 	}
 	return tx.Commit()

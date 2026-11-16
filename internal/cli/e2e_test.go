@@ -51,7 +51,7 @@ func TestCLISharing(t *testing.T) {
 	if out, code := cli(t, owner, "set", space+"/shared/item.1", "milk"); code != 0 {
 		t.Fatalf("owner set: %d %s", code, out)
 	}
-	if out, _ := cli(t, owner, "settings", space); !strings.Contains(out, "public\tnone") {
+	if out, _ := cli(t, owner, "settings", space); !strings.Contains(out, "anyone\tnone\ninvite\tpost") {
 		t.Fatalf("settings: %q", out)
 	}
 	// A stranger sees nothing: exit 1, like a missing space.
@@ -62,13 +62,13 @@ func TestCLISharing(t *testing.T) {
 	if code != 0 || !strings.Contains(link, "&t=at_") {
 		t.Fatalf("token new: %d %q", code, link)
 	}
-	if out, code := cli(t, member, "join", space, link); code != 0 || out != "*:rw" {
+	if out, code := cli(t, member, "join", space, link); code != 0 || out != "all" {
 		t.Fatalf("join: %d %q", code, out)
 	}
 	if out, _ := cli(t, member, "get", space+"/shared/item.1"); out != "milk" {
 		t.Fatalf("member get: %q", out)
 	}
-	if out, _ := cli(t, member, "access", space); !strings.HasPrefix(out, "member") {
+	if out, _ := cli(t, member, "access", space); out != "all" {
 		t.Fatalf("access: %q", out)
 	}
 	if _, code := cli(t, stranger, "join", space, link); code != 3 {
@@ -80,24 +80,25 @@ func TestCLISharing(t *testing.T) {
 	if out, code := cli(t, member, "token", "ls", space); code != 0 || strings.Contains(out, "anna") {
 		t.Fatalf("member token ls shows only their own: %d %q", code, out)
 	}
-	out, _ = cli(t, owner, "grant", "ls", space)
-	var memberGrant string
-	for _, l := range strings.Split(out, "\n") {
-		if strings.Contains(l, "\tmember\t") {
-			memberGrant = strings.Fields(l)[0]
-		}
+	memberID, _ := cli(t, member, "whoami")
+	out, _ = cli(t, owner, "member", "ls", space)
+	if !strings.Contains(out, memberID+"\tall\t") {
+		t.Fatalf("member ls: %q", out)
 	}
-	if memberGrant == "" {
-		t.Fatalf("grant ls: %q", out)
+	if _, code := cli(t, owner, "member", "set", space, memberID, "read"); code != 0 {
+		t.Fatal("member set")
 	}
-	if _, code := cli(t, owner, "grant", "rm", space, memberGrant); code != 0 {
-		t.Fatal("grant rm")
+	if _, code := cli(t, member, "set", space+"/shared/x", "1"); code != 3 {
+		t.Fatalf("reader writes: %d", code)
+	}
+	if _, code := cli(t, owner, "member", "rm", space, memberID); code != 0 {
+		t.Fatal("member rm")
 	}
 	if _, code := cli(t, member, "get", space+"/shared/item.1"); code != 1 {
 		t.Fatalf("removed member: %d", code)
 	}
 	// Opening up.
-	if out, code := cli(t, owner, "settings", space, "--public", "read"); code != 0 || !strings.Contains(out, "public\tread") {
+	if out, code := cli(t, owner, "settings", space, "--anyone", "read"); code != 0 || !strings.Contains(out, "anyone\tread") {
 		t.Fatalf("settings change: %d %q", code, out)
 	}
 	if out, _ := cli(t, stranger, "get", space+"/shared/item.1"); out != "milk" {
@@ -201,7 +202,7 @@ func TestCLIToInboxAndBans(t *testing.T) {
 	t.Setenv("CUBBY_TOKEN", "")
 	owner, guest := t.TempDir(), t.TempDir()
 
-	out, _ := cli(t, owner, "new", "quiz", "--public", "respond")
+	out, _ := cli(t, owner, "new", "quiz", "--anyone", "post")
 	space := strings.Split(out, "\n")[0]
 	if _, code := cli(t, guest, "set", space+"/to/owners/answer", "42"); code != 0 {
 		t.Fatal("send to owners")
@@ -219,20 +220,20 @@ func TestCLIToInboxAndBans(t *testing.T) {
 	if out, _ := cli(t, guest, "get", space+"/inbox/me/draft"); out != "secret" {
 		t.Fatalf("inbox/me: %q", out)
 	}
-	if _, code := cli(t, guest, "get", space+"/me/draft"); code != 5 {
-		t.Fatalf("old me/ path: %d", code)
+	if _, code := cli(t, guest, "get", space+"/users/me/draft"); code != 5 {
+		t.Fatalf("old users/ path: %d", code)
 	}
-	if _, code := cli(t, owner, "ban", "add", space, guestID, "--until", "1h"); code != 0 {
-		t.Fatal("ban add")
+	if _, code := cli(t, owner, "member", "set", space, guestID, "banned", "--until", "1h"); code != 0 {
+		t.Fatal("ban")
 	}
-	if out, _ := cli(t, owner, "ban", "ls", space); !strings.HasPrefix(out, guestID+"\t") {
-		t.Fatalf("ban ls: %q", out)
+	if out, _ := cli(t, owner, "member", "ls", space); !strings.Contains(out, guestID+"\tbanned\t") {
+		t.Fatalf("member ls: %q", out)
 	}
 	if _, code := cli(t, guest, "set", space+"/to/owners/answer", "43"); code != 3 {
 		t.Fatalf("banned write: %d", code)
 	}
-	if _, code := cli(t, owner, "ban", "rm", space, guestID); code != 0 {
-		t.Fatal("ban rm")
+	if _, code := cli(t, owner, "member", "rm", space, guestID); code != 0 {
+		t.Fatal("unban")
 	}
 	if _, code := cli(t, guest, "set", space+"/to/owners/answer", "43"); code != 0 {
 		t.Fatal("write after unban")

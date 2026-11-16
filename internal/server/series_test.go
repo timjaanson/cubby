@@ -145,7 +145,7 @@ func TestSeriesKinds(t *testing.T) {
 		{"PUT", S + "/series", "5", 400, "invalid_key"},
 		{"PUT", S + "/watch", "5", 400, "invalid_key"},
 		{"GET", S + "/env.*/series", "", 400, "invalid_key"},
-		{"GET", "/v1/home-cedar-pilot-mango/users/*/temp/series", "", 400, "invalid_key"},
+		{"GET", "/v1/home-cedar-pilot-mango/by/*/temp/series", "", 400, "invalid_key"},
 		{"GET", S + "/temp/series/watch", "", 400, "invalid_key"},
 		{"GET", S + "/temp/history", "", 400, "invalid_key"},
 		{"POST", S + "/env.*", "{}", 405, "method_not_allowed"},
@@ -375,13 +375,13 @@ func TestSeriesUsersAndMe(t *testing.T) {
 	tok2, _ := c.anon()
 	auth := []string{"Authorization", "Bearer " + tok}
 	sp := "/v1/home-cedar-pilot-mango"
-	if st, _, b := c.req("POST", sp+"/users/"+id+"/weight/series", "71.2", auth...); st != 201 {
+	if st, _, b := c.req("POST", sp+"/by/"+id+"/weight/series", "71.2", auth...); st != 201 {
 		t.Fatalf("own users/: %d %s", st, b)
 	}
-	if st, _, b := c.req("POST", sp+"/users/"+id+"/weight/series", "71.0", "Authorization", "Bearer "+tok2); st != 403 || errCode(b) != "not_yours" {
+	if st, _, b := c.req("POST", sp+"/by/"+id+"/weight/series", "71.0", "Authorization", "Bearer "+tok2); st != 403 || errCode(b) != "not_yours" {
 		t.Fatalf("other visitor: %d %s", st, b)
 	}
-	if st, _, _ := c.req("GET", sp+"/users/"+id+"/weight/series", ""); st != 200 {
+	if st, _, _ := c.req("GET", sp+"/by/"+id+"/weight/series", ""); st != 200 {
 		t.Fatalf("public read: %d", st)
 	}
 	if st, _, b := c.req("POST", sp+"/to/me/sleep/series", "7.5", auth...); st != 201 {
@@ -390,32 +390,30 @@ func TestSeriesUsersAndMe(t *testing.T) {
 	if st, _, _ := c.req("GET", sp+"/to/me/sleep/series", ""); st != 401 {
 		t.Fatalf("me/ without token: %d", st)
 	}
-	if st, _, b := c.req("POST", sp+"/users/*/weight/series", "1", auth...); st != 400 {
-		t.Fatalf("users/*/ series: %d %s", st, b)
+	if st, _, b := c.req("POST", sp+"/by/*/weight/series", "1", auth...); st != 400 {
+		t.Fatalf("by/*/ series: %d %s", st, b)
 	}
 }
 
-// A device with a write-only grant adds points to a space it can't read.
-func TestSeriesWriteOnlyGrant(t *testing.T) {
+// A device invited with post writes its own series and nothing common.
+func TestSeriesPostDevice(t *testing.T) {
 	c := newTest(t)
-	own := c.create(`{"label":"room","public":"read"}`, "")
+	own := c.create(`{"label":"room","anyone":"read"}`, "")
 	o := []string{"Authorization", "Bearer " + own.Token}
-	_, _, b := c.req("POST", "/v1/"+own.Space+"/tokens", `{"allow":["shared/env.*:w"],"uses":1}`, o...)
+	_, _, b := c.req("POST", "/v1/"+own.Space+"/tokens", `{"access":"post","uses":1}`, o...)
 	tk := decode[struct{ Token string }](t, b)
 	_, _, b = c.req("POST", "/v1/"+own.Space+"/join", `{"token":"`+tk.Token+`"}`)
-	dev := decode[struct{ Token string }](t, b)
+	dev := decode[struct{ Token, ID string }](t, b)
 	d := []string{"Authorization", "Bearer " + dev.Token}
-	S := "/v1/" + own.Space + "/shared"
-	if st, _, b := c.req("POST", S+"/env.*/series", `{"temp":1}`, d...); st != 200 {
+	sp := "/v1/" + own.Space
+	if st, _, b := c.req("POST", sp+"/by/me/env.*/series", `{"temp":1}`, d...); st != 200 {
 		t.Fatalf("device write: %d %s", st, b)
 	}
-	if st, _, b := c.req("POST", S+"/other/series", `1`, d...); st != 403 || errCode(b) != "no_access" {
-		t.Fatalf("outside its scope: %d %s", st, b)
+	if st, _, b := c.req("POST", sp+"/shared/env.*/series", `{"temp":1}`, d...); st != 403 || errCode(b) != "no_access" {
+		t.Fatalf("common keys: %d %s", st, b)
 	}
-	if st, _, b := c.req("POST", S+"/*/series", `{"env.x":1}`, d...); st != 403 || errCode(b) != "no_access" {
-		t.Fatalf("a batch wider than its scope: %d %s", st, b)
-	}
-	if st, _, b := c.req("POST", S+"/env.*/series", `{"temp":1}`); st != 401 {
-		t.Fatalf("no token: %d %s", st, b)
+	// Anyone reads it, without knowing the device's ID.
+	if st, _, b := c.req("GET", sp+"/by/*/env.temp", ""); st != 200 || !strings.Contains(b, `"by":"`+dev.ID+`"`) {
+		t.Fatalf("read across: %d %s", st, b)
 	}
 }

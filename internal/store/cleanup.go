@@ -13,7 +13,7 @@ type CleanupReport struct {
 }
 
 // dropVisitorRows removes a visitor's data, grants and ban from one space:
-// their users/ keys, what they sent under to/ and what was sent to them. All
+// their by/ keys, what they sent under to/ and what was sent to them. All
 // of it becomes tombstones, so watchers on the other side see it go; their
 // own to/me/ slots go too.
 func (s *Store) dropVisitorRows(space, id string) error {
@@ -35,7 +35,7 @@ func (s *Store) dropVisitorRows(space, id string) error {
 	}
 	const mine = `(area = ? OR (area >= 'i:' AND area < 'i;' AND (substr(area, 1, ?) = ? OR substr(area, ?) = ?)))`
 	in := "i:" + id + ":"
-	mineArgs := []any{"u:" + id, len(in), in, -(len(id) + 1), ":" + id}
+	mineArgs := []any{ByArea(id), len(in), in, -(len(id) + 1), ":" + id}
 	rows, err := tx.Query(`SELECT area, key, size, value IS NOT NULL, writer FROM kv WHERE `+mine, mineArgs...)
 	if err != nil {
 		return err
@@ -109,7 +109,7 @@ func (s *Store) Cleanup() (rep CleanupReport, err error) {
 	secs := func(d config.Duration) int64 { return int64(time.Duration(d).Seconds()) }
 	s.Rescan()
 
-	// 1. Visitors past their idle time, with their users/ data and what they
+	// 1. Visitors past their idle time, with their by/ data and what they
 	// sent and received under to/.
 	rows, err := s.srv.Query(`SELECT id FROM visitors WHERE last_seen_at < ? OR (stored = 0 AND last_seen_at < ?)`,
 		now-secs(r.VisitorIdleTTL), now-secs(r.EmptyVisitorIdleTTL))

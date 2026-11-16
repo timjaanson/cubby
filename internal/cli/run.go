@@ -16,7 +16,7 @@ Server:
   cubby admin <command>           look after the server's data (spaces, export, delete, owner-token, stats, cleanup)
 
 Client (talks to --server or $CUBBY_SERVER, default http://localhost:28229; a bare port means localhost):
-  cubby new [label] [--public P]  create a space you own; private unless --public read|respond|all
+  cubby new [label] [--anyone L]  create a space you own; private unless --anyone read|post|all
   cubby get <path>                print a value
   cubby set <path> [value|-]      write a value from the argument or stdin
   cubby del <path>                delete a value
@@ -32,10 +32,10 @@ Client (talks to --server or $CUBBY_SERVER, default http://localhost:28229; a ba
   cubby name [label]              make up a valid space name, no server needed
   cubby whoami [--show-token] | url <path>
 
-Sharing (owners invite, others join):
-  cubby token new <space> [--label L] [--link URL]   mint an invite: member, 10 uses, 7 days
+Sharing (levels: read < post < all < owner; banned keeps someone out):
+  cubby token new <space> [--access L] [--link URL]  mint an invite: access all, 10 uses, 7 days
   cubby join <space> <token or link>                 redeem an invite on this machine
-  cubby access <space> | settings <space> | token ls|set|rm | grant ls|add|rm | ban ls|add|rm
+  cubby access <space> | settings <space> | token ls|set|rm | member ls|set|rm
   cubby owner-token <space> | drop <space>
 
 Your devices (this visitor on another machine, not sharing):
@@ -44,8 +44,8 @@ Your devices (this visitor on another machine, not sharing):
   cubby device ls | name <label> | rm <id> | rm --others
 
 Paths mirror the URL after /v1/:
-  poll-cedar-pilot-mango/shared/question     poll-cedar-pilot-mango/users/me/vote
-  'poll-cedar-pilot-mango/shared/msg.*'      'poll-cedar-pilot-mango/users/*/vote'
+  poll-cedar-pilot-mango/shared/question     poll-cedar-pilot-mango/by/me/vote
+  'poll-cedar-pilot-mango/shared/msg.*'      'poll-cedar-pilot-mango/by/*/vote'
   poll-cedar-pilot-mango/to/me/draft         poll-cedar-pilot-mango/to/owners/answer
   'poll-cedar-pilot-mango/inbox/*/answer'    'poll-cedar-pilot-mango/inbox/owners/*/answer'
 

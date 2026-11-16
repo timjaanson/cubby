@@ -13,102 +13,91 @@ func raw(s string) json.RawMessage {
 	return json.RawMessage(s)
 }
 
-func TestPublicShorthand(t *testing.T) {
-	for _, p := range []string{"none", "read", "respond", "all"} {
-		s, err := ApplyInput(Private, raw(`"`+p+`"`), nil, nil, nil)
-		if err != nil || s.Public() != p {
-			t.Fatalf("%s: %v %v", p, s.Public(), err)
-		}
-		if Decode(s.Encode()) != s {
-			t.Fatalf("%s: encode round trip", p)
+func TestLevelNames(t *testing.T) {
+	for _, n := range []string{"banned", "none", "read", "post", "all", "owner"} {
+		l, ok := ParseLevel(n)
+		if !ok || l.String() != n {
+			t.Fatalf("%s: %v %v", n, l, ok)
 		}
 	}
-	if Private.Public() != "none" {
-		t.Fatal("default isn't private")
+	if _, ok := ParseLevel("member"); ok {
+		t.Fatal("member is not a level")
 	}
-	s, err := ApplyInput(presets["all"], nil, nil, raw(`{"to": "granted"}`), nil)
-	if err != nil || s.Public() != "custom" || !s.WriteShared || s.WriteTo {
-		t.Fatalf("custom: %+v %v", s, err)
+	var zero Level
+	if zero != None {
+		t.Fatal("the zero level must grant nothing")
 	}
-	if _, err := ApplyInput(Private, raw(`"read"`), raw(`"anyone"`), nil, nil); err == nil {
-		t.Fatal("public with read accepted")
-	}
-	if _, err := ApplyInput(Private, nil, nil, raw(`{"shared": "anyone"}`), nil); err == nil {
-		t.Fatal("open write into a private space accepted")
-	}
-	if _, err := ApplyInput(Private, raw(`"open"`), nil, nil, nil); err == nil {
-		t.Fatal("unknown preset accepted")
-	}
-	b, _ := json.Marshal(presets["respond"])
-	if string(b) != `{"public":"respond","read":"anyone","write":{"shared":"granted","to":"anyone","users":"anyone"},"invite":"members"}` {
-		t.Fatalf("json: %s", b)
+	if !(Banned < None && None < Read && Read < Post && Post < All && All < Owner) {
+		t.Fatal("levels out of order")
 	}
 }
 
-func TestScopes(t *testing.T) {
-	cases := []struct {
-		scope string
-		op    Op
-		want  bool
-	}{
-		{"*:rw", Op{Area: "to", Rcpt: "u_x", Key: "x", Write: true}, true},
-		{"shared:r", Op{Area: "shared", Key: "x"}, true},
-		{"shared:r", Op{Area: "shared", Key: "x", Write: true}, false},
-		{"shared/env.*:w", Op{Area: "shared", Key: "env.temp", Write: true}, true},
-		{"shared/env.*:w", Op{Area: "shared", Key: "env.", Pattern: true, Write: true}, true},
-		{"shared/env.*:w", Op{Area: "shared", Key: "env.t", Pattern: true, Write: true}, true},
-		{"shared/env.*:w", Op{Area: "shared", Key: "e", Pattern: true, Write: true}, false},
-		{"shared/env.*:w", Op{Area: "shared", Key: "", Pattern: true, Write: true}, false},
-		{"shared/config:w", Op{Area: "shared", Key: "config", Write: true}, true},
-		{"shared/config:w", Op{Area: "shared", Key: "config2", Write: true}, false},
-		{"shared/config:w", Op{Area: "shared", Key: "config", Pattern: true, Write: true}, false},
-		{"users:w", Op{Area: "users", Key: "vote", Write: true}, true},
-		{"users:w", Op{Area: "shared", Key: "vote", Write: true}, false},
+func TestSettings(t *testing.T) {
+	s, err := ApplyInput(Default, raw(`"post"`), nil)
+	if err != nil || s.Anyone != Post || s.Invite != Post {
+		t.Fatalf("%+v %v", s, err)
 	}
-	for _, c := range cases {
-		sc, err := ParseScope(c.scope)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if sc.Covers(c.op) != c.want {
-			t.Errorf("%s covers %+v: want %v", c.scope, c.op, c.want)
+	s, err = ApplyInput(s, nil, raw(`"owner"`))
+	if err != nil || s.Anyone != Post || s.Invite != Owner {
+		t.Fatalf("%+v %v", s, err)
+	}
+	for _, bad := range [][2]string{{`"owner"`, ""}, {`"banned"`, ""}, {`"respond"`, ""}, {"", `"none"`}, {"", `"banned"`}} {
+		if _, err := ApplyInput(Default, raw(bad[0]), raw(bad[1])); err == nil {
+			t.Fatalf("%v accepted", bad)
 		}
 	}
-	for _, bad := range []string{"shared", "shared:x", "sharde:r", "shared/a/b:r", "shared/:r", "shared/watch:r", ":r"} {
-		if _, err := ParseScope(bad); err == nil {
-			t.Errorf("%q accepted", bad)
-		}
+	if Decode(s.Encode()) != s {
+		t.Fatalf("round trip %q", s.Encode())
 	}
-	if a, _ := ParseAllow(nil); len(a) != 1 || a[0] != "*:rw" {
-		t.Fatalf("default allow %v", a)
+	if Decode("gggg") != Default || Decode("") != Default {
+		t.Fatal("unreadable settings must be the private default")
 	}
-	if a, _ := ParseAllow(raw(`"viewer"`)); len(a) != 2 {
-		t.Fatalf("viewer %v", a)
+	b, _ := json.Marshal(s)
+	if string(b) != `{"anyone":"post","invite":"owner"}` {
+		t.Fatal(string(b))
 	}
-	if a, err := ParseAllow(raw(`["shared/*:rw", "to/me:rw"]`)); err != nil || a[0] != "shared:rw" {
-		t.Fatalf("list %v %v", a, err)
-	}
-	if _, err := ParseAllow(raw(`"editor"`)); err == nil {
-		t.Fatal("unknown preset accepted")
+	var back Settings
+	if json.Unmarshal(b, &back) != nil || back != s {
+		t.Fatalf("%+v", back)
 	}
 }
 
 func TestRights(t *testing.T) {
-	r := Rights{Settings: presets["respond"]}
-	if !r.Allows(Op{Area: "users", Key: "vote", Write: true}) || r.Allows(Op{Area: "shared", Key: "q", Write: true}) {
-		t.Fatal("respond")
+	need := func(area string, write bool) Level { return Op{Area: area, Write: write}.Need() }
+	if need("shared", false) != Read || need("by", true) != Post || need("to", true) != Post || need("shared", true) != All {
+		t.Fatal("need")
 	}
-	r.Grants = []Grant{{Scopes: ParseScopes([]string{"shared/q:w"})}}
-	if !r.Allows(Op{Area: "shared", Key: "q", Write: true}) {
-		t.Fatal("grant")
+
+	// A stranger in a private space sees nothing.
+	r := &Rights{Settings: Default}
+	if r.Level() != None || r.Visible() || r.CanInvite() {
+		t.Fatalf("stranger %+v", r)
 	}
-	p := Rights{Settings: Private}
-	if p.Visible() || p.Allows(Op{Area: "shared", Key: "x"}) {
-		t.Fatal("private")
+	// The anyone level counts for access, not for inviting.
+	r.Settings.Anyone = All
+	if r.Level() != All || !r.Allows(Op{Area: "shared", Write: true}) || r.CanInvite() {
+		t.Fatalf("open space %+v", r)
 	}
-	p.Grants = []Grant{{Scopes: ParseScopes([]string{"shared/env.*:w"})}}
-	if !p.Visible() || p.Allows(Op{Area: "shared", Key: "env.t"}) {
-		t.Fatal("write-only grant")
+	// A member's own level counts when it's higher.
+	r = &Rights{Settings: Settings{Anyone: Read, Invite: Post}, Member: Post}
+	if r.Level() != Post || !r.Allows(Op{Area: "by", Write: true}) || r.Allows(Op{Area: "shared", Write: true}) || !r.CanInvite() {
+		t.Fatalf("post member %+v", r)
+	}
+	if !r.CanGive(Read) || !r.CanGive(Post) || r.CanGive(All) {
+		t.Fatal("a member gives at most their own level")
+	}
+	r.Settings.Invite = All
+	if r.CanInvite() {
+		t.Fatal("below the invite level")
+	}
+	// A ban beats everything.
+	r = &Rights{Settings: Settings{Anyone: All, Invite: Read}, Member: All, Banned: true}
+	if r.Level() != Banned || r.Visible() || r.CanInvite() {
+		t.Fatalf("banned %+v", r)
+	}
+	r = &Rights{Settings: Default, Member: Owner}
+	if !r.Owner() || !r.CanGive(Owner) {
+		t.Fatal("owner")
 	}
 }
 
@@ -128,83 +117,5 @@ func TestParseTime(t *testing.T) {
 	}
 	if _, err := ParseTime(raw(`"soon"`), now); err == nil {
 		t.Fatal("garbage accepted")
-	}
-}
-
-func TestSettingsJSONRoundTrip(t *testing.T) {
-	for _, s := range []Settings{{}, {Read: true}, {Read: true, WriteUsers: true, WriteTo: true}, {Read: true, WriteShared: true}} {
-		b, err := json.Marshal(s)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var got Settings
-		if err := json.Unmarshal(b, &got); err != nil {
-			t.Fatalf("%s: %v", b, err)
-		}
-		if got != s {
-			t.Fatalf("%s: got %+v, want %+v", b, got, s)
-		}
-	}
-}
-
-func TestInviteSetting(t *testing.T) {
-	if Private.Invite() != "members" {
-		t.Fatal("members invite by default")
-	}
-	s, err := ApplyInput(Private, nil, nil, nil, raw(`"owners"`))
-	if err != nil || !s.InviteOwners || s.Public() != "none" {
-		t.Fatalf("owners: %+v %v", s, err)
-	}
-	if Decode(s.Encode()) != s || Decode("gggg") != Private {
-		t.Fatal("encode round trip, old four-letter form is members")
-	}
-	s2, err := ApplyInput(s, raw(`"read"`), nil, nil, nil)
-	if err != nil || !s2.InviteOwners || s2.Public() != "read" {
-		t.Fatalf("public keeps invite: %+v %v", s2, err)
-	}
-	if _, err := ApplyInput(Private, nil, nil, nil, raw(`"everyone"`)); err == nil {
-		t.Fatal("bad invite accepted")
-	}
-	var back Settings
-	b, _ := json.Marshal(s)
-	if json.Unmarshal(b, &back) != nil || back != s {
-		t.Fatalf("json round trip %s", b)
-	}
-}
-
-func TestCanGive(t *testing.T) {
-	member := func(allow ...string) *Rights {
-		return &Rights{Grants: []Grant{{Allow: allow, Scopes: ParseScopes(allow)}}}
-	}
-	cases := []struct {
-		have, give []string
-		ok         bool
-	}{
-		{[]string{"*:rw"}, []string{"*:rw"}, true},
-		{[]string{"*:rw"}, []string{"shared/x:w", "users:r"}, true},
-		{[]string{"shared:r", "users:r"}, []string{"*:rw"}, false},
-		{[]string{"shared:r", "users:r"}, []string{"shared:r"}, true},
-		{[]string{"shared:r"}, []string{"shared:rw"}, false},
-		{[]string{"shared/board.*:rw"}, []string{"shared/board.cards*:w"}, true},
-		{[]string{"shared/board.*:rw"}, []string{"shared:r"}, false},
-		{[]string{"shared/note:rw"}, []string{"shared/note:r"}, true},
-		{[]string{"shared/note:rw"}, []string{"shared/note.*:r"}, false},
-		{[]string{"shared:r", "shared:w"}, []string{"shared:rw"}, true},
-	}
-	for _, c := range cases {
-		if got := member(c.have...).CanGive(c.give); got != c.ok {
-			t.Errorf("have %v give %v: %v", c.have, c.give, got)
-		}
-	}
-	r := member("shared:r")
-	if !r.CanInvite() {
-		t.Fatal("member invites by default")
-	}
-	r.Settings.InviteOwners = true
-	if r.CanInvite() || (&Rights{}).CanInvite() || !(&Rights{Owner: true, Settings: Settings{InviteOwners: true}}).CanInvite() {
-		t.Fatal("invite owners")
-	}
-	if got := (&Rights{Grants: []Grant{{Allow: []string{"shared:r"}}, {Allow: []string{"shared:r", "to/me:rw"}}}}).OwnAllow(); len(got) != 2 {
-		t.Fatalf("own allow %v", got)
 	}
 }

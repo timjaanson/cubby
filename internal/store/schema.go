@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS meta (
   v
 );
 CREATE TABLE IF NOT EXISTS kv (
-  area       TEXT NOT NULL,      -- 's', 'u:{id}', 'i:{recipient}:{sender}' (recipient is an id or 'owners')
+  area       TEXT NOT NULL,      -- 's', 'b:{author}', 'i:{recipient}:{sender}' (recipient is an id or 'owners')
   key        TEXT NOT NULL,
   value      BLOB,               -- NULL is a tombstone
   is_json    INTEGER NOT NULL,
@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS kv (
   PRIMARY KEY (area, key)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS kv_by_version ON kv (area, version);
-CREATE INDEX IF NOT EXISTS kv_users ON kv (key, area) WHERE area >= 'u:' AND area < 'u;';
+CREATE INDEX IF NOT EXISTS kv_by ON kv (key, area) WHERE area >= 'b:' AND area < 'b;';
 CREATE INDEX IF NOT EXISTS kv_tombstones ON kv (updated_at) WHERE value IS NULL;
 CREATE TABLE IF NOT EXISTS usage (writer TEXT PRIMARY KEY, bytes INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS points (
@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS tokens (
   id               TEXT PRIMARY KEY,     -- t_ + 8 base32
   hash             TEXT NOT NULL UNIQUE, -- SHA-256 of the at_ token
   label            TEXT NOT NULL DEFAULT '',
-  allow            TEXT NOT NULL,        -- JSON array of scopes
+  access           TEXT NOT NULL,        -- the level it gives: read, post or all
   uses_left        INTEGER,              -- NULL: no limit
   until            INTEGER,              -- ms, NULL: no end
   grant_for        INTEGER,              -- ms, NULL: grants last until revoked
@@ -97,8 +97,7 @@ CREATE TABLE IF NOT EXISTS tokens (
 CREATE TABLE IF NOT EXISTS grants (
   id           TEXT PRIMARY KEY,         -- g_ + 8 base32
   visitor      TEXT NOT NULL,
-  owner        INTEGER NOT NULL DEFAULT 0,
-  allow        TEXT NOT NULL,            -- JSON array of scopes, [] for owner grants
+  access       TEXT NOT NULL,            -- read, post, all or owner
   source       TEXT NOT NULL,            -- 'create', 'owner-token', 'direct' or a token id
   until        INTEGER,                  -- ms, NULL: until revoked
   created_at   INTEGER NOT NULL,         -- ms

@@ -141,7 +141,7 @@ func (l *liveConn) setIdentity(visitor, device string, tokErr *apierr.Error) {
 	l.visitor, l.device, l.tokErr = visitor, device, tokErr
 	var ended []string
 	if changed {
-		// inbox/, to/ and users/me/ meant the previous visitor's.
+		// inbox/, to/ and by/me/ meant the previous visitor's.
 		for id, w := range l.watches {
 			if w.self {
 				w.cancel()
@@ -153,7 +153,7 @@ func (l *liveConn) setIdentity(visitor, device string, tokErr *apierr.Error) {
 	l.mu.Unlock()
 	for _, id := range ended {
 		l.sendErr(json.RawMessage(id), &apierr.Error{Status: 409, Code: "identity_changed",
-			Message: "This connection authenticated as another visitor, or its device was signed out, so its watches on inbox/, to/ and users/me/ ended. Start them again from their last version."})
+			Message: "This connection authenticated as another visitor, or its device was signed out, so its watches on inbox/, to/ and by/me/ ended. Start them again from their last version."})
 	}
 }
 
@@ -204,7 +204,7 @@ type liveWill struct {
 
 type liveWatch struct {
 	cancel context.CancelFunc
-	self   bool // what it watches depends on who asks: inbox/, to/, users/me/
+	self   bool // what it watches depends on who asks: inbox/, to/, by/me/
 }
 
 type liveIn struct {
@@ -526,7 +526,7 @@ func (l *liveConn) stop(m liveIn) {
 // takes one pulse from the budget.
 func (l *liveConn) will(m liveIn) {
 	if m.Path == "" || !strings.HasSuffix(m.Path, "/pulse") {
-		l.sendErr(m.ID, badMessage("will takes path, a pulse path like users/{id}/here/pulse, and body or text. Without either it clears the will."))
+		l.sendErr(m.ID, badMessage("will takes path, a pulse path like by/me/here/pulse, and body or text. Without either it clears the will."))
 		return
 	}
 	if m.Body == nil && m.Text == nil {
@@ -642,7 +642,7 @@ func (l *liveConn) request(m liveIn) {
 	}
 	area, _, _ := strings.Cut(m.Path, "/")
 	if err == nil && !liveArea(area) {
-		err = badMessage("path starts with shared/, users/, to/ or inbox/, as in /v1/{space}/{path}. Everything else about a space is HTTP only.")
+		err = badMessage("path starts with shared/, by/, to/ or inbox/, as in /v1/{space}/{path}. Everything else about a space is HTTP only.")
 	}
 	if err == nil && strings.ContainsAny(m.Path, "?#") {
 		err = badMessage("path holds no query string; parameters go in query.")
@@ -896,5 +896,5 @@ func (l *liveConn) allowed(space string, op access.Op) bool {
 
 // liveArea: the data areas a live message may address.
 func liveArea(a string) bool {
-	return a == "shared" || a == "users" || a == "to" || a == "inbox"
+	return a == "shared" || a == "by" || a == "to" || a == "inbox"
 }

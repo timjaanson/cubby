@@ -16,7 +16,7 @@ func (c *client) watch(f *flags) error {
 	if err != nil {
 		return err
 	}
-	if f.bool("raw") && (p.isPattern() || p.area == "users/*") {
+	if f.bool("raw") && (p.isPattern() || p.area == "by/*") {
 		return usageCli("--raw is for watching one key")
 	}
 	fromNow := f.str("from") == "now"
@@ -99,8 +99,8 @@ func (c *client) watch(f *flags) error {
 						u, key, _ := strings.Cut(k, "/")
 						gone := item{Key: key, Deleted: true, Version: out.Version}
 						switch {
-						case p.area == "users/*":
-							gone.User = u
+						case p.area == "by/*":
+							gone.By = u
 						case p.area == "to/*":
 							gone.To = u
 						case strings.HasPrefix(p.area, "inbox/"):
@@ -163,8 +163,8 @@ func (c *client) emit(ch item, f *flags, area string) {
 			del = "1"
 		}
 		e.Env = append(os.Environ(), "KV_KEY="+ch.Key, "KV_VERSION="+strconv.FormatInt(ch.Version, 10), "KV_DELETED="+del)
-		if ch.User != "" {
-			e.Env = append(e.Env, "KV_USER="+ch.User)
+		if ch.By != "" {
+			e.Env = append(e.Env, "KV_BY="+ch.By)
 		}
 		if ch.From != "" {
 			e.Env = append(e.Env, "KV_FROM="+ch.From, "KV_TO="+ch.To)

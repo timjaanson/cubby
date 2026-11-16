@@ -25,7 +25,7 @@ func testStore(t *testing.T) (*Store, string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	name, _, err := s.CreateSpace("", "", access.Private, id)
+	name, _, err := s.CreateSpace("", "", access.Default, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,15 +171,12 @@ func TestMigrationPreservesOldData(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, id, _ := s.NewVisitor()
-	space, _, err := s.CreateSpace("", "", access.Private, id)
+	space, _, err := s.CreateSpace("", "", access.Default, id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	first, err := s.Write(context.Background(), WriteReq{Space: space, Area: "s", Key: "old", Writer: id, Value: []byte("saved")})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := s.CreateToken(space, TokenSpec{By: id, Allow: []string{"*:rw"}}); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
@@ -188,7 +185,9 @@ func TestMigrationPreservesOldData(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Recreate exactly the pre-migration column set, including NULL plain-key t.
-	_, err = db.Exec(`DROP INDEX IF EXISTS kv_expiry; ALTER TABLE kv DROP COLUMN expires; ALTER TABLE kv DROP COLUMN expired;
+	legacyAccess(t, db, id, "gggg")
+	_, err = db.Exec(`INSERT INTO tokens (id, hash, allow, created_at) VALUES ('t_old00000', 'h', '["*:rw"]', 1);
+		DROP INDEX IF EXISTS kv_expiry; ALTER TABLE kv DROP COLUMN expires; ALTER TABLE kv DROP COLUMN expired;
 		ALTER TABLE tokens DROP COLUMN minted_by; ALTER TABLE tokens DROP COLUMN revoked_at; UPDATE kv SET t=NULL,updated_at=1700000000; PRAGMA user_version=0`)
 	db.Close()
 	if err != nil {
@@ -204,11 +203,11 @@ func TestMigrationPreservesOldData(t *testing.T) {
 		t.Fatalf("migrated: %+v %v", e, err)
 	}
 	rights, err := s.Rights(space, id)
-	if err != nil || !rights.Owner {
+	if err != nil || !rights.Owner() {
 		t.Fatalf("lost ownership: %+v %v", rights, err)
 	}
 	toks, err := s.ListTokens(space, "")
-	if err != nil || len(toks) != 1 || toks[0].By != nil || toks[0].State != "active" {
+	if err != nil || len(toks) != 1 || toks[0].By != nil || toks[0].State != "active" || toks[0].Access != access.All {
 		t.Fatalf("tokens after migration: %+v %v", toks, err)
 	}
 }

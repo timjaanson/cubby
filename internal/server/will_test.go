@@ -19,19 +19,19 @@ func TestLastWill(t *testing.T) {
 	sp := "/v1/" + own.Space
 	o := bearer(own.Token)
 	_, otherID := c.anon()
-	here := "users/" + own.ID + "/here/pulse"
+	here := "by/" + own.ID + "/here/pulse"
 
 	// Registered on one connection, sent when it drops.
 	w := c.dial(own.Space, o...)
 	if f := w.call(`1`, `{"id":1,"op":"will","path":"`+here+`","body":{"left":true}}`); f.Status != 200 {
 		t.Fatalf("register: %d %s", f.Status, f.Body)
 	}
-	got := c.listen(sp+"/users/*/here/pulse?timeout=5", o...)
+	got := c.listen(sp+"/by/*/here/pulse?timeout=5", o...)
 	w.conn.CloseNow()
 	select {
 	case b := <-got:
 		p := parsePulses(t, b)
-		if len(p.Pulses) != 1 || p.Pulses[0].User != own.ID || string(p.Pulses[0].Value) != `{"left":true}` {
+		if len(p.Pulses) != 1 || p.Pulses[0].By != own.ID || string(p.Pulses[0].Value) != `{"left":true}` {
 			t.Fatalf("will: %s", b)
 		}
 	case <-time.After(5 * time.Second):
@@ -42,7 +42,7 @@ func TestLastWill(t *testing.T) {
 	w = c.dial(own.Space, o...)
 	w.call(`1`, `{"id":1,"op":"will","path":"`+here+`","text":"bye"}`)
 	w.call(`2`, `{"id":2,"op":"will","path":"`+here+`"}`)
-	got = c.listen(sp+"/users/*/here/pulse?timeout=1", o...)
+	got = c.listen(sp+"/by/*/here/pulse?timeout=1", o...)
 	w.conn.Close(websocket.StatusNormalClosure, "")
 	if p := parsePulses(t, <-got); len(p.Pulses) != 0 {
 		t.Fatalf("cleared will sent: %+v", p)
@@ -50,7 +50,7 @@ func TestLastWill(t *testing.T) {
 
 	// Checked like a pulse when registered.
 	w = c.dial(own.Space, o...)
-	if f := w.call(`1`, `{"id":1,"op":"will","path":"users/`+otherID+`/here/pulse","body":1}`); f.code() != "not_yours" {
+	if f := w.call(`1`, `{"id":1,"op":"will","path":"by/`+otherID+`/here/pulse","body":1}`); f.code() != "not_yours" {
 		t.Fatalf("other's area: %d %s", f.Status, f.Body)
 	}
 	if f := w.call(`2`, `{"id":2,"op":"will","path":"shared/x","body":1}`); f.code() != "bad_message" {
@@ -87,7 +87,7 @@ func TestLastWillRechecksAccess(t *testing.T) {
 	_, _, b := c.req("GET", sp+"/access", "", bearer(m)...)
 	var a struct{ ID string }
 	json.Unmarshal([]byte(b), &a)
-	if s, _, _ := c.req("DELETE", sp+"/grants?user="+a.ID, "", o...); s != 200 {
+	if s, _, _ := c.req("DELETE", sp+"/members/"+a.ID, "", o...); s != 200 {
 		t.Fatal("revoke")
 	}
 	got := c.listen(sp+"/shared/door/pulse?timeout=1", o...)

@@ -18,7 +18,7 @@ assert(h.get("link") === link.code && h.get("s") === space && !h.has("t") && u.s
 const done = link.done
 
 // The laptop already has an identity and a live connection in another space.
-const { space: other } = await createSpace({ label: "scratch", public: "all", ...opt("laptop") })
+const { space: other } = await createSpace({ label: "scratch", anyone: "all", ...opt("laptop") })
 const scratch = kv(other, opt("laptop", { live: true }))
 await scratch.shared.set("x", 1)
 const laptop = devices(opt("laptop"))

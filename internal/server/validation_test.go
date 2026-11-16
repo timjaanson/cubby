@@ -58,12 +58,12 @@ func TestHTTPValidation(t *testing.T) {
 		{"GET", "/v1/gone-cedar-pilot-mango/shared/x", 404, "no_space"},
 		{"PUT", "/v1/gone-cedar-pilot-mango/shared/x", 404, "no_space"},
 		// visitor IDs
-		{"PUT", sp + "/users/../shared/x", 400, "invalid_key"},
-		{"PUT", sp + "/users/u_aaaaaaaaaaaaaaaa%2F..%2Fx/k", 400, "invalid_key"},
-		{"PUT", sp + "/users/U_AAAAAAAAAAAAAAAA/k", 400, "invalid_key"},
-		{"PUT", sp + "/users/" + id + "/k", 201, ""},
-		{"PUT", sp + "/users/u_aaaaaaaaaaaaaaaa/k", 403, "not_yours"},
-		{"PUT", sp + "/users/*/k", 405, "method_not_allowed"},
+		{"PUT", sp + "/by/../shared/x", 400, "invalid_key"},
+		{"PUT", sp + "/by/u_aaaaaaaaaaaaaaaa%2F..%2Fx/k", 400, "invalid_key"},
+		{"PUT", sp + "/by/U_AAAAAAAAAAAAAAAA/k", 400, "invalid_key"},
+		{"PUT", sp + "/by/" + id + "/k", 201, ""},
+		{"PUT", sp + "/by/u_aaaaaaaaaaaaaaaa/k", 403, "not_yours"},
+		{"PUT", sp + "/by/*/k", 405, "method_not_allowed"},
 		// areas and routes
 		{"GET", sp + "/private/x", 404, "not_found"},
 		{"GET", sp + "/shared", 404, "not_found"},
@@ -128,7 +128,7 @@ func TestHTTPTokens(t *testing.T) {
 // FuzzRoute throws arbitrary paths and queries at the router. Nothing may
 // answer 500 or panic, and no file may appear outside spaces/.
 func FuzzRoute(f *testing.F) {
-	for _, s := range []string{"/v1/poll-cedar-pilot-mango/shared/x", "/v1/poll-cedar-pilot-mango/users/*/v", "/v1/a/../b", "/v1/%2e%2e/x/y", "/v1/cedar-pilot-mango-frost/to/me/x/watch?version=0&timeout=1"} {
+	for _, s := range []string{"/v1/poll-cedar-pilot-mango/shared/x", "/v1/poll-cedar-pilot-mango/by/*/v", "/v1/a/../b", "/v1/%2e%2e/x/y", "/v1/cedar-pilot-mango-frost/to/me/x/watch?version=0&timeout=1"} {
 		f.Add("PUT", s)
 		f.Add("GET", s)
 	}

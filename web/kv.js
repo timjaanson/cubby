@@ -1,13 +1,28 @@
 // cubby client. A guide for whoever writes code with this, person or coding agent.
 //
-// Spaces are PRIVATE by default. Only the creator (the owner) and people they
-// invite can read or write. Everyone else gets 404 no_space, exactly as if the
-// space didn't exist, so a missing invite looks like a wrong name. Check both.
+// Spaces are PRIVATE by default: only the creator (the owner) and people they
+// invite get in. Everyone else gets 404 no_space, exactly as if the space
+// didn't exist, so a missing invite looks like a wrong name. Check both.
 //
 // Every page starts the same way:
 //   const db = kv(SPACE)
-//   const me = await db.open()     // redeems an invite link (#t=...), says what you may do
-//   if (!me.inside) { /* show: "ask the owner for an invite link" */ }
+//   const me = await db.open()     // redeems an invite link (#t=...)
+//   if (!me.can("read")) { /* show: "ask the owner for an invite link" */ }
+//
+// Everyone has one level per space. me.access is yours ("none" outside):
+//   read    read the space, and your own inbox
+//   post    also write your own keys: db.mine, db.to()
+//   all     also write common keys: db.shared
+//   owner   also moderate, change settings, manage members
+//
+// Where data goes:
+//   db.shared             common keys, for "all": a title, a list, a board
+//   db.mine               your own keys: only you write them, everyone reads them
+//   db.by.list("msg.*")   everyone's own keys together; each item's by is its author
+//   db.to(id)             for one reader: a visitor ID, "owners", or "me" (yourself)
+// Messages, comments, votes and names go in db.mine and are read with db.by,
+// never in db.shared, so nobody can edit or delete someone else's. Owners can
+// still delete them, as moderation.
 //
 // Creating a space (once from a shell with `cubby new`, or per room in the page):
 //   const { space, ownerToken } = await createSpace()
@@ -15,44 +30,33 @@
 // A page that is a room, shared by its link? openRoom("board") creates or finds
 // the space, opens it and gives await room.link(). Members can share it too.
 //
-// Sharing with specific people, the usual case:
-//   const { link } = await db.share({ label: "Anna" })       // member, 10 uses, 7 days
-//   const { link } = await db.share({ allow: "viewer", uses: 1 })
-//   Ready-made UI with link, QR code and member list: import "<server>/share.js"
+// Inviting. An invite gives a level, at most your own:
+//   const { link } = await db.share()                    // all, 10 uses, 7 days
+//   const { link } = await db.share({ access: "post" })  // can't change db.shared
+//   Ready-made UI with link, QR code and members: import "<server>/share.js"
 //   and put <cubby-share space="..."></cubby-share> in the page.
+// Members: db.members(). Owners: db.owner.members.set(id, level, { until }) with
+// "read", "post", "all", "owner" or "banned", and .remove(id). Anyone: db.leave().
 //
-// Make a space public only when the user asked for it:
-//   createSpace({ public: "read" })     anyone reads, invited people write: status pages
-//   createSpace({ public: "respond" })  anyone reads and adds their own entry: polls, RSVPs
-//   createSpace({ public: "all" })      anyone with the name reads and writes
+// Open a space to everyone only when the user asked for it:
+//   createSpace({ anyone: "read" })   anyone reads: status pages
+//   createSpace({ anyone: "post" })   anyone reads and posts their own: polls, RSVPs
+//   createSpace({ anyone: "all" })    anyone with the name reads and writes
 //
-// Lots of live interaction (a shared board, a quiz, game state)? Use
-//   kv(SPACE, { live: true })
-// Same API and results; data and watches go over one WebSocket, falling back
-// to HTTP by itself. Write limits stay the same.
+// Live interaction (a board, a quiz, a game)? kv(SPACE, { live: true }): the same
+// API over one WebSocket, falling back to HTTP by itself.
+// Pulses are values that are never stored, for cursors and reactions:
+//   db.mine.pulse("cursor", { x, y })
+//   db.by.onPulse("cursor", p => draw(p.by, p.value))
+//   db.presence("here", { value: { name } })     // .peers, .onJoin, .onLeave
 //
-// Cursors, drags, reactions? Pulses are values that are never stored:
-//   db.user().pulse("cursor", { x, y })              // to whoever listens now
-//   db.users.onPulse("cursor", p => draw(p.user, p.value))
-// Anything a late joiner needs still goes in a stored key. Who's here:
-//   db.users.presence("here", { value: { name } })   // .peers, .onJoin, .onLeave
+// Another device of the same person isn't sharing: devices().link() and accept().
 //
-// db.user() is public to everyone in the space. For one reader, send it:
-//   db.to("owners").set("answer", 3)     // quiz answers, contact forms: db.inbox.owners
-//   db.to(playerId).set("hand", cards)   // only that player reads it, in db.inbox
-//   db.to("me").set("draft", text)       // private to you
-// Moderation: db.owner.bans.add(id). A banned visitor's open() has banned: { until }.
+// Never put an invite (at_...) or owner token (ot_...) in page source: anyone
+// who loads the page could use it. Invite links are for sending to people.
 //
-// The same person on another device is not sharing. devices() links them: one
-// device shows (await devices().link()).url, the other asks, then accept()s.
-//
-// Never put an access token (at_...) or owner token (ot_...) in page source.
-// Anyone who can load the page could use it. Invite links are for sending to people.
-//
-// Docs: docs/agents.md in the cubby repository.
-//
-// An ES module with no dependencies. Exports: kv, createSpace, openRoom, devices,
-// takeInvite, inviteLink, newName, validSpace, KvError.
+// Docs: docs/agents.md in the cubby repository. Exports: kv, createSpace,
+// openRoom, devices, takeInvite, inviteLink, newName, validSpace, KvError.
 
 const SERVER = new URL(".", import.meta.url).href.replace(/\/$/, "")
 
@@ -281,7 +285,7 @@ export function kv(space, opts = {}) {
       if (qs) url += "?" + qs
       const headers = {}
       if (!read && cur?.token) headers.Authorization = "Bearer " + cur.token
-      const dataPath = /^(shared|users|to|inbox)\//.test(path)
+      const dataPath = /^(shared|by|to|inbox)\//.test(path)
       // With live on, data requests go over the socket while it's open and
       // over HTTP otherwise. The answers are the same either way.
       const viaLive = live && dataPath && live.isOpen()
@@ -483,7 +487,7 @@ export function kv(space, opts = {}) {
     return a
   }
 
-  // Who else is here, from pulses on users/{id}/{key}: a heartbeat every
+  // Who else is here, from pulses on by/{id}/{key}: a heartbeat every
   // interval with your value, a leave pulse on stop() and pagehide, and a
   // last will with the same leave on a live connection, so a closed tab
   // leaves at once. A peer silent for timeout counts as gone, which is how
@@ -494,7 +498,7 @@ export function kv(space, opts = {}) {
     const timeout = o.timeout ?? interval * 3
     const warn = o.onError || (err => console.warn("cubby presence:", err))
     const hasWin = typeof window !== "undefined" && typeof window.addEventListener === "function"
-    const mine = db.user()
+    const mine = db.mine
     let value = o.value ?? null, stopped = false, clearWill = null
     const peers = new Map()
     const h = {
@@ -513,15 +517,15 @@ export function kv(space, opts = {}) {
     }
     // The helper's own sends coalesce on purpose, so they aren't reported.
     const beat = () => { if (!stopped) mine.pulse(key, { v: value }, { [QUIET]: true }).catch(warn) }
-    const stopListen = db.users.onPulse(key, p => {
-      if (p.mine || !p.user || stopped) return
+    const stopListen = db.by.onPulse(key, p => {
+      if (p.mine || !p.by || stopped) return
       const v = p.value
-      if (v && typeof v === "object" && v.left === true) return leave(p.user)
+      if (v && typeof v === "object" && v.left === true) return leave(p.by)
       if (!v || typeof v !== "object" || !("v" in v)) return // not a presence pulse
-      const now = Date.now(), cur = peers.get(p.user)
+      const now = Date.now(), cur = peers.get(p.by)
       if (!cur) {
-        peers.set(p.user, { value: v.v, since: now, seen: now })
-        call(h.onJoin, p.user, v.v)
+        peers.set(p.by, { value: v.v, since: now, seen: now })
+        call(h.onJoin, p.by, v.v)
         changed()
         beat() // so the newcomer sees us now, not on our next heartbeat
       } else {
@@ -570,8 +574,8 @@ export function kv(space, opts = {}) {
     }
   }
 
-  // One entry across users/*/, inbox/*/ or to/*/: its parties and its key.
-  const entryId = e => JSON.stringify([e.user || "", e.from || "", e.to || "", e.key])
+  // Everyone's own keys, across by/*/.
+  const byAll = async t => `by/*/${t}`
 
   // from:
   //   0 (default)   every existing key first, then changes
@@ -593,6 +597,9 @@ export function kv(space, opts = {}) {
       throw new KvError(0, "invalid_option", "from takes 0, \"now\", a version, or a result of list().")
     }
     const onlyNew = from === "now"
+    // One entry: its key and, across several areas, whose it is. Under
+    // shared/ by is just the last writer, so it isn't part of the entry.
+    const entryId = e => JSON.stringify([pathOf === byAll ? e.by || "" : "", e.from || "", e.to || "", e.key])
     const known = new Set(fromList ? o.from.items.map(entryId) : [])
     const onSync = o.onSync || (() => {})
     const onError = o.onError || (err => console.warn("cubby watch:", err))
@@ -683,8 +690,8 @@ export function kv(space, opts = {}) {
       if (resync instanceof Set) {
         for (const id of [...known]) {
           if (resync.has(id)) continue
-          const [user, from, to, key] = JSON.parse(id)
-          deliver({ key, user: user || undefined, from: from || undefined, to: to || undefined, deleted: true, version: body.version })
+          const [by, from, to, key] = JSON.parse(id)
+          deliver({ key, by: by || undefined, from: from || undefined, to: to || undefined, deleted: true, version: body.version })
         }
       }
       if (stopped) return
@@ -885,7 +892,7 @@ export function kv(space, opts = {}) {
     }
   }
 
-  const myArea = async () => "users/" + (await ident.get()).id
+  const myArea = async () => "by/" + (await ident.get()).id
 
   // The recipient's side of to/: read and delete only. prefix is "" or "owners/".
   function inboxOf(prefix) {
@@ -904,14 +911,14 @@ export function kv(space, opts = {}) {
     return box
   }
 
-  // JSON calls on the space itself: join, access, settings, tokens, grants.
+  // JSON calls on the space itself: join, access, settings, tokens, members.
   async function call(method, path, { body, auth = true, query } = {}) {
     const res = await request(method, path, { body: body === undefined ? undefined : JSON.stringify(body), auth, query })
     if (!res.ok) throw await fail(res)
     return res.json()
   }
 
-  const accessFrom = (a, extra = {}) => makeAccess({ inside: true, joined: false, inviteFailed: false, ...a, ...extra })
+  const accessFrom = (a, extra = {}) => makeAccess({ joined: false, inviteFailed: false, until: null, ...a, ...extra })
 
   const db = {
     writeBudget: null, // latest response snapshot; never a promise of future capacity
@@ -931,7 +938,7 @@ export function kv(space, opts = {}) {
       return accessFrom(await call("GET", "access", { auth: false }))
     },
     // The first call on every page. It never throws for "not invited":
-    // inside is false for a missing space and for a private one alike.
+    // access is "none" for a missing space and for a private one alike.
     async open(o = {}) {
       const invite = "invite" in o ? o.invite : takeInvite()
       let joined = false
@@ -949,61 +956,68 @@ export function kv(space, opts = {}) {
         return accessFrom(await call("GET", "access", { auth: false }), { joined, inviteFailed })
       } catch (err) {
         if (err.code !== "no_space" && err.code !== "banned") throw err
-        const banned = err.code === "banned" ? { until: err.details.until ?? null } : null
-        return makeAccess({ inside: false, banned, joined, inviteFailed, id: ident.current()?.id ?? null, owner: false, canInvite: false, settings: null, grants: [] })
+        const banned = err.code === "banned"
+        return makeAccess({ access: banned ? "banned" : "none", until: banned ? err.details.until ?? null : null,
+          joined, inviteFailed, id: ident.current()?.id ?? null, canInvite: false, settings: null })
       }
     },
     // An invite link to send: this page (or base) with #t=at_... added.
     async share(o = {}) {
       const { base, ...rest } = o
       const t = await db.tokens.create(rest)
-      return { link: inviteLink(t.token, base), token: t.token, id: t.id, allow: t.allow, uses: t.uses, until: t.until }
+      return { link: inviteLink(t.token, base), token: t.token, id: t.id, access: t.access, uses: t.uses, until: t.until }
     },
-    // Invites. Owners, and members unless the space says invite: "owners".
-    // Members see and change only their own, and give at most what they hold.
+    // Invites. Owners, and members at the space's invite level (post unless
+    // changed). Members see and change only their own, and give at most
+    // their own level.
     tokens: {
       create: (o = {}) => call("POST", "tokens", { body: tokenBody(o, true) }),
       list: async () => (await call("GET", "tokens")).items,
       update: (id, o = {}) => call("PATCH", "tokens/" + encodeURIComponent(id), { body: tokenBody(o, false) }),
       revoke: async id => { await call("DELETE", "tokens/" + encodeURIComponent(id)) },
     },
+    // Who is in the space: { id, access, since }, highest level first.
+    // Owners also get until, invitedBy and lastUsedAt, and banned visitors.
+    members: async () => (await call("GET", "members")).items,
+    // Leave the space: your grants go, you're a stranger again.
+    leave: async () => (await call("DELETE", "members/me")).removed,
     owner: {
+      // settings({ anyone, invite }): either may be left out.
       settings: async patch => (await call("PATCH", "", { body: patch })).settings,
       deleteSpace: async () => { await call("DELETE", "") },
-      rotateOwnerToken: async () => (await call("POST", "owner-token")).owner,
-      grants: {
-        list: async (o = {}) => (await call("GET", "grants", { query: { user: o.user } })).items,
-        add: (user, o = {}) => {
-          const body = { user }
-          if (o.owner) body.owner = true
-          else if (o.allow !== undefined) body.allow = o.allow
+      rotateOwnerToken: async () => (await call("POST", "owner-token")).ownerToken,
+      members: {
+        // Give a visitor exactly one level, replacing what they had:
+        // "read", "post", "all", "owner", or "banned" to keep them out and
+        // close their live connections. o.until ends it.
+        set: (id, access, o = {}) => {
+          checkVisitor(id)
+          const body = { access }
           if (o.until !== undefined) body.until = timeValue(o.until)
-          return call("POST", "grants", { body })
+          return call("PUT", "members/" + id, { body })
         },
-        revoke: async id => { await call("DELETE", "grants/" + encodeURIComponent(id)) },
-        revokeUser: async user => { await call("DELETE", "grants", { query: { user } }) },
-      },
-      // A ban shuts a visitor out of this space: every request they make
-      // answers 403 banned, and their live connections close. It deletes
-      // and revokes nothing; unban() restores exactly what they had.
-      bans: {
-        list: async () => (await call("GET", "bans")).items,
-        add: (user, o = {}) => {
-          checkVisitor(user)
-          return call("PUT", "bans/" + user, { body: o.until === undefined ? {} : { until: timeValue(o.until) } })
-        },
-        remove: async user => {
-          checkVisitor(user)
-          return (await call("DELETE", "bans/" + user)).lifted
+        // Remove a visitor's grants and any ban: a stranger again.
+        remove: async id => {
+          checkVisitor(id)
+          return (await call("DELETE", "members/" + id)).removed
         },
       },
     },
     shared: area("shared"),
-    user(id) {
-      if (id === undefined) return area(myArea)
+    // Your own keys: only you write them, everyone in the space reads them.
+    mine: area(myArea),
+    // Everyone's own keys: by.list, by.watch and by.onPulse across all
+    // authors, each item with by. by(id) is one person's, to read.
+    by: Object.assign(id => {
       checkVisitor(id)
-      return area("users/" + id, { other: id })
-    },
+      return area("by/" + id, { other: id })
+    }, {
+      list: (target, o) => list(byAll, false, target, o),
+      watch: (target, onChange, o) => watch(byAll, false, target, onChange, o),
+      onPulse: (target, onPulse, o) => listenPulses(byAll, false, target, onPulse, o),
+    }),
+    // Who's here now, from pulses on your own key. See presence above.
+    presence: (key, o) => presence(key, o),
     // What you send one recipient: a visitor ID, "me" (private to you) or
     // "owners". One slot per recipient, sender and key, so senders never
     // overwrite each other. Only the recipient reads it, in their inbox, and
@@ -1022,13 +1036,6 @@ export function kv(space, opts = {}) {
     // entries are here too, from you. inbox.from(id) reads one sender's and
     // can delete; inbox.owners is mail to the owners group, for owners.
     inbox: inboxOf(""),
-    id: async () => (await ident.get()).id,
-    users: {
-      list: (target, o) => list(async t => `users/*/${t}`, false, target, o),
-      watch: (target, onChange, o) => watch(async t => `users/*/${t}`, false, target, onChange, o),
-      onPulse: (target, onPulse, o) => listenPulses(async t => `users/*/${t}`, false, target, onPulse, o),
-      presence: (key, o) => presence(key, o),
-    },
     id: async () => (await ident.get()).id,
     // status: "http" without live (or after falling back), else "connecting",
     // "open", "closed" (not needed right now, or between retries) or "offline".
@@ -1059,7 +1066,7 @@ function timeValue(v) {
 }
 
 function tokenBody(o, creating) {
-  const known = creating ? ["label", "allow", "uses", "until", "grantFor"] : ["uses", "until"]
+  const known = creating ? ["label", "access", "uses", "until", "grantFor"] : ["uses", "until"]
   const body = {}
   for (const k of Object.keys(o)) {
     if (!known.includes(k)) throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are ${known.join(", ")}.`)
@@ -1069,44 +1076,21 @@ function tokenBody(o, creating) {
   return body
 }
 
-// A scope is AREA[/TARGET]:RIGHTS. covers mirrors the server's rule.
-// area is "shared", "users", or "to/{recipient}" (a visitor ID, "me" or
-// "owners"); a scope on to/ names its recipient first, as in to/owners/answer:w.
-function covers(scope, method, area, key, self) {
-  const [body, rights] = scope.split(":")
-  if (!rights || !rights.includes(method === "write" ? "w" : "r")) return false
-  const slash = body.indexOf("/")
-  const sArea = slash < 0 ? body : body.slice(0, slash)
-  let target = slash < 0 ? "*" : body.slice(slash + 1)
-  const [want, rcpt = "*"] = area.split("/")
-  if (sArea !== "*" && sArea !== want) return false
-  if (sArea === "to") {
-    const s2 = target.indexOf("/")
-    const sRcpt = s2 < 0 ? target : target.slice(0, s2)
-    target = s2 < 0 ? "*" : target.slice(s2 + 1)
-    const r = rcpt === "me" ? self : rcpt
-    if (sRcpt !== "*" && sRcpt !== rcpt && !(sRcpt === "me" && r === self)) return false
-  }
-  if (key === undefined) return target === "*"
-  if (target.endsWith("*")) return key.replace(/\*$/, "").startsWith(target.slice(0, -1))
-  return !key.endsWith("*") && key === target
-}
+const LEVELS = ["banned", "none", "read", "post", "all", "owner"]
 
+// me from open() and access(): access is the visitor's level. can(method,
+// area) answers from it: reading takes read, writing your own keys (mine,
+// to) post, writing shared all.
 function makeAccess(a) {
-  a.grants = a.grants || []
-  a.can = (method, area, key) => {
-    if (!a.inside) return false
-    if (a.owner) return true
-    const s = a.settings
-    if (method === "read" && s?.read === "anyone") return true
-    if (method === "write" && s?.write?.[area.split("/")[0]] === "anyone") return true
-    return a.grants.some(g => g.owner || g.allow.some(sc => covers(sc, method, area, key, a.id)))
+  a.can = (method = "read", area = "shared") => {
+    const need = method === "read" ? "read" : area === "shared" ? "all" : "post"
+    return LEVELS.indexOf(a.access) >= LEVELS.indexOf(need)
   }
   return a
 }
 
-// createSpace makes a space owned by this visitor, private unless
-// public says otherwise. Show ownerToken to the person once: it's their
+// createSpace makes a space owned by this visitor, private unless anyone
+// gives every visitor a level. Show ownerToken to the person once: it's their
 // recovery key. It isn't stored.
 export async function createSpace(o = {}) {
   const { server: srv, tokenKey, fetch: f, ...fields } = o
@@ -1114,8 +1098,8 @@ export async function createSpace(o = {}) {
   const fetchFn = f || globalThis.fetch.bind(globalThis)
   const ident = identity(server, tokenKey || "cubby:" + server, fetchFn)
   for (const k of Object.keys(fields)) {
-    if (!["label", "name", "public", "read", "write", "invite"].includes(k)) {
-      throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are label, name, public, read, write, invite.`)
+    if (!["label", "name", "anyone", "invite"].includes(k)) {
+      throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are label, name, anyone, invite.`)
     }
   }
   let res
@@ -1139,7 +1123,7 @@ export async function createSpace(o = {}) {
   if (!res.ok) throw await errorFrom(res)
   const out = await res.json()
   ident.adopt(out.token, out.id)
-  return { space: out.space, ownerToken: out.owner }
+  return { space: out.space, ownerToken: out.ownerToken }
 }
 
 // devices: this visitor on several devices. Not about a space, so it isn't
@@ -1290,40 +1274,42 @@ export function takeInvite(param = "t") {
 // creates one if there's neither, opens it (redeeming #t=...), and keeps
 // #s=<space> in the address so a reload stays in the room.
 //   const room = await openRoom("board", { live: true })
-//   if (!room.me.inside) ...           // gone, or a bad link
+//   if (!room.me.can("read")) ...      // gone, or a bad link
 //   const link = await room.link()     // a reusable invite, minted once per device
 // Options: param ("s"), create (true), space and invite (instead of the
-// address, outside browsers), public, and anything kv() takes. Members can share too, so every device makes its own link.
+// address, outside browsers), anyone, and anything kv() takes. Members can share too, so every device makes its own link.
 export async function openRoom(label, o = {}) {
-  const { param = "s", create = true, space: given, public: pub, invite, ...kvOpts } = o
+  const { param = "s", create = true, space: given, anyone, invite, ...kvOpts } = o
   const server = (kvOpts.server || SERVER).replace(/\/$/, "")
   const key = `cubby-room:${server}:${label}`
   const fromHash = hashParams().get(param)
   let space = given || (fromHash && validSpace(fromHash) ? fromHash : null) || roomStore.get(key)
   let created = false
   if (!space) {
-    if (!create) return { db: null, me: { inside: false }, space: null, created, link: async () => null, forget }
+    if (!create) return { db: null, me: makeAccess({ access: "none" }), space: null, created, link: async () => null, forget }
     const fields = { label, server: kvOpts.server, tokenKey: kvOpts.tokenKey, fetch: kvOpts.fetch }
-    if (pub) fields.public = pub
+    if (anyone) fields.anyone = anyone
     space = (await createSpace(fields)).space
     created = true
   }
   const db = kv(space, kvOpts)
   const me = await db.open(invite === undefined ? {} : { invite })
-  if (me.inside) {
+  if (me.can("read")) {
     roomStore.set(key, space)
     setHashParam(param, space)
   }
   // The invite this visitor minted for the room, reused while it still works.
   async function link(lo = {}) {
     const base = lo.base || (typeof location === "undefined" ? undefined : location.origin + location.pathname + location.search + "#" + param + "=" + space)
-    const lkey = `cubby-room-link:${server}:${space}:${me.id || await db.id()}`
+    // One link per visitor, room and level: access "post" for people who
+    // should add their own things but not change the room's shared keys.
+    const lkey = `cubby-room-link:${server}:${space}:${me.id || await db.id()}${lo.access ? ":" + lo.access : ""}`
     const saved = roomStore.get(lkey)
     if (saved) {
       const t = await db.tokens.list().then(l => l.find(t => t.id === saved.id), () => null)
       if (t?.state === "active") return inviteLink(saved.token, base)
     }
-    const t = await db.tokens.create({ label: label + " link", uses: null, until: null })
+    const t = await db.tokens.create({ label: label + " link", uses: null, until: null, ...(lo.access ? { access: lo.access } : {}) })
     roomStore.set(lkey, { id: t.id, token: t.token })
     return inviteLink(t.token, base)
   }

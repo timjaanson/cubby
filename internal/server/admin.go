@@ -128,7 +128,7 @@ func (s *Server) AdminHandler() http.Handler {
 			fail(w, r, err)
 			return
 		}
-		ok(w, r, map[string]any{"space": name, "owner": tok})
+		ok(w, r, map[string]any{"space": name, "ownerToken": tok})
 	})
 	mux.HandleFunc("POST /cleanup", func(w http.ResponseWriter, r *http.Request) {
 		rep, err := s.Cleanup()
@@ -155,8 +155,8 @@ func (s *Server) AdminHandler() http.Handler {
 // adminArea turns a stored area into the form used in exports.
 func adminArea(a string) string {
 	switch {
-	case strings.HasPrefix(a, "u:"):
-		return "users/" + a[2:]
+	case strings.HasPrefix(a, "b:"):
+		return "by/" + a[2:]
 	}
 	if r, from, ok := store.SplitTo(a); ok {
 		return "to/" + r + " from " + from

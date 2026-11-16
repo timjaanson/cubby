@@ -45,35 +45,11 @@ func spaceArg(s string) (string, error) {
 	return s, nil
 }
 
-// settingsFlags puts --public, or --read and --write, and --invite into a request body.
+// settingsFlags puts --anyone and --invite into a request body.
 func settingsFlags(f *flags, body map[string]any) error {
-	if f.has("invite") {
-		body["invite"] = f.str("invite")
-	}
-	if f.has("public") {
-		if f.has("read") || f.has("write") {
-			return usageCli("give --public, or --read and --write, not both")
-		}
-		body["public"] = f.str("public")
-		return nil
-	}
-	if f.has("read") {
-		body["read"] = f.str("read")
-	}
-	if f.has("write") {
-		w := f.str("write")
-		if w == "anyone" || w == "granted" {
-			body["write"] = w
-		} else {
-			m := map[string]string{}
-			for _, part := range strings.Split(w, ",") {
-				k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
-				if !ok {
-					return usageCli("--write takes anyone, granted, or a list like shared=granted,me=anyone")
-				}
-				m[k] = v
-			}
-			body["write"] = m
+	for _, k := range []string{"anyone", "invite"} {
+		if f.has(k) {
+			body[k] = f.str(k)
 		}
 	}
 	return nil
@@ -107,49 +83,18 @@ func (c *client) join(f *flags) error {
 	if err != nil {
 		return err
 	}
-	var out struct {
-		ID, Token string
-		Owner     bool
-		Allow     []string
-	}
+	var out struct{ ID, Token, Access string }
 	if err := c.call("POST", "/v1/"+space+"/join", map[string]string{"token": inviteToken(f.args[1])}, 200, &out); err != nil {
 		return err
 	}
 	c.adopt(out.Token, out.ID)
-	if out.Owner {
-		fmt.Println("owner")
-		return nil
-	}
-	for _, s := range out.Allow {
-		fmt.Println(s)
-	}
+	fmt.Println(out.Access)
 	return nil
 }
 
-type accessOut struct {
-	ID       *string
-	Owner    bool
-	Settings settingsOut
-	Grants   []struct {
-		ID     string
-		Owner  bool
-		Allow  []string
-		Source string
-		Until  *int64
-	}
-}
+type settingsOut struct{ Anyone, Invite string }
 
-type settingsOut struct {
-	Public string
-	Read   string
-	Write  map[string]string
-	Invite string
-}
-
-func (s settingsOut) print() {
-	fmt.Printf("public\t%s\nread\t%s\nwrite.shared\t%s\nwrite.users\t%s\nwrite.to\t%s\ninvite\t%s\n",
-		s.Public, s.Read, s.Write["shared"], s.Write["users"], s.Write["to"], s.Invite)
-}
+func (s settingsOut) print() { fmt.Printf("anyone\t%s\ninvite\t%s\n", s.Anyone, s.Invite) }
 
 func (c *client) access(f *flags) error {
 	if len(f.args) != 1 {
@@ -159,25 +104,11 @@ func (c *client) access(f *flags) error {
 	if err != nil {
 		return err
 	}
-	var out accessOut
+	var out struct{ Access string }
 	if err := c.call("GET", "/v1/"+space+"/access", nil, 200, &out); err != nil {
 		return err
 	}
-	switch {
-	case out.Owner:
-		fmt.Println("owner")
-	case len(out.Grants) > 0:
-		fmt.Println("member")
-	default:
-		fmt.Println("visitor")
-	}
-	for _, g := range out.Grants {
-		scopes := strings.Join(g.Allow, " ")
-		if g.Owner {
-			scopes = "owner"
-		}
-		fmt.Printf("%s\t%s\t%s\n", g.ID, fmtTime(g.Until), scopes)
-	}
+	fmt.Println(out.Access)
 	return nil
 }
 
@@ -193,16 +124,12 @@ func (c *client) settings(f *flags) error {
 	if err := settingsFlags(f, body); err != nil {
 		return err
 	}
+	var out struct{ Settings settingsOut }
 	if len(body) == 0 {
-		var out accessOut
 		if err := c.call("GET", "/v1/"+space+"/access", nil, 200, &out); err != nil {
 			return err
 		}
-		out.Settings.print()
-		return nil
-	}
-	var out struct{ Settings settingsOut }
-	if err := c.call("PATCH", "/v1/"+space, body, 200, &out); err != nil {
+	} else if err := c.call("PATCH", "/v1/"+space, body, 200, &out); err != nil {
 		return err
 	}
 	out.Settings.print()
@@ -235,11 +162,11 @@ func (c *client) ownerToken(f *flags) error {
 	if err != nil {
 		return err
 	}
-	var out struct{ Owner string }
+	var out struct{ OwnerToken string }
 	if err := c.call("POST", "/v1/"+space+"/owner-token", nil, 200, &out); err != nil {
 		return err
 	}
-	fmt.Println(out.Owner)
+	fmt.Println(out.OwnerToken)
 	return nil
 }
 
@@ -264,14 +191,6 @@ func limitFlags(f *flags, body map[string]any) error {
 	return nil
 }
 
-func allowBody(f *flags) any {
-	l := f.list("allow")
-	if len(l) == 1 && (l[0] == "member" || l[0] == "viewer") {
-		return l[0]
-	}
-	return l
-}
-
 func (c *client) tokenCmd(f *flags) error {
 	if len(f.args) < 2 {
 		return usageCli("token new|ls|set|rm <space> ...")
@@ -288,8 +207,8 @@ func (c *client) tokenCmd(f *flags) error {
 			return usageCli("token new takes a space")
 		}
 		body := map[string]any{}
-		if f.has("allow") {
-			body["allow"] = allowBody(f)
+		if f.has("access") {
+			body["access"] = f.str("access")
 		}
 		if f.has("label") {
 			body["label"] = f.str("label")
@@ -317,10 +236,9 @@ func (c *client) tokenCmd(f *flags) error {
 	case "ls":
 		var out struct {
 			Items []struct {
-				ID, Label, State string
-				Allow            []string
-				UsesLeft, Until  *int64
-				Grants           int
+				ID, Label, State, Access string
+				UsesLeft, Until          *int64
+				Members                  int
 			}
 		}
 		if err := c.call("GET", base, nil, 200, &out); err != nil {
@@ -335,7 +253,7 @@ func (c *client) tokenCmd(f *flags) error {
 			if label == "" {
 				label = "-"
 			}
-			fmt.Printf("%s\t%s\t%s\t%s\t%d\t%s\t%s\n", t.ID, t.State, uses, fmtTime(t.Until), t.Grants, label, strings.Join(t.Allow, " "))
+			fmt.Printf("%s\t%s\t%s\t%s\t%d\t%s\t%s\n", t.ID, t.State, uses, fmtTime(t.Until), t.Members, label, t.Access)
 		}
 		return nil
 	case "set":
@@ -359,109 +277,50 @@ func (c *client) tokenCmd(f *flags) error {
 	return usageCli("token new|ls|set|rm <space> ...")
 }
 
-func (c *client) grantCmd(f *flags) error {
+func (c *client) memberCmd(f *flags) error {
 	if len(f.args) < 2 {
-		return usageCli("grant ls|add|rm <space> ...")
+		return usageCli("member ls|set|rm <space> ...")
 	}
 	sub := f.args[0]
 	space, err := spaceArg(f.args[1])
 	if err != nil {
 		return err
 	}
-	base := "/v1/" + space + "/grants"
+	base := "/v1/" + space + "/members"
 	switch sub {
 	case "ls":
-		q := ""
-		if f.has("user") {
-			q = "?user=" + url.QueryEscape(f.str("user"))
+		if len(f.args) != 2 {
+			return usageCli("member ls takes a space")
 		}
 		var out struct {
 			Items []struct {
-				ID, User, Source string
-				Owner            bool
-				Allow            []string
-				Until            *int64
-			}
-		}
-		if err := c.call("GET", base+q, nil, 200, &out); err != nil {
-			return err
-		}
-		for _, g := range out.Items {
-			kind, scopes := "member", strings.Join(g.Allow, " ")
-			if g.Owner {
-				kind, scopes = "owner", "-"
-			}
-			fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\n", g.ID, g.User, kind, g.Source, fmtTime(g.Until), scopes)
-		}
-		return nil
-	case "add":
-		if len(f.args) != 3 {
-			return usageCli("grant add takes a space and a visitor ID")
-		}
-		body := map[string]any{"user": f.args[2]}
-		if f.bool("owner") {
-			body["owner"] = true
-		} else if f.has("allow") {
-			body["allow"] = allowBody(f)
-		}
-		if f.has("until") {
-			body["until"] = f.str("until")
-		}
-		var out struct{ ID string }
-		if err := c.call("POST", base, body, 201, &out); err != nil {
-			return err
-		}
-		fmt.Println(out.ID)
-		return nil
-	case "rm":
-		switch {
-		case f.has("user") && len(f.args) == 2:
-			return c.call("DELETE", base+"?user="+url.QueryEscape(f.str("user")), nil, 200, nil)
-		case !f.has("user") && len(f.args) == 3:
-			return c.call("DELETE", base+"/"+url.PathEscape(f.args[2]), nil, 200, nil)
-		}
-		return usageCli("grant rm takes a space and a grant ID, or a space and --user ID")
-	}
-	return usageCli("grant ls|add|rm <space> ...")
-}
-
-func (c *client) banCmd(f *flags) error {
-	if len(f.args) < 2 {
-		return usageCli("ban ls|add|rm <space> ...")
-	}
-	sub := f.args[0]
-	space, err := spaceArg(f.args[1])
-	if err != nil {
-		return err
-	}
-	base := "/v1/" + space + "/bans"
-	switch sub {
-	case "ls":
-		var out struct {
-			Items []struct {
-				User, By string
-				Until    *int64
+				ID, Access string
+				Since      int64
+				Until      *int64
 			}
 		}
 		if err := c.call("GET", base, nil, 200, &out); err != nil {
 			return err
 		}
-		for _, b := range out.Items {
-			fmt.Printf("%s\t%s\t%s\n", b.User, fmtTime(b.Until), b.By)
+		for _, m := range out.Items {
+			since := m.Since
+			fmt.Printf("%s\t%s\t%s\t%s\n", m.ID, m.Access, fmtTime(&since), fmtTime(m.Until))
 		}
 		return nil
-	case "add", "rm":
-		if len(f.args) != 3 || !names.ValidVisitor(f.args[2]) {
-			return usageCli("ban " + sub + " takes a space and a visitor ID")
+	case "set":
+		if len(f.args) != 4 {
+			return usageCli("member set takes a space, a visitor ID and a level")
 		}
-		if sub == "rm" {
-			return c.call("DELETE", base+"/"+f.args[2], nil, 200, nil)
-		}
-		body := map[string]any{}
+		body := map[string]any{"access": f.args[3]}
 		if f.has("until") {
 			body["until"] = f.str("until")
 		}
-		return c.call("PUT", base+"/"+f.args[2], body, 201, nil)
+		return c.call("PUT", base+"/"+url.PathEscape(f.args[2]), body, 200, nil)
+	case "rm":
+		if len(f.args) != 3 {
+			return usageCli("member rm takes a space and a visitor ID, or me")
+		}
+		return c.call("DELETE", base+"/"+url.PathEscape(f.args[2]), nil, 200, nil)
 	}
-	return usageCli("ban ls|add|rm <space> ...")
+	return usageCli("member ls|set|rm <space> ...")
 }

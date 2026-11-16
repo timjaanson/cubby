@@ -77,17 +77,17 @@ func TestPulseHTTP(t *testing.T) {
 		t.Fatalf("pulse woke a watch: %s", b)
 	}
 
-	// users/*/ gets everyone's, with user set; nobody sends as someone else.
-	got = c.listen(sp+"/users/*/cursor/pulse?timeout=5", o...)
-	c.req("POST", sp+"/users/"+own.ID+"/cursor/pulse", `3`, o...)
-	if p = parsePulses(t, <-got); len(p.Pulses) != 1 || p.Pulses[0].User != own.ID {
-		t.Fatalf("users pulse %+v", p)
+	// by/*/ gets everyone's, with by set; nobody sends as someone else.
+	got = c.listen(sp+"/by/*/cursor/pulse?timeout=5", o...)
+	c.req("POST", sp+"/by/"+own.ID+"/cursor/pulse", `3`, o...)
+	if p = parsePulses(t, <-got); len(p.Pulses) != 1 || p.Pulses[0].By != own.ID {
+		t.Fatalf("by pulse %+v", p)
 	}
 	for _, r := range []struct {
 		method, path, body, code string
 		status                   int
 	}{
-		{"POST", "/users/" + otherID + "/cursor/pulse", "1", "not_yours", 403},
+		{"POST", "/by/" + otherID + "/cursor/pulse", "1", "not_yours", 403},
 		{"POST", "/shared/c.*/pulse", "1", "invalid_key", 400},
 		{"DELETE", "/shared/cursor/pulse", "", "method_not_allowed", 405},
 		{"POST", "/shared/cursor/pulse", strings.Repeat("x", 4097), "value_too_large", 413},
@@ -158,14 +158,14 @@ func TestPulseLive(t *testing.T) {
 	a := c.dial(own.Space, bearer(own.Token)...)
 	b := c.dial(own.Space)
 	b.call("0", `{"id":0,"op":"auth","token":"`+other+`"}`)
-	b.send(`{"id":"l","method":"GET","path":"users/*/cursor/pulse"}`)
+	b.send(`{"id":"l","method":"GET","path":"by/*/cursor/pulse"}`)
 	if f := b.reply(`"l"`); f.Status != 200 || !strings.Contains(string(f.Body), `"pulses":[]`) {
 		t.Fatalf("first frame %d %s", f.Status, f.Body)
 	}
 
 	// Many quick pulses over the socket all arrive, in order, as they're sent.
 	for i := 0; i < 50; i++ {
-		a.send(`{"id":` + itoa(int64(i+1)) + `,"method":"POST","path":"users/` + own.ID + `/cursor/pulse","body":{"x":` + itoa(int64(i)) + `}}`)
+		a.send(`{"id":` + itoa(int64(i+1)) + `,"method":"POST","path":"by/` + own.ID + `/cursor/pulse","body":{"x":` + itoa(int64(i)) + `}}`)
 	}
 	var xs []string
 	deadline := time.Now().Add(3 * time.Second)
@@ -186,13 +186,13 @@ func TestPulseLive(t *testing.T) {
 		}
 	}
 	// An HTTP sender reaches a socket listener.
-	c.req("POST", sp+"/users/"+own.ID+"/cursor/pulse", `"http"`, bearer(own.Token)...)
+	c.req("POST", sp+"/by/"+own.ID+"/cursor/pulse", `"http"`, bearer(own.Token)...)
 	if f := b.reply(`"l"`); !strings.Contains(string(f.Body), `"http"`) {
 		t.Fatalf("http to socket %s", f.Body)
 	}
 	// Stop ends it.
 	b.call(`"s"`, `{"id":"s","op":"stop","watch":"l"}`)
-	c.req("POST", sp+"/users/"+own.ID+"/cursor/pulse", `1`, bearer(own.Token)...)
+	c.req("POST", sp+"/by/"+own.ID+"/cursor/pulse", `1`, bearer(own.Token)...)
 	if f, ok := b.next(300 * time.Millisecond); ok {
 		t.Fatalf("pulse after stop %s", f.Body)
 	}

@@ -134,7 +134,7 @@ func (s *Store) DeleteVisitor(id string) {
 }
 
 // PurgeVisitor deletes a visitor and everything they had, the way expiry
-// does: their users/ data, what they sent and received under to/, their
+// does: their by/ data, what they sent and received under to/, their
 // grants and bans in every space, their devices and links.
 func (s *Store) PurgeVisitor(id string) error {
 	rows, err := s.srv.Query(`SELECT space FROM visitor_spaces WHERE visitor = ?`, id)
