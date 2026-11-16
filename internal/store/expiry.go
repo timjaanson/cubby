@@ -4,110 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 
 	"github.com/timjaanson/cubby/internal/apierr"
 )
 
-// migrateSpace brings a space file up to date. Values and versions never
-// change; the me/ area moved to to/me/ in version 3, and version 4 replaced
-// scopes and per-area settings with levels and renamed users/ to by/.
-func migrateSpace(db *sql.DB) error {
+// checkSpaceVersion refuses a space file from before sign-in with keys.
+// v0.19 started over with an empty data directory; there's no migration.
+func checkSpaceVersion(db *sql.DB, path string) error {
 	var v int
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		return err
 	}
-	if v < 1 {
-		if err := migrateExpiry(db); err != nil {
-			return err
-		}
-	}
-	if v < 2 {
-		if err := migrateMinters(db); err != nil {
-			return err
-		}
-	}
-	if v < 3 {
-		if err := migrateMeToTo(db); err != nil {
-			return err
-		}
-	}
-	if v < 4 {
-		return migrateLevels(db)
+	if v != spaceVersion {
+		return fmt.Errorf("%s is format %d, from a cubby before v0.19. v0.19 changed sign-in to device keys and starts with an empty data directory: move the old one away", path, v)
 	}
 	return nil
-}
-
-func tableCols(tx *sql.Tx, table string) (map[string]bool, error) {
-	rows, err := tx.Query(`PRAGMA table_info(` + table + `)`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	cols := map[string]bool{}
-	for rows.Next() {
-		var cid, nn, pk int
-		var name, typ string
-		var def any
-		if err := rows.Scan(&cid, &name, &typ, &nn, &def, &pk); err != nil {
-			return nil, err
-		}
-		cols[name] = true
-	}
-	return cols, rows.Err()
-}
-
-// migrateMinters records who minted each token, for delegated invites.
-// Tokens from before stay unattributed.
-func migrateMinters(db *sql.DB) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	cols, err := tableCols(tx, "tokens")
-	if err != nil {
-		return err
-	}
-	for _, c := range []string{"minted_by TEXT", "revoked_at INTEGER"} {
-		name, _, _ := strings.Cut(c, " ")
-		if !cols[name] {
-			if _, err := tx.Exec(`ALTER TABLE tokens ADD COLUMN ` + c); err != nil {
-				return err
-			}
-		}
-	}
-	if _, err := tx.Exec(`PRAGMA user_version = 2`); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func migrateExpiry(db *sql.DB) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	cols, err := tableCols(tx, "kv")
-	if err != nil {
-		return err
-	}
-	for _, col := range []string{"expires", "expired"} {
-		if !cols[col] {
-			if _, err := tx.Exec(`ALTER TABLE kv ADD COLUMN ` + col + ` INTEGER NOT NULL DEFAULT 0`); err != nil {
-				return err
-			}
-		}
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS kv_expiry ON kv(expires) WHERE expires > 0 AND value IS NOT NULL`); err != nil {
-		return err
-	}
-	// Old plain keys only recorded whole seconds. Keep that precision honest.
-	if _, err := tx.Exec(`UPDATE kv SET t = updated_at * 1000 WHERE t IS NULL; PRAGMA user_version = 1`); err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 func nextExpiry(q queryer) (int64, error) {

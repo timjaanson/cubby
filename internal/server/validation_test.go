@@ -1,12 +1,14 @@
 package server
 
 import (
+	"github.com/timjaanson/cubby/internal/auth"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/timjaanson/cubby/internal/config"
 	"github.com/timjaanson/cubby/internal/store"
@@ -92,7 +94,8 @@ func TestHTTPValidation(t *testing.T) {
 		{"GET", sp + "/shared/x/watch?version=1;2", 400, "invalid_parameter"},
 		{"POST", "/v1/spaces?label=poll", 400, "invalid_parameter"},
 		{"POST", "/v1/spaces?locked", 400, "invalid_parameter"},
-		{"POST", "/v1/anon?x=1", 400, "invalid_parameter"},
+		{"POST", "/v1/visitors?x=1", 400, "invalid_parameter"},
+		{"GET", "/v1/me?x=1", 400, "invalid_parameter"},
 	}
 	for _, tc := range cases {
 		s, _, b := c.req(tc.method, tc.path, "v", "Authorization", "Bearer "+tok)
@@ -106,22 +109,35 @@ func TestHTTPTokens(t *testing.T) {
 	c := newTest(t)
 	tok, id := c.anon()
 	for _, h := range []string{"Bearer " + tok, "bearer " + tok, "BEARER  " + tok} {
-		if _, _, b := c.req("GET", "/v1/whoami", "", "Authorization", h); !strings.Contains(b, id) {
+		if _, _, b := c.req("GET", "/v1/me", "", "Authorization", h); !strings.Contains(b, id) {
 			t.Errorf("Authorization %.8s...: %s", h, b)
 		}
 	}
-	if _, _, b := c.req("GET", "/v1/whoami?token="+tok, ""); !strings.Contains(b, id) {
+	if _, _, b := c.req("GET", "/v1/me?token="+tok, ""); !strings.Contains(b, id) {
 		t.Errorf("token parameter: %s", b)
 	}
-	for _, bad := range []string{"vt_short", tok + "x", "at_" + tok[3:], "ot_" + tok[3:], "kv_" + tok[3:], "vt_" + strings.Repeat("!", 43)} {
-		if s, _, b := c.req("GET", "/v1/whoami", "", "Authorization", "Bearer "+bad); s != 401 || errCode(b) != "invalid_token" {
-			t.Errorf("token %q: %d %s", bad, s, b)
+	parts := strings.Split(tok, ".")
+	for bad, want := range map[string]string{
+		"vt_short": "bad_token", tok + "x": "bad_signature", tok[:len(tok)-2] + "AA": "bad_signature",
+		"inv_" + strings.Repeat("a", 43): "bad_token", "cubby_" + strings.Repeat("a", 43): "invalid_api_key",
+		parts[0] + ".e30." + parts[2]: "bad_token",
+	} {
+		s, h, b := c.req("GET", "/v1/me", "", "Authorization", "Bearer "+bad)
+		if s != 401 || errCode(b) != want || !strings.Contains(h.Get("WWW-Authenticate"), `error="invalid_token"`) {
+			t.Errorf("token %.20q: %d %s %s", bad, s, b, h.Get("WWW-Authenticate"))
 		}
 	}
-	// A bad token on a read that doesn't need one is ignored.
+	if s, h, _ := c.req("GET", "/v1/me", ""); s != 401 || h.Get("WWW-Authenticate") != `Bearer realm="cubby"` {
+		t.Errorf("no token: %d %q", s, h.Get("WWW-Authenticate"))
+	}
+	// A bad token is refused on reads that don't need one too, so an
+	// expired or signed-out client learns it instead of reading as a stranger.
 	c.open("poll-cedar-pilot-mango", tok)
-	if s, _, _ := c.req("GET", "/v1/poll-cedar-pilot-mango/shared/x", "", "Authorization", "Bearer junk"); s != 404 {
-		t.Errorf("read with junk token: %d", s)
+	if s, _, b := c.req("GET", "/v1/poll-cedar-pilot-mango/shared/x", "", "Authorization", "Bearer junk"); s != 401 || errCode(b) != "bad_token" {
+		t.Errorf("read with junk token: %d %s", s, b)
+	}
+	if s, _, _ := c.req("GET", "/v1/time", "", "Authorization", "Bearer junk"); s != 200 {
+		t.Errorf("time with junk token: %d", s)
 	}
 }
 
@@ -140,7 +156,9 @@ func FuzzRoute(f *testing.F) {
 		f.Fatal(err)
 	}
 	srv := New(cfg, store, nil)
-	tok, _, _ := store.NewVisitor()
+	signer, _ := auth.NewSigner()
+	store.NewVisitor(signer.Key, "")
+	tok := signer.Token("http://x", time.Hour, false)
 	f.Fuzz(func(t *testing.T, method, target string) {
 		if method != "GET" && method != "PUT" && method != "DELETE" && method != "POST" {
 			return
@@ -164,4 +182,15 @@ func FuzzRoute(f *testing.F) {
 			}
 		}
 	})
+}
+
+// A token refused for its times says the server's time.
+func TestTokenServerTime(t *testing.T) {
+	c := newTest(t)
+	_, _, s := c.visitor()
+	old := s.TokenAt(c.url, time.Now().Add(-2*time.Hour), 10*time.Minute, false)
+	st, _, b := c.req("GET", "/v1/me", "", "Authorization", "Bearer "+old)
+	if st != 401 || errCode(b) != "token_expired" || !strings.Contains(b, `"serverTime":`) {
+		t.Errorf("expired: %d %s", st, b)
+	}
 }

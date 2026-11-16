@@ -6,7 +6,7 @@
 //
 // Every page starts the same way:
 //   const db = kv(SPACE)
-//   const me = await db.open()     // redeems an invite link (#t=...)
+//   const me = await db.open()     // redeems an invite link (#invite=...)
 //   if (!me.can("read")) { /* show: "ask the owner for an invite link" */ }
 //
 // Everyone has one level per space. me.access is yours ("none" outside):
@@ -25,8 +25,9 @@
 // still delete them, as moderation.
 //
 // Creating a space (once from a shell with `cubby new`, or per room in the page):
-//   const { space, ownerToken } = await createSpace()
-//   Show ownerToken to the user once. It's their recovery key. Never store it in code.
+//   const { space } = await createSpace()   // this browser's visitor owns it
+// Each browser signs in with its own key, made and kept by kv.js. To get back
+// in from elsewhere: pair another device, or keep devices().backup() somewhere safe.
 // A page that is a room, shared by its link? openRoom("board") creates or finds
 // the space, opens it and gives await room.link(). Members can share it too.
 //
@@ -50,12 +51,12 @@
 //   db.by.onPulse("cursor", p => draw(p.by, p.value))
 //   db.presence("here", { value: { name } })     // .peers, .onJoin, .onLeave
 //
-// Another device of the same person isn't sharing: devices().link() and accept().
+// Another device of the same person isn't sharing: devices().pair() and accept().
 //
-// Never put an invite (at_...) or owner token (ot_...) in page source: anyone
-// who loads the page could use it. Invite links are for sending to people.
+// Never put an invite (inv_...), API key (cubby_...) or backup key in page source:
+// anyone who loads the page could use it. Invite links are for sending to people.
 //
-// Docs: docs/agents.md in the cubby repository. Exports: kv, createSpace,
+// Docs: docs/usage.md in the cubby repository. Exports: kv, createSpace,
 // openRoom, devices, takeInvite, inviteLink, newName, validSpace, KvError.
 
 const SERVER = new URL(".", import.meta.url).href.replace(/\/$/, "")
@@ -135,87 +136,218 @@ const LIVE_PING_WAIT = 10000
 const LIVE_WAKE_PING_WAIT = 3000  // when the page becomes visible again
 const LIVE_REQUEST_WAIT = 30000
 
-// One identity per server, shared by every kv() instance on the page.
-const identities = new Map()
+// Signing in. Each device has its own key pair: ES256 (ECDSA P-256), made
+// on first use. The private key is a non-extractable CryptoKey in IndexedDB,
+// so page scripts can use it while the page is open but nothing can copy it
+// out. Requests carry a JWT the key signed, good for an hour, renewed five
+// minutes before it ends and never stored. Pages don't see any of this.
 
-function identity(server, tokenKey, fetchFn, fixedToken) {
-  if (fixedToken) {
-    // A visitor token given by the caller: used as is, never saved or renewed.
-    const v = { token: fixedToken, id: null }
-    return {
-      fixed: true, current: () => v, adopt() {},
-      async get() {
-        if (!v.id) {
-          const res = await fetchFn(server + "/v1/whoami?token=" + encodeURIComponent(fixedToken))
-          const body = await res.json().catch(() => ({}))
-          if (!res.ok) throw new KvError(res.status, body.error || "http_error", body.message || res.statusText, body)
-          v.id = body.id
-        }
-        return v
-      },
-      renew: () => { throw new KvError(401, "invalid_token", "The given visitor token is unknown or expired.") },
+const enc = new TextEncoder()
+const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+const b64uJSON = o => b64u(enc.encode(JSON.stringify(o)))
+const EC_KEY = { name: "ECDSA", namedCurve: "P-256" }
+const TOKEN_TTL = 3600 // s
+const TOKEN_RENEW = 300 // s before the end
+
+// The public half as a JWK, members in RFC 7638's order, so its JSON is
+// the canonical form the thumbprint (the device ID) hashes.
+function publicJWK(j) {
+  return j.kty === "OKP" ? { crv: j.crv, kty: j.kty, x: j.x } : { crv: j.crv, kty: j.kty, x: j.x, y: j.y }
+}
+
+async function makeSigner(privateKey, jwk) {
+  jwk = publicJWK(jwk)
+  const kid = b64u(await crypto.subtle.digest("SHA-256", enc.encode(JSON.stringify(jwk))))
+  const alg = jwk.kty === "OKP" ? "EdDSA" : "ES256"
+  return {
+    jwk, kid, alg,
+    // A token for the server at aud, issued at now (ms). withKey puts the
+    // public key in the header, as registering and pairing need.
+    async token(aud, now, withKey = false, ttl = TOKEN_TTL) {
+      const header = { alg, typ: "JWT", kid }
+      if (withKey) header.jwk = jwk
+      const iat = Math.floor(now / 1000)
+      const input = b64uJSON(header) + "." + b64uJSON({ aud, iat, exp: iat + ttl })
+      const params = alg === "EdDSA" ? { name: "Ed25519" } : { name: "ECDSA", hash: "SHA-256" }
+      return input + "." + b64u(await crypto.subtle.sign(params, privateKey, enc.encode(input)))
+    },
+  }
+}
+
+async function newKeyPair(extractable = false) {
+  const pair = await crypto.subtle.generateKey(EC_KEY, extractable, ["sign", "verify"])
+  return { privateKey: pair.privateKey, jwk: await crypto.subtle.exportKey("jwk", pair.publicKey), pair }
+}
+
+// A credentials object, as `cubby device backup` and devices().backup() make
+// it: { server, visitor, device, key: private JWK }. The key is imported
+// non-extractable.
+async function importCredentials(c) {
+  const key = typeof c === "string" ? JSON.parse(c).key : c?.key
+  if (!key?.d) throw new KvError(0, "invalid_option", "credentials need key, a private JWK (with d).")
+  const params = key.kty === "OKP" ? { name: "Ed25519" } : EC_KEY
+  const privateKey = await crypto.subtle.importKey("jwk", key, params, false, ["sign"])
+  return makeSigner(privateKey, key)
+}
+
+// IndexedDB, for keys; memory where there's none (Node, some private modes).
+const keyStore = (() => {
+  const mem = new Map()
+  let dbp = null, warned = false
+  function open() {
+    if (!dbp) dbp = new Promise((resolve, reject) => {
+      if (typeof indexedDB === "undefined") return reject(new Error("no IndexedDB"))
+      const r = indexedDB.open("cubby", 1)
+      r.onupgradeneeded = () => r.result.createObjectStore("keys")
+      r.onsuccess = () => resolve(r.result)
+      r.onerror = () => reject(r.error)
+    })
+    return dbp
+  }
+  async function op(mode, fn) {
+    const db = await open()
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("keys", mode)
+      const req = fn(tx.objectStore("keys"))
+      tx.oncomplete = () => resolve(req.result)
+      tx.onerror = tx.onabort = () => reject(tx.error)
+    })
+  }
+  function fallback() {
+    if (!warned) {
+      warned = true
+      console.warn("cubby: IndexedDB isn't available, so this device is new on every page load")
     }
   }
-  const id = server + "\n" + tokenKey
-  if (identities.has(id)) return identities.get(id)
-  let memory = null
-  let warned = false
-  const store = {
-    load() {
-      try {
-        const raw = localStorage.getItem(tokenKey)
-        const v = raw ? JSON.parse(raw) : memory
-        // Only visitor tokens count; anything else (an older kind) is dropped.
-        return typeof v?.token === "string" && v.token.startsWith("vt_") ? v : null
-      } catch {
-        return memory
-      }
-    },
-    save(v) {
-      memory = v
-      try {
-        if (v) localStorage.setItem(tokenKey, JSON.stringify(v))
-        else localStorage.removeItem(tokenKey)
-      } catch {
-        if (!warned) {
-          warned = true
-          console.warn("cubby: localStorage isn't available, so this visitor is new on every page load")
-        }
-      }
-    },
+  return {
+    async get(k) { try { return await op("readonly", s => s.get(k)) } catch { fallback(); return mem.get(k) } },
+    async put(k, v) { mem.set(k, v); try { await op("readwrite", s => s.put(v, k)) } catch { fallback() } },
   }
-  let pending = null
-  const ident = {
-    current: () => store.load(),
-    async get() {
-      const cur = store.load()
-      if (cur?.token) return cur
-      return ident.renew()
-    },
-    // A visitor the server created in a createSpace or join response.
-    adopt(token, id) {
-      if (token) store.save({ token, id })
-    },
-    // The server doesn't know the stored token. Calls that can create a
-    // visitor (createSpace, join) go on without one.
-    forget() {
-      store.save(null)
-    },
-    renew() {
-      if (!pending) {
-        pending = (async () => {
-          const res = await fetchFn(server + "/v1/anon", { method: "POST" })
-          const body = await res.json().catch(() => ({}))
-          if (!res.ok) throw new KvError(res.status, body.error || "http_error", body.message || res.statusText, body)
-          const v = { token: body.token, id: body.id }
-          store.save(v)
-          return v
-        })().finally(() => { pending = null })
+})()
+
+// One identity per server and key name, shared by every kv() instance on the
+// page. get() signs in, registering a new key the first time; peek() only
+// uses one that exists. Both answer { token, id }.
+const identities = new Map()
+
+function identity(server, keyName, fetchFn, { credentials, apiKey } = {}) {
+  const aud = new URL(server).origin
+  let skew = 0 // server clock minus ours, learned from a refused token
+  async function learnSkew() {
+    try {
+      const t0 = Date.now()
+      const res = await fetchFn(server + "/v1/time")
+      const { t } = await res.json()
+      if (t) skew = t - (t0 + Date.now()) / 2
+    } catch {}
+  }
+  function http(res, body) {
+    return new KvError(res.status, body.error || "http_error", body.message || res.statusText, body)
+  }
+
+  if (apiKey) {
+    // A static API key: sent as is, for one space. Never stored.
+    const v = { token: apiKey, id: null }
+    return { fixed: true, peek: async () => v, get: async () => v, forget() {}, adopt() {}, learnSkew, signer: async () => null, visitorId: () => null, aud: () => aud, now: () => Date.now() + skew }
+  }
+
+  let signer = null, id = null, tok = null, tokEnd = 0, loading = null, pending = null
+  const given = !!credentials
+  async function load() {
+    if (!loading) loading = (async () => {
+      if (given) {
+        signer = await importCredentials(credentials)
+        id = (typeof credentials === "string" ? JSON.parse(credentials) : credentials).visitor || null
+        return
       }
+      const rec = await keyStore.get(keyName)
+      if (rec?.privateKey && rec.jwk) {
+        signer = await makeSigner(rec.privateKey, rec.jwk)
+        id = rec.visitor || null
+        ident.rec = rec
+      }
+    })()
+    return loading
+  }
+  async function save() {
+    if (!given) await keyStore.put(keyName, { privateKey: ident.rec.privateKey, jwk: ident.rec.jwk, visitor: id })
+  }
+  async function mint() {
+    const now = Date.now() + skew
+    if (!tok || now / 1000 > tokEnd - TOKEN_RENEW) {
+      tok = await signer.token(aud, now)
+      tokEnd = Math.floor(now / 1000) + TOKEN_TTL
+    }
+    return tok
+  }
+  const ident = {
+    rec: null,
+    fixed: false,
+    given,
+    learnSkew: async () => { await learnSkew(); tok = null },
+    // The device's signer, made if there's none yet (not registered).
+    async signer() {
+      await load()
+      if (!signer && !given) {
+        const k = await newKeyPair()
+        ident.rec = { privateKey: k.privateKey, jwk: k.jwk }
+        signer = await makeSigner(k.privateKey, k.jwk)
+        await save()
+      }
+      return signer
+    },
+    aud: () => aud,
+    now: () => Date.now() + skew,
+    // The visitor ID as known right now, without waiting: null before the
+    // key is loaded or registered.
+    visitorId: () => id,
+    async peek() {
+      await load()
+      return signer && id ? { token: await mint(), id } : null
+    },
+    async get() {
+      const cur = await ident.peek()
+      if (cur) return cur
+      if (given) {
+        // Given credentials name their visitor, or say who they are.
+        const res = await fetchFn(server + "/v1/me", { headers: { Authorization: "Bearer " + await mint() } })
+        const body = await res.json().catch(() => ({}))
+        if (!res.ok) throw http(res, body)
+        id = body.id
+        return { token: await mint(), id }
+      }
+      if (!pending) pending = (async () => {
+        const s = await ident.signer()
+        const res = await fetchFn(server + "/v1/visitors", {
+          method: "POST", headers: { Authorization: "Bearer " + await s.token(aud, Date.now() + skew, true, 300) },
+          body: JSON.stringify({ label: deviceLabel() }),
+        })
+        const body = await res.json().catch(() => ({}))
+        if (!res.ok) throw http(res, body)
+        id = body.id
+        await save()
+        return { token: await mint(), id }
+      })().finally(() => { pending = null })
       return pending
     },
+    // The server doesn't know this key any more (signed out, or a year
+    // unused). The next get() registers it again, as a new visitor.
+    forget() {
+      if (given) return
+      id = null
+      tok = null
+      if (ident.rec) save()
+    },
+    // This device joined another visitor, by pairing.
+    async adopt(visitor) {
+      id = visitor
+      await save()
+    },
   }
-  identities.set(id, ident)
+  if (given) return ident
+  const k = server + "\n" + keyName
+  if (identities.has(k)) return identities.get(k)
+  identities.set(k, ident)
   return ident
 }
 
@@ -263,20 +395,20 @@ export function kv(space, opts = {}) {
   }
   const server = (opts.server || SERVER).replace(/\/$/, "")
   const fetchFn = opts.fetch || globalThis.fetch.bind(globalThis)
-  const ident = identity(server, opts.tokenKey || "cubby:" + server, fetchFn, opts.token)
+  const ident = identity(server, opts.keyName || "cubby:" + server, fetchFn, { credentials: opts.credentials, apiKey: opts.apiKey })
   const WS = opts.WebSocket || globalThis.WebSocket
   const pulseRate = opts.pulseRate ?? 20
   const live = opts.live && typeof WS === "function" ? makeLive(server.replace(/^http/, "ws") + "/v1/" + space + "/live", WS) : null
 
-  // auth: the request needs a visitor token, and gets one if there isn't one
-  // yet. Without auth, whatever token there is still goes along, so a
-  // private space works with no option. Reads send it as ?token=: an
+  // auth: the request needs a signed-in device, and registers this one if
+  // it isn't yet. Without auth, whatever token there is still goes along, so
+  // a private space works with no option. Reads send it as ?token=: an
   // Authorization header makes the browser send a CORS preflight, cached per
   // URL, and every watch request has a new URL.
   async function request(method, path, { body, auth = false, query, signal } = {}) {
     const read = method === "GET" || method === "HEAD"
     for (let attempt = 0; ; attempt++) {
-      const cur = auth ? await ident.get() : ident.current()
+      const cur = auth ? await ident.get() : await ident.peek()
       let url = `${server}/v1/${space}${path ? "/" + path : ""}`
       const q = new URLSearchParams()
       for (const [k, v] of Object.entries(query || {})) if (v !== undefined && v !== null) q.set(k, String(v))
@@ -305,12 +437,16 @@ export function kv(space, opts = {}) {
       }
       if (cur?.token && res.status === 401 && attempt === 0 && !ident.fixed) {
         const b = await res.clone().json().catch(() => ({}))
-        if (b.error === "invalid_token") {
-          // The visitor is gone, say after a year unused. The new one has no
-          // grants, so in a private space the retry gets no_space. Without
-          // auth (join), go on with no token and let the server make one.
-          if (auth) await ident.renew()
-          else ident.forget()
+        if (b.error === "token_expired" || b.error === "token_not_yet_valid") {
+          // This device's clock is off: sign again on the server's time.
+          await ident.learnSkew()
+          continue
+        }
+        if (b.error === "unknown_key" && !ident.given) {
+          // The device was signed out, or unused for a year. Its key comes
+          // back as a new visitor with no grants, so in a private space the
+          // retry gets no_space.
+          ident.forget()
           continue
         }
       }
@@ -359,13 +495,13 @@ export function kv(space, opts = {}) {
   }
 
   // mine: this visitor made the last write or the delete.
-  const withMine = e => ({ ...e, mine: !!e.by && e.by === ident.current()?.id })
+  const withMine = e => ({ ...e, mine: !!e.by && e.by === ident.visitorId() })
 
   // other: for another visitor's area, the ID only they may write under.
   // Owners may still delete there; the server decides that.
   function area(prefix, { needsAuth = false, other = null } = {}) {
     const checkWrite = () => {
-      if (other && ident.current()?.id !== other) throw new KvError(0, "not_yours", "This is another visitor's area. Only they can write it.")
+      if (other && ident.visitorId() !== other) throw new KvError(0, "not_yours", "This is another visitor's area. Only they can write it.")
     }
     const pathOf = async target => {
       const p = typeof prefix === "function" ? await prefix() : prefix
@@ -704,7 +840,7 @@ export function kv(space, opts = {}) {
     const overLive = async () => {
       let cur
       try {
-        cur = auth ? await ident.get() : ident.current()
+        cur = auth ? await ident.get() : await ident.peek()
       } catch (err) {
         await retry(err instanceof KvError ? err : new KvError(0, "network_error", String(err?.message || err)))
         return true
@@ -846,7 +982,7 @@ export function kv(space, opts = {}) {
         if (live && await live.ready(LIVE_WATCH_WAIT)) {
           if (stopped) break
           let cur
-          try { cur = auth ? await ident.get() : ident.current() } catch (err) { await retry(err instanceof KvError ? err : new KvError(0, "network_error", String(err?.message || err))); continue }
+          try { cur = auth ? await ident.get() : await ident.peek() } catch (err) { await retry(err instanceof KvError ? err : new KvError(0, "network_error", String(err?.message || err))); continue }
           if (!live.isOpen()) continue
           sub = live.subscribe(cur?.token, path, query(), handle)
           const end = await sub.done
@@ -927,11 +1063,9 @@ export function kv(space, opts = {}) {
       const { limits, usage } = await db.access()
       return { limits, usage }
     },
-    async join(token) {
-      if (token === null || token === undefined || token === "") return null
-      // Without a stored visitor, the server creates one and returns it.
-      const out = await call("POST", "join", { body: { token }, auth: false })
-      ident.adopt(out.token, out.id)
+    async join(invite) {
+      if (invite === null || invite === undefined || invite === "") return null
+      await call("POST", "join", { body: { invite } })
       return db.access()
     },
     async access() {
@@ -958,23 +1092,23 @@ export function kv(space, opts = {}) {
         if (err.code !== "no_space" && err.code !== "banned") throw err
         const banned = err.code === "banned"
         return makeAccess({ access: banned ? "banned" : "none", until: banned ? err.details.until ?? null : null,
-          joined, inviteFailed, id: ident.current()?.id ?? null, canInvite: false, settings: null })
+          joined, inviteFailed, id: ident.visitorId() ?? null, canInvite: false, settings: null })
       }
     },
-    // An invite link to send: this page (or base) with #t=at_... added.
+    // An invite link to send: this page (or base) with #invite=inv_... added.
     async share(o = {}) {
       const { base, ...rest } = o
-      const t = await db.tokens.create(rest)
-      return { link: inviteLink(t.token, base), token: t.token, id: t.id, access: t.access, uses: t.uses, until: t.until }
+      const t = await db.invites.create(rest)
+      return { link: inviteLink(t.invite, base), invite: t.invite, id: t.id, access: t.access, uses: t.uses, until: t.until }
     },
     // Invites. Owners, and members at the space's invite level (post unless
     // changed). Members see and change only their own, and give at most
     // their own level.
-    tokens: {
-      create: (o = {}) => call("POST", "tokens", { body: tokenBody(o, true) }),
-      list: async () => (await call("GET", "tokens")).items,
-      update: (id, o = {}) => call("PATCH", "tokens/" + encodeURIComponent(id), { body: tokenBody(o, false) }),
-      revoke: async id => { await call("DELETE", "tokens/" + encodeURIComponent(id)) },
+    invites: {
+      create: (o = {}) => call("POST", "invites", { body: inviteBody(o, true) }),
+      list: async () => (await call("GET", "invites")).items,
+      update: (id, o = {}) => call("PATCH", "invites/" + encodeURIComponent(id), { body: inviteBody(o, false) }),
+      revoke: async id => { await call("DELETE", "invites/" + encodeURIComponent(id)) },
     },
     // Who is in the space: { id, access, since }, highest level first.
     // Owners also get until, invitedBy and lastUsedAt, and banned visitors.
@@ -985,7 +1119,6 @@ export function kv(space, opts = {}) {
       // settings({ anyone, invite }): either may be left out.
       settings: async patch => (await call("PATCH", "", { body: patch })).settings,
       deleteSpace: async () => { await call("DELETE", "") },
-      rotateOwnerToken: async () => (await call("POST", "owner-token")).ownerToken,
       members: {
         // Give a visitor exactly one level, replacing what they had:
         // "read", "post", "all", "owner", or "banned" to keep them out and
@@ -1065,7 +1198,7 @@ function timeValue(v) {
   return v
 }
 
-function tokenBody(o, creating) {
+function inviteBody(o, creating) {
   const known = creating ? ["label", "access", "uses", "until", "grantFor"] : ["uses", "until"]
   const body = {}
   for (const k of Object.keys(o)) {
@@ -1089,14 +1222,14 @@ function makeAccess(a) {
   return a
 }
 
-// createSpace makes a space owned by this visitor, private unless anyone
-// gives every visitor a level. Show ownerToken to the person once: it's their
-// recovery key. It isn't stored.
+// createSpace makes a space owned by this device's visitor, private unless
+// anyone gives every visitor a level. To get back in from another browser,
+// the person needs another paired device or a backup key: devices().backup().
 export async function createSpace(o = {}) {
-  const { server: srv, tokenKey, fetch: f, ...fields } = o
+  const { server: srv, keyName, fetch: f, ...fields } = o
   const server = (srv || SERVER).replace(/\/$/, "")
   const fetchFn = f || globalThis.fetch.bind(globalThis)
-  const ident = identity(server, tokenKey || "cubby:" + server, fetchFn)
+  const ident = identity(server, keyName || "cubby:" + server, fetchFn)
   for (const k of Object.keys(fields)) {
     if (!["label", "name", "anyone", "invite"].includes(k)) {
       throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are label, name, anyone, invite.`)
@@ -1104,140 +1237,183 @@ export async function createSpace(o = {}) {
   }
   let res
   for (let attempt = 0; ; attempt++) {
-    const headers = {}
-    const cur = ident.current()
-    if (cur?.token) headers.Authorization = "Bearer " + cur.token
+    const cur = await ident.get()
     try {
-      res = await fetchFn(server + "/v1/spaces", { method: "POST", headers, body: JSON.stringify(fields) })
+      res = await fetchFn(server + "/v1/spaces", { method: "POST", headers: { Authorization: "Bearer " + cur.token }, body: JSON.stringify(fields) })
     } catch (err) {
       throw new KvError(0, "network_error", String(err?.message || err))
     }
-    // A stored visitor the server no longer knows: create the space as a
-    // new visitor instead.
-    if (res.status === 401 && cur?.token && attempt === 0) {
+    if (res.status === 401 && attempt === 0) {
       const b = await res.clone().json().catch(() => ({}))
-      if (b.error === "invalid_token") { ident.forget(); continue }
+      if (b.error === "token_expired" || b.error === "token_not_yet_valid") { await ident.learnSkew(); continue }
+      if (b.error === "unknown_key") { ident.forget(); continue }
     }
     break
   }
   if (!res.ok) throw await errorFrom(res)
   const out = await res.json()
-  ident.adopt(out.token, out.id)
-  return { space: out.space, ownerToken: out.ownerToken }
+  return { space: out.space }
 }
 
 // devices: this visitor on several devices. Not about a space, so it isn't
-// on db. One device makes a link, another redeems it and becomes the same
-// visitor, with every grant and all its data. Redeeming replaces whatever
-// identity that device had, so ask the person first; it never happens on
-// its own.
+// on db. One device makes a pairing code, another uses it and becomes the
+// same visitor, with every grant and all its data. Accepting replaces
+// whatever identity that device had, so ask the person first; it never
+// happens on its own.
 //   const me = devices()
-//   const link = await me.link()            // { code, display, url, expires, done, cancel() }
-//   show(link.url, link.display); const { device } = await link.done
-//   if (me.pending() && confirm("Link this device?")) await me.accept()
-// Options: server, tokenKey and fetch, as for kv().
+//   const code = await me.pair()           // { code, display, url, expires, done, cancel() }
+//   show(code.url, code.display); const { device } = await code.done
+//   if (me.pending() && confirm("Use this device as the same person?")) await me.accept()
+// A backup key is one more device, kept by the person as text:
+//   const text = await me.backup()         // save it in a password manager
+//   await me.restore(text)                 // on a new browser: joins that visitor
+// Options: server, keyName and fetch, as for kv().
 export function devices(o = {}) {
-  const { server: srv, tokenKey, fetch: f, ...rest } = o
+  const { server: srv, keyName, fetch: f, ...rest } = o
   for (const k of Object.keys(rest)) {
-    throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are server, tokenKey, fetch.`)
+    throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are server, keyName, fetch.`)
   }
   const server = (srv || SERVER).replace(/\/$/, "")
   const fetchFn = f || globalThis.fetch.bind(globalThis)
-  const ident = identity(server, tokenKey || "cubby:" + server, fetchFn)
+  const ident = identity(server, keyName || "cubby:" + server, fetchFn)
 
-  async function call(method, path, body, { auth = true, signal } = {}) {
-    const headers = {}
-    const cur = auth ? await ident.get() : ident.current()
-    if (cur?.token) headers.Authorization = "Bearer " + cur.token
+  async function send(method, path, body, token, signal) {
     let res
     try {
-      res = await fetchFn(server + path, { method, headers, signal, body: body === undefined ? undefined : JSON.stringify(body) })
+      res = await fetchFn(server + path, { method, signal, headers: { Authorization: "Bearer " + token },
+        body: body === undefined ? undefined : JSON.stringify(body) })
     } catch (err) {
       if (err?.name === "AbortError") throw err
       throw new KvError(0, "network_error", String(err?.message || err))
     }
-    if (!res.ok) {
-      const err = await errorFrom(res)
-      // This device was signed out: drop the token, so id says so and
-      // the next kv() call starts a new visitor.
-      if (err.code === "invalid_token" && cur?.token && !ident.fixed && ident.current()?.token === cur.token) ident.forget()
-      throw err
-    }
+    if (!res.ok) throw await errorFrom(res)
     return res.json()
   }
+  async function call(method, path, body, { signal } = {}) {
+    for (let attempt = 0; ; attempt++) {
+      const cur = await ident.get()
+      try {
+        return await send(method, path, body, cur.token, signal)
+      } catch (err) {
+        if (attempt === 0 && (err.code === "token_expired" || err.code === "token_not_yet_valid")) { await ident.learnSkew(); continue }
+        // This device was signed out: forget its visitor, so id says so
+        // and the next call starts a new one.
+        if (err.code === "unknown_key") ident.forget()
+        throw err
+      }
+    }
+  }
+  // POST /v1/pair, signed by signer with its key in the header.
+  async function usePairingCode(signer, code, label) {
+    return send("POST", "/v1/pair", { code: String(code), label }, await signer.token(ident.aud(), ident.now(), true, 300))
+  }
 
-  function makeLink(out, base) {
+  function makePairing(out, base) {
     const ctl = new AbortController()
     let done = null
-    const link = {
+    return {
       id: out.id, code: out.code, display: out.display, expires: out.expires,
-      url: linkUrl(out.code, base),
-      // Resolves with { device } once another device redeems the code;
-      // rejects with link_expired or link_cancelled.
+      url: pairUrl(out.code, base),
+      // Resolves with { device } once another device uses the code;
+      // rejects with pairing_code_expired or pairing_code_cancelled.
       get done() {
         if (!done) done = (async () => {
           for (;;) {
             let l
             try {
-              l = await call("GET", "/v1/links/" + out.id + "?wait=55", undefined, { signal: ctl.signal })
+              l = await call("GET", "/v1/me/pairing-codes/" + out.id + "?wait=55", undefined, { signal: ctl.signal })
             } catch (err) {
-              if (err?.name === "AbortError") l = await call("GET", "/v1/links/" + out.id)
-              else if (err instanceof KvError && err.retryable) { await new Promise(r => setTimeout(r, 2000)); continue }
+              if (err?.name === "AbortError") l = await call("GET", "/v1/me/pairing-codes/" + out.id)
+              else if (err instanceof KvError && err.retryable) { await sleep(2000); continue }
               else throw err
             }
             if (l.state === "used") return { device: l.device }
-            if (l.state !== "open") throw new KvError(410, "link_" + l.state, l.state === "expired" ? "The link expired before another device used it." : "The link was cancelled.", l)
+            if (l.state !== "open") throw new KvError(410, "pairing_code_" + l.state, l.state === "expired" ? "The code expired before another device used it." : "The code was cancelled.", l)
           }
         })()
         return done
       },
       async cancel() {
-        const l = await call("DELETE", "/v1/links/" + out.id)
+        const l = await call("DELETE", "/v1/me/pairing-codes/" + out.id)
         ctl.abort()
         return l.state
       },
     }
-    return link
   }
 
   return {
     // This device's visitor ID, null before it has one.
-    get id() { return ident.current()?.id ?? null },
-    // The code in #link=..., without redeeming it. null if there's none.
-    pending(param = "link") { return hashParams().get(param) },
+    get id() { return ident.visitorId() },
+    // The code in #pair=..., without using it. null if there's none.
+    pending(param = "pair") { return hashParams().get(param) },
     // A one-use code for another device, alive ttl seconds (30 to 3600,
-    // default 600). url is this page with #link=CODE, or base's.
-    async link({ ttl, base } = {}) {
-      const out = await call("POST", "/v1/links", ttl === undefined ? undefined : { ttl })
-      return makeLink(out, base)
+    // default 600). url is this page with #pair=CODE, or base's.
+    async pair({ ttl, base } = {}) {
+      const out = await call("POST", "/v1/me/pairing-codes", ttl === undefined ? undefined : { ttl })
+      return makePairing(out, base)
     },
-    // Redeem a code: the one given, or #link=... from the address, which is
+    // Use a code: the one given, or #pair=... from the address, which is
     // removed. This device becomes that visitor; a previous identity with
     // no other device is deleted with its data. null if there's no code.
-    async accept(code, { label = deviceLabel(), param = "link" } = {}) {
+    async accept(code, { label = deviceLabel(), param = "pair" } = {}) {
       if (code == null) code = takeInvite(param)
       if (code == null) return null
-      const out = await call("POST", "/v1/links/redeem", { code: String(code), label }, { auth: false })
-      ident.adopt(out.token, out.id)
+      const out = await usePairingCode(await ident.signer(), code, label)
+      await ident.adopt(out.id)
+      return { id: out.id, device: out.device, previous: out.previous, deleted: out.deleted }
+    },
+    // A backup key: a new device of this visitor whose private key is
+    // returned as text, once, and kept nowhere here. Anyone with the text
+    // can act as this visitor, so it belongs in a password manager.
+    async backup({ label = "Backup key " + new Date().toISOString().slice(0, 10) } = {}) {
+      const code = await call("POST", "/v1/me/pairing-codes", { ttl: 60 })
+      const k = await newKeyPair(true)
+      const signer = await makeSigner(k.privateKey, k.jwk)
+      const out = await usePairingCode(signer, code.code, label)
+      const key = await crypto.subtle.exportKey("jwk", k.privateKey)
+      return JSON.stringify({ server, visitor: out.id, device: out.device, key: { kty: key.kty, crv: key.crv, x: key.x, y: key.y, d: key.d } })
+    },
+    // Restore from a backup key: the backup makes a pairing code and this
+    // device uses it, so this device becomes that visitor and the backup
+    // stays a backup.
+    async restore(backup, { label = deviceLabel() } = {}) {
+      const signer = await importCredentials(backup)
+      const code = await send("POST", "/v1/me/pairing-codes", { ttl: 60 }, await signer.token(ident.aud(), ident.now()))
+      const out = await usePairingCode(await ident.signer(), code.code, label)
+      await ident.adopt(out.id)
       return { id: out.id, device: out.device, previous: out.previous, deleted: out.deleted }
     },
     // This visitor's devices, oldest first. current marks this one.
-    async list() { return (await call("GET", "/v1/devices")).items },
-    async rename(label, id = "me") { return (await call("PATCH", "/v1/devices/" + id, { label })).items },
-    // Sign a device out: its token stops working. Not the last one.
-    async remove(id) { return (await call("DELETE", "/v1/devices/" + id)).removed },
-    async signOutOthers() { return (await call("DELETE", "/v1/devices?others=1")).removed },
+    async list() { return (await call("GET", "/v1/me/devices")).items },
+    async rename(label, id = "current") { return (await call("PATCH", "/v1/me/devices/" + id, { label })).items },
+    // Sign a device out: its key stops working. Not the last one.
+    async remove(id) { return (await call("DELETE", "/v1/me/devices/" + id)).removed },
+    async signOutOthers() { return (await call("DELETE", "/v1/me/devices?others=1")).removed },
+    // API keys: static secrets for tools that can't sign, like webhooks. One
+    // space each, at most your level, 30 days unless until says otherwise
+    // (null: never, the weakest choice). Prefer signed tokens where you can.
+    apiKeys: {
+      create: (space, { label, access, until } = {}) => {
+        const body = { space }
+        if (label !== undefined) body.label = label
+        if (access !== undefined) body.access = access
+        if (until !== undefined) body.until = timeValue(until)
+        return call("POST", "/v1/me/api-keys", body)
+      },
+      list: async () => (await call("GET", "/v1/me/api-keys")).items,
+      revoke: async id => { await call("DELETE", "/v1/me/api-keys/" + encodeURIComponent(id)) },
+    },
   }
 }
 
-// linkUrl adds link=code to base's fragment, keeping its other parameters
+// pairUrl adds pair=code to base's fragment, keeping its other parameters
 // and dropping an invite.
-function linkUrl(code, base) {
+function pairUrl(code, base) {
   if (!base && typeof location === "undefined") return null
   const u = new URL(base || location.href)
   const p = new URLSearchParams(u.hash.slice(1))
-  p.delete("t")
-  p.set("link", code)
+  p.delete("invite")
+  p.set("pair", code)
   u.hash = p.toString()
   return u.href
 }
@@ -1255,23 +1431,23 @@ function hashParams() {
   return new URLSearchParams(typeof location === "undefined" ? "" : location.hash.slice(1))
 }
 
-// takeInvite reads #t=... from the address bar and removes it, keeping the
-// fragment's other parameters. null if there's none.
-export function takeInvite(param = "t") {
+// takeInvite reads #invite=... from the address bar and removes it, keeping
+// the fragment's other parameters. null if there's none.
+export function takeInvite(param = "invite") {
   const p = hashParams()
-  const token = p.get(param)
-  if (!token) return null
+  const value = p.get(param)
+  if (!value) return null
   p.delete(param)
   const rest = p.toString()
   if (typeof history !== "undefined") {
     history.replaceState(history.state, "", location.pathname + location.search + (rest ? "#" + rest : ""))
   }
-  return token
+  return value
 }
 
 // openRoom: a page is a room, and its link lets others in. Finds the room
 // in the address (#s=...) or the one this browser was last in under label,
-// creates one if there's neither, opens it (redeeming #t=...), and keeps
+// creates one if there's neither, opens it (redeeming #invite=...), and keeps
 // #s=<space> in the address so a reload stays in the room.
 //   const room = await openRoom("board", { live: true })
 //   if (!room.me.can("read")) ...      // gone, or a bad link
@@ -1287,7 +1463,7 @@ export async function openRoom(label, o = {}) {
   let created = false
   if (!space) {
     if (!create) return { db: null, me: makeAccess({ access: "none" }), space: null, created, link: async () => null, forget }
-    const fields = { label, server: kvOpts.server, tokenKey: kvOpts.tokenKey, fetch: kvOpts.fetch }
+    const fields = { label, server: kvOpts.server, keyName: kvOpts.keyName, fetch: kvOpts.fetch }
     if (anyone) fields.anyone = anyone
     space = (await createSpace(fields)).space
     created = true
@@ -1306,12 +1482,12 @@ export async function openRoom(label, o = {}) {
     const lkey = `cubby-room-link:${server}:${space}:${me.id || await db.id()}${lo.access ? ":" + lo.access : ""}`
     const saved = roomStore.get(lkey)
     if (saved) {
-      const t = await db.tokens.list().then(l => l.find(t => t.id === saved.id), () => null)
-      if (t?.state === "active") return inviteLink(saved.token, base)
+      const t = await db.invites.list().then(l => l.find(t => t.id === saved.id), () => null)
+      if (t?.state === "active") return inviteLink(saved.invite, base)
     }
-    const t = await db.tokens.create({ label: label + " link", uses: null, until: null, ...(lo.access ? { access: lo.access } : {}) })
-    roomStore.set(lkey, { id: t.id, token: t.token })
-    return inviteLink(t.token, base)
+    const t = await db.invites.create({ label: label + " link", uses: null, until: null, ...(lo.access ? { access: lo.access } : {}) })
+    roomStore.set(lkey, { id: t.id, invite: t.invite })
+    return inviteLink(t.invite, base)
   }
   function forget() {
     roomStore.del(key)
@@ -1340,11 +1516,11 @@ function setHashParam(name, value) {
   history.replaceState(history.state, "", location.pathname + location.search + (rest ? "#" + rest : ""))
 }
 
-// inviteLink adds t=token to base's fragment, keeping its other parameters.
-export function inviteLink(token, base = typeof location === "undefined" ? "" : location.href) {
+// inviteLink adds invite=... to base's fragment, keeping its other parameters.
+export function inviteLink(invite, base = typeof location === "undefined" ? "" : location.href) {
   const u = new URL(base)
   const p = new URLSearchParams(u.hash.slice(1))
-  p.set("t", token)
+  p.set("invite", invite)
   u.hash = p.toString()
   return u.href
 }

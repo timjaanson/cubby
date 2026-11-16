@@ -280,12 +280,12 @@ func TestMissLimitHTTP(t *testing.T) {
 	ip := as("203.0.113.7")
 	ownerTok, owner := c.anon()
 	for _, n := range []string{"inuse-space-xxxxxxxx", "never-touched-xxxxxx"} {
-		if _, _, err := c.store.CreateSpace(n, "", access.Settings{Anyone: access.Read, Invite: access.Post}, owner); err != nil {
+		if _, err := c.store.CreateSpace(n, "", access.Settings{Anyone: access.Read, Invite: access.Post}, owner); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// A private space looks exactly like a missing one, and costs a miss.
-	if _, _, err := c.store.CreateSpace("private-xxxxxxxxxxx", "", access.Default, owner); err != nil {
+	if _, err := c.store.CreateSpace("private-xxxxxxxxxxx", "", access.Default, owner); err != nil {
 		t.Fatal(err)
 	}
 

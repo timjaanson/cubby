@@ -9,6 +9,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/timjaanson/cubby/internal/access"
 	"log"
 	"net"
 	"net/http"
@@ -116,19 +117,18 @@ func (s *Server) AdminHandler() http.Handler {
 		}
 		ok(w, r, map[string]any{"deleted": name})
 	})
-	// A new owner token, for an owner who lost theirs and every owner
-	// identity. Owner grants from the old token go with it.
-	mux.HandleFunc("POST /spaces/{space}/owner-token", func(w http.ResponseWriter, r *http.Request) {
+	// Make a visitor an owner, for a space whose owners lost every device.
+	mux.HandleFunc("PUT /spaces/{space}/owners/{visitor}", func(w http.ResponseWriter, r *http.Request) {
 		name, good := space(w, r)
 		if !good {
 			return
 		}
-		tok, err := s.store.RotateOwner(name, "")
+		m, err := s.store.SetMember(name, r.PathValue("visitor"), "admin", access.Owner, nil)
 		if err != nil {
 			fail(w, r, err)
 			return
 		}
-		ok(w, r, map[string]any{"space": name, "ownerToken": tok})
+		ok(w, r, map[string]any{"space": name, "owner": m.ID})
 	})
 	mux.HandleFunc("POST /cleanup", func(w http.ResponseWriter, r *http.Request) {
 		rep, err := s.Cleanup()

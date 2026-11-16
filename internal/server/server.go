@@ -21,15 +21,15 @@ import (
 )
 
 type Server struct {
-	cfg     *config.Config
-	store   *store.Store
-	lim     *limits
-	watches watchCounter
-	notify  notifier
-	log     *log.Logger
-	live    liveSet
-	pulses  *pulseHubs
-	links   linkWaits
+	cfg      *config.Config
+	store    *store.Store
+	lim      *limits
+	watches  watchCounter
+	notify   notifier
+	log      *log.Logger
+	live     liveSet
+	pulses   *pulseHubs
+	pairings pairingWaits
 }
 
 func New(cfg *config.Config, store *store.Store, logger *log.Logger) *Server {
@@ -106,26 +106,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("Access-Control-Expose-Headers", "ETag, Retry-After, KV-Time, KV-By, KV-Expires, RateLimit, RateLimit-Policy")
 	h.Set("Cache-Control", "no-store")
 
-	// Token: header wins over the query parameter.
-	tok := ""
-	if scheme, cred, ok := strings.Cut(strings.TrimSpace(r.Header.Get("Authorization")), " "); ok && strings.EqualFold(scheme, "Bearer") {
-		tok = strings.TrimSpace(cred)
-	} else if t := r.URL.Query().Get("token"); t != "" {
-		tok = t
+	in, err := s.signIn(r, credential(r))
+	if err != nil {
+		c.fail(err)
+		return
 	}
-	if tok != "" && !names.VisitorTokenRe.MatchString(tok) {
-		c.tokErr = apierr.InvalidToken // malformed, no need to look it up
-	} else if tok != "" {
-		id, dev, err := s.store.VisitorByToken(tok)
-		if err != nil {
-			c.fail(err)
-			return
-		}
-		if id == "" {
-			c.tokErr = apierr.InvalidToken
-		}
-		c.visitor, c.device = id, dev
-	}
+	c.visitor, c.device, c.apiKey, c.token, c.tokErr = in.visitor, in.device, in.apiKey, in.token, in.err
 
 	if err := s.route(c); err != nil {
 		c.fail(err)
@@ -164,30 +150,28 @@ func (s *Server) route(c *reqCtx) error {
 				c.json(200, s.serverLimits())
 			}
 			return nil
-		case "anon":
+		case "visitors":
 			if m != http.MethodPost {
 				return methodErr("POST")
 			}
 			if err := checkParams(c.r); err != nil {
 				return err
 			}
-			return s.anon(c)
-		case "whoami":
-			if m != http.MethodGet && m != http.MethodHead {
-				return methodErr("GET, HEAD")
+			return s.registerVisitor(c)
+		case "pair":
+			if m != http.MethodPost {
+				return methodErrMsg("POST", "POST the pairing code here, as the body or as {\"code\": \"...\"}, signed by the new device's key.")
 			}
 			if err := checkParams(c.r); err != nil {
 				return err
 			}
-			id, err := c.needVisitor()
-			if err != nil {
-				return err
-			}
-			c.json(200, map[string]any{"id": id})
-			return nil
+			return s.pair(c)
 		case "spaces":
 			if m != http.MethodPost {
 				return methodErr("POST")
+			}
+			if c.apiKey != nil {
+				return apierr.APIKeyNotAllowed
 			}
 			if err := checkParams(c.r); err != nil {
 				return err
@@ -196,10 +180,18 @@ func (s *Server) route(c *reqCtx) error {
 		}
 	}
 
-	// Devices and links belong to the visitor, not to a space. Space names
-	// are at least 16 characters, so these can't be one.
-	if seg[0] == "links" || seg[0] == "devices" {
-		return s.identityRoute(c, seg)
+	// A credential that was sent but refused is a 401 everywhere from here,
+	// reads of open spaces too. Quietly reading as a stranger would hide an
+	// expired token or a signed-out device behind no_space, and the client
+	// would never learn to fix its clock or register again.
+	if c.tokErr != nil {
+		return c.tokErr
+	}
+
+	// /me and what's under it belong to the visitor, not to a space. Space
+	// names are at least 16 characters, so it can't be one.
+	if seg[0] == "me" {
+		return s.meRoute(c, seg[1:])
 	}
 
 	// The shape of the path first, before anything about the space, so an
@@ -218,13 +210,11 @@ func (s *Server) route(c *reqCtx) error {
 			if len(seg) < 4 || seg[2] == "owners" && len(seg) < 5 {
 				return noRoute
 			}
-		case "users":
-			return &apierr.Error{Status: 404, Code: "not_found", Message: "users/ is now by/: by/me/ for your own keys, by/*/ for everyone's."}
-		case "access", "join", "owner-token", "live":
+		case "access", "join", "live":
 			if len(seg) != 2 {
 				return noRoute
 			}
-		case "tokens", "members":
+		case "invites", "members":
 			if len(seg) > 3 {
 				return noRoute
 			}
@@ -239,6 +229,16 @@ func (s *Server) route(c *reqCtx) error {
 		}
 		return apierr.InvalidSpace(names.SuggestFor(space))
 	}
+	if c.apiKey != nil {
+		if space != c.apiKey.Space {
+			return apierr.APIKeySpace(c.apiKey.Space)
+		}
+		// Data and /access only: an API key never joins, invites, manages
+		// or holds a live connection.
+		if len(seg) == 1 || seg[1] == "join" || seg[1] == "invites" || seg[1] == "members" || seg[1] == "live" {
+			return apierr.APIKeyNotAllowed
+		}
+	}
 	if len(seg) == 2 && seg[1] == "live" {
 		if c.live != nil {
 			return noRoute
@@ -250,6 +250,9 @@ func (s *Server) route(c *reqCtx) error {
 	rights, err := s.store.Rights(space, c.visitor)
 	if err != nil {
 		return err
+	}
+	if rights != nil && c.apiKey != nil {
+		rights.Cap = &c.apiKey.Access
 	}
 	// A ban is said plainly, on every route, before anything else: the
 	// visitor was let in once, so the space's existence is no secret.
@@ -280,7 +283,7 @@ func (s *Server) route(c *reqCtx) error {
 		return apierr.NoSpace
 	}
 
-	if len(seg) == 1 || seg[1] == "access" || seg[1] == "tokens" || seg[1] == "members" || seg[1] == "owner-token" {
+	if len(seg) == 1 || seg[1] == "access" || seg[1] == "invites" || seg[1] == "members" {
 		return s.spaceRoute(c, space, rights, seg[1:])
 	}
 	t := store.Target{Space: space}

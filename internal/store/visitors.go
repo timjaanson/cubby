@@ -5,43 +5,58 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/timjaanson/cubby/internal/auth"
 	"github.com/timjaanson/cubby/internal/names"
 )
 
-// NewVisitor creates a visitor with its first device.
-func (s *Store) NewVisitor() (token, id string, err error) {
-	token, id = names.RandomToken("vt_"), names.NewVisitorID()
+// NewVisitor creates a visitor whose first device is key. A key that is
+// already a device returns its visitor, with created false: registering
+// twice is harmless.
+func (s *Store) NewVisitor(key *auth.Key, label string) (id string, created bool, err error) {
 	tx, err := s.srv.Begin()
 	if err != nil {
-		return "", "", err
+		return "", false, err
 	}
 	defer tx.Rollback()
+	if tx.QueryRow(`SELECT visitor FROM devices WHERE id = ?`, key.ID).Scan(&id) == nil {
+		return id, false, nil
+	}
+	id = names.NewVisitorID()
 	if _, err = tx.Exec(`INSERT INTO visitors (id, created_at, last_seen_at) VALUES (?, ?, ?)`, id, nowS(), nowS()); err != nil {
-		return "", "", err
+		return "", false, err
 	}
-	if err = insertDevice(tx, names.NewDeviceID(), id, token, "", nil); err != nil {
-		return "", "", err
+	if err = insertDevice(tx, key, id, label, nil); err != nil {
+		return "", false, err
 	}
-	return token, id, tx.Commit()
+	return id, true, tx.Commit()
 }
 
-func insertDevice(tx *sql.Tx, dev, visitor, token, label string, linkedBy *string) error {
+func insertDevice(tx *sql.Tx, key *auth.Key, visitor, label string, pairedBy *string) error {
 	now := NowMs()
-	_, err := tx.Exec(`INSERT INTO devices (id, visitor, token_hash, label, created_at, last_seen_at, linked_by) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		dev, visitor, names.HashSecret(token), label, now, now, linkedBy)
+	_, err := tx.Exec(`INSERT INTO devices (id, visitor, key, label, created_at, last_seen_at, paired_by) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		key.ID, visitor, key.JWK, label, now, now, pairedBy)
 	return err
 }
 
-// VisitorByToken returns the visitor and device a token belongs to, or ""
-// for an unknown token. It also counts both as seen, at most once an hour.
-func (s *Store) VisitorByToken(token string) (id, device string, err error) {
-	err = s.srv.QueryRow(`SELECT visitor, id FROM devices WHERE token_hash = ?`, names.HashSecret(token)).Scan(&id, &device)
+// DeviceKey returns a device's visitor and public key, or "" for an
+// unknown device. It also counts both as seen, at most once an hour.
+func (s *Store) DeviceKey(device string) (visitor string, key *auth.Key, err error) {
+	var jwk string
+	err = s.srv.QueryRow(`SELECT visitor, key FROM devices WHERE id = ?`, device).Scan(&visitor, &jwk)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", nil
+		return "", nil, nil
 	}
 	if err != nil {
-		return "", "", err
+		return "", nil, err
 	}
+	if key, err = auth.ParseKey([]byte(jwk)); err != nil {
+		return "", nil, err
+	}
+	s.touch(visitor, device)
+	return visitor, key, nil
+}
+
+func (s *Store) touch(visitor, device string) {
 	now := nowS()
 	s.cacheMu.Lock()
 	stale := now-s.vtouched[device] >= 3600
@@ -51,9 +66,8 @@ func (s *Store) VisitorByToken(token string) (id, device string, err error) {
 	s.cacheMu.Unlock()
 	if stale {
 		s.srv.Exec(`UPDATE devices SET last_seen_at = ? WHERE id = ?`, NowMs(), device)
-		s.srv.Exec(`UPDATE visitors SET last_seen_at = ? WHERE id = ?`, now, id)
+		s.srv.Exec(`UPDATE visitors SET last_seen_at = ? WHERE id = ?`, now, visitor)
 	}
-	return id, device, nil
 }
 
 // visitorTotal is a visitor's storage use across every space.
@@ -125,17 +139,10 @@ func (s *Store) noteVisitorSpace(id, space string) {
 	}
 }
 
-// DeleteVisitor removes a visitor that was just created and never used, for
-// a join that turned out to fail.
-func (s *Store) DeleteVisitor(id string) {
-	s.srv.Exec(`DELETE FROM visitor_spaces WHERE visitor = ?`, id)
-	s.srv.Exec(`DELETE FROM devices WHERE visitor = ?`, id)
-	s.srv.Exec(`DELETE FROM visitors WHERE id = ?`, id)
-}
-
 // PurgeVisitor deletes a visitor and everything they had, the way expiry
 // does: their by/ data, what they sent and received under to/, their
-// grants and bans in every space, their devices and links.
+// grants and bans in every space, their devices, pairing codes and API
+// keys.
 func (s *Store) PurgeVisitor(id string) error {
 	rows, err := s.srv.Query(`SELECT space FROM visitor_spaces WHERE visitor = ?`, id)
 	if err != nil {
@@ -154,7 +161,8 @@ func (s *Store) PurgeVisitor(id string) error {
 		}
 	}
 	s.srv.Exec(`DELETE FROM visitor_spaces WHERE visitor = ?`, id)
-	s.srv.Exec(`DELETE FROM links WHERE visitor = ?`, id)
+	s.srv.Exec(`DELETE FROM pairing_codes WHERE visitor = ?`, id)
+	s.srv.Exec(`DELETE FROM api_keys WHERE visitor = ?`, id)
 	s.srv.Exec(`DELETE FROM devices WHERE visitor = ?`, id)
 	s.srv.Exec(`DELETE FROM visitors WHERE id = ?`, id)
 	s.cacheMu.Lock()

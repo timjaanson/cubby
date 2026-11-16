@@ -1,7 +1,6 @@
 package store
 
 import (
-	"crypto/subtle"
 	"database/sql"
 	"errors"
 	"sort"
@@ -14,10 +13,10 @@ import (
 
 // Limits on access rows per space.
 const (
-	MaxTokens = 1000
-	MaxGrants = 10_000
+	MaxInvites = 1000
+	MaxGrants  = 10_000
 	// Tokens that can't be redeemed stay listed this long after they ended.
-	deadTokenKeep = 30 * 24 * time.Hour
+	deadInviteKeep = 30 * 24 * time.Hour
 )
 
 // accessCache is a space's settings, grants and bans, loaded once and
@@ -159,8 +158,8 @@ func (s *Store) withSpace(space string, fn func(tx *sql.Tx) error) error {
 	return nil
 }
 
-// TokenSpec is a new invite. nil pointers mean no limit.
-type TokenSpec struct {
+// InviteSpec is a new invite. nil pointers mean no limit.
+type InviteSpec struct {
 	By       string // the minting visitor
 	Label    string
 	Access   access.Level
@@ -169,7 +168,7 @@ type TokenSpec struct {
 	GrantFor *int64 // ms
 }
 
-type TokenInfo struct {
+type Invite struct {
 	ID             string       `json:"id"`
 	Label          string       `json:"label"`
 	Access         access.Level `json:"access"`
@@ -204,7 +203,7 @@ func nullable(n sql.NullInt64) *int64 {
 	return &v
 }
 
-func tokenState(usesLeft, until, revoked sql.NullInt64, now int64) string {
+func inviteState(usesLeft, until, revoked sql.NullInt64, now int64) string {
 	switch {
 	case revoked.Valid:
 		return "revoked"
@@ -216,11 +215,11 @@ func tokenState(usesLeft, until, revoked sql.NullInt64, now int64) string {
 	return "active"
 }
 
-const tokenCols = `t.id, t.label, t.access, t.uses_left, t.until, t.grant_for, t.created_at, t.last_redeemed_at,
+const inviteCols = `t.id, t.label, t.access, t.uses_left, t.until, t.grant_for, t.created_at, t.last_redeemed_at,
 	(SELECT count(*) FROM grants g WHERE g.source = t.id), t.minted_by, t.revoked_at`
 
-func scanToken(sc interface{ Scan(...any) error }, now int64) (TokenInfo, error) {
-	var t TokenInfo
+func scanInvite(sc interface{ Scan(...any) error }, now int64) (Invite, error) {
+	var t Invite
 	var level string
 	var uses, until, grantFor, last, revoked sql.NullInt64
 	var by sql.NullString
@@ -232,32 +231,32 @@ func scanToken(sc interface{ Scan(...any) error }, now int64) (TokenInfo, error)
 	if by.Valid {
 		t.By = &by.String
 	}
-	t.State = tokenState(uses, until, revoked, now)
+	t.State = inviteState(uses, until, revoked, now)
 	return t, nil
 }
 
-func (s *Store) CreateToken(space string, spec TokenSpec) (info TokenInfo, token string, err error) {
-	token = names.RandomToken("at_")
+func (s *Store) CreateInvite(space string, spec InviteSpec) (info Invite, token string, err error) {
+	token = names.RandomToken("inv_")
 	now := NowMs()
 	err = s.withSpace(space, func(tx *sql.Tx) error {
 		var n int
-		tx.QueryRow(`SELECT count(*) FROM tokens`).Scan(&n)
-		if n >= MaxTokens {
-			return apierr.Quota("space_quota_exceeded", "This space has as many invites as it may hold. Revoke old ones first.", MaxTokens, int64(n))
+		tx.QueryRow(`SELECT count(*) FROM invites`).Scan(&n)
+		if n >= MaxInvites {
+			return apierr.Quota("space_quota_exceeded", "This space has as many invites as it may hold. Revoke old ones first.", MaxInvites, int64(n))
 		}
-		id := names.NewTokenID()
-		if _, err := tx.Exec(`INSERT INTO tokens (id, hash, label, access, uses_left, until, grant_for, created_at, minted_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id := names.NewInviteID()
+		if _, err := tx.Exec(`INSERT INTO invites (id, hash, label, access, uses_left, until, grant_for, created_at, minted_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, names.HashSecret(token), spec.Label, spec.Access.String(), spec.Uses, spec.Until, spec.GrantFor, now, spec.By); err != nil {
 			return err
 		}
-		info, err = scanToken(tx.QueryRow(`SELECT `+tokenCols+` FROM tokens t WHERE id = ?`, id), now)
+		info, err = scanInvite(tx.QueryRow(`SELECT `+inviteCols+` FROM invites t WHERE id = ?`, id), now)
 		return err
 	})
 	return info, token, err
 }
 
-// ListTokens lists a space's tokens; with by, only those that visitor minted.
-func (s *Store) ListTokens(space, by string) ([]TokenInfo, error) {
+// ListInvites lists a space's invites; with by, only those that visitor minted.
+func (s *Store) ListInvites(space, by string) ([]Invite, error) {
 	sp, err := s.Acquire(space)
 	if err != nil {
 		return nil, err
@@ -266,15 +265,15 @@ func (s *Store) ListTokens(space, by string) ([]TokenInfo, error) {
 		return nil, apierr.NoSpace
 	}
 	defer s.Release(sp)
-	rows, err := sp.db.Query(`SELECT `+tokenCols+` FROM tokens t WHERE ? = '' OR t.minted_by = ? ORDER BY created_at`, by, by)
+	rows, err := sp.db.Query(`SELECT `+inviteCols+` FROM invites t WHERE ? = '' OR t.minted_by = ? ORDER BY created_at`, by, by)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	now := NowMs()
-	out := []TokenInfo{}
+	out := []Invite{}
 	for rows.Next() {
-		t, err := scanToken(rows, now)
+		t, err := scanInvite(rows, now)
 		if err != nil {
 			return nil, err
 		}
@@ -283,54 +282,54 @@ func (s *Store) ListTokens(space, by string) ([]TokenInfo, error) {
 	return out, rows.Err()
 }
 
-// TokenChange changes how long and how often a token can still be redeemed.
-type TokenChange struct {
+// InviteChange changes how long and how often an invite can still be redeemed.
+type InviteChange struct {
 	SetUses  bool
 	Uses     *int64 // nil: no limit
 	SetUntil bool
 	Until    *int64 // nil: no end
 }
 
-var tokenNotFound = &apierr.Error{Status: 404, Code: "not_found", Message: "No such invite in this space."}
+var inviteNotFound = &apierr.Error{Status: 404, Code: "not_found", Message: "No such invite in this space."}
 
-// UpdateToken changes a token; with by, only one that visitor minted.
-func (s *Store) UpdateToken(space, id, by string, ch TokenChange) (info TokenInfo, err error) {
+// UpdateInvite changes an invite; with by, only one that visitor minted.
+func (s *Store) UpdateInvite(space, id, by string, ch InviteChange) (info Invite, err error) {
 	now := NowMs()
 	err = s.withSpace(space, func(tx *sql.Tx) error {
 		var exists int
-		if tx.QueryRow(`SELECT 1 FROM tokens WHERE id = ? AND (? = '' OR minted_by = ?)`, id, by, by).Scan(&exists) != nil {
-			return tokenNotFound
+		if tx.QueryRow(`SELECT 1 FROM invites WHERE id = ? AND (? = '' OR minted_by = ?)`, id, by, by).Scan(&exists) != nil {
+			return inviteNotFound
 		}
 		if ch.SetUses {
 			var ended any
 			if ch.Uses != nil && *ch.Uses <= 0 {
 				ended = now
 			}
-			if _, err := tx.Exec(`UPDATE tokens SET uses_left = ?, ended_at = ? WHERE id = ?`, ch.Uses, ended, id); err != nil {
+			if _, err := tx.Exec(`UPDATE invites SET uses_left = ?, ended_at = ? WHERE id = ?`, ch.Uses, ended, id); err != nil {
 				return err
 			}
 		}
 		if ch.SetUntil {
-			if _, err := tx.Exec(`UPDATE tokens SET until = ? WHERE id = ?`, ch.Until, id); err != nil {
+			if _, err := tx.Exec(`UPDATE invites SET until = ? WHERE id = ?`, ch.Until, id); err != nil {
 				return err
 			}
 		}
-		info, err = scanToken(tx.QueryRow(`SELECT `+tokenCols+` FROM tokens t WHERE id = ?`, id), now)
+		info, err = scanInvite(tx.QueryRow(`SELECT `+inviteCols+` FROM invites t WHERE id = ?`, id), now)
 		return err
 	})
 	return info, err
 }
 
-// DeleteToken revokes an invite and every grant redeemed from it. With by,
-// only a token that visitor minted.
-func (s *Store) DeleteToken(space, id, by string) error {
+// DeleteInvite revokes an invite and every grant redeemed from it. With by,
+// only an invite that visitor minted.
+func (s *Store) DeleteInvite(space, id, by string) error {
 	return s.withSpace(space, func(tx *sql.Tx) error {
-		res, err := tx.Exec(`DELETE FROM tokens WHERE id = ? AND (? = '' OR minted_by = ?)`, id, by, by)
+		res, err := tx.Exec(`DELETE FROM invites WHERE id = ? AND (? = '' OR minted_by = ?)`, id, by, by)
 		if err != nil {
 			return err
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			return tokenNotFound
+			return inviteNotFound
 		}
 		_, err = tx.Exec(`DELETE FROM grants WHERE source = ?`, id)
 		return err
@@ -358,7 +357,7 @@ type Joined struct {
 	Until  *int64
 }
 
-// Redeem turns an invite or the owner token into a grant for visitor. Every
+// Redeem turns an invite into a grant for visitor. Every
 // failure is InviteInvalid, so the answer never tells which part was wrong.
 // Redeeming again uses nothing.
 func (s *Store) Redeem(space, visitor, token string) (j Joined, err error) {
@@ -367,20 +366,11 @@ func (s *Store) Redeem(space, visitor, token string) (j Joined, err error) {
 	err = s.withSpace(space, func(tx *sql.Tx) error {
 		source, level := "", access.None
 		var gUntil *int64
-		if names.OwnerTokenRe.MatchString(token) {
-			m, err := readMeta(tx)
-			if err != nil {
-				return err
-			}
-			if m.ownerHash == "" || subtle.ConstantTimeCompare([]byte(hash), []byte(m.ownerHash)) != 1 {
-				return apierr.InviteInvalid
-			}
-			source, level = "owner-token", access.Owner
-		} else {
+		{
 			var lv string
 			var uses, until, grantFor, revoked sql.NullInt64
 			var by sql.NullString
-			err := tx.QueryRow(`SELECT id, access, uses_left, until, grant_for, revoked_at, minted_by FROM tokens WHERE hash = ?`, hash).
+			err := tx.QueryRow(`SELECT id, access, uses_left, until, grant_for, revoked_at, minted_by FROM invites WHERE hash = ?`, hash).
 				Scan(&source, &lv, &uses, &until, &grantFor, &revoked, &by)
 			if errors.Is(err, sql.ErrNoRows) {
 				return apierr.InviteInvalid
@@ -393,18 +383,16 @@ func (s *Store) Redeem(space, visitor, token string) (j Joined, err error) {
 			if tx.QueryRow(`SELECT 1 FROM grants WHERE visitor = ? AND source = ?`, visitor, source).Scan(&have) == nil {
 				source = "" // already redeemed: nothing to add
 			} else {
-				if tokenState(uses, until, revoked, now) != "active" {
+				if inviteState(uses, until, revoked, now) != "active" {
 					return apierr.InviteInvalid
 				}
 				// An invite works only while its minter could still mint it.
-				if by.Valid {
-					r, err := rightsTx(tx, by.String, now)
-					if err != nil {
-						return err
-					}
-					if !r.CanInvite() || !r.CanGive(level) {
-						return apierr.InviteInvalid
-					}
+				r, err := rightsTx(tx, by.String, now)
+				if err != nil {
+					return err
+				}
+				if !r.CanInvite() || !r.CanGive(level) {
+					return apierr.InviteInvalid
 				}
 				if grantFor.Valid {
 					u := now + grantFor.Int64
@@ -416,11 +404,11 @@ func (s *Store) Redeem(space, visitor, token string) (j Joined, err error) {
 					if left <= 0 {
 						ended = now
 					}
-					if _, err := tx.Exec(`UPDATE tokens SET uses_left = ?, ended_at = ? WHERE id = ?`, left, ended, source); err != nil {
+					if _, err := tx.Exec(`UPDATE invites SET uses_left = ?, ended_at = ? WHERE id = ?`, left, ended, source); err != nil {
 						return err
 					}
 				}
-				if _, err := tx.Exec(`UPDATE tokens SET last_redeemed_at = ? WHERE id = ?`, now, source); err != nil {
+				if _, err := tx.Exec(`UPDATE invites SET last_redeemed_at = ? WHERE id = ?`, now, source); err != nil {
 					return err
 				}
 			}
@@ -463,7 +451,7 @@ func (s *Store) Members(space string, bans bool) ([]Member, error) {
 	defer s.Release(sp)
 	now := NowMs()
 	rows, err := sp.db.Query(`SELECT g.visitor, g.access, g.until, g.created_at, g.last_used_at, t.minted_by, t.label
-		FROM grants g LEFT JOIN tokens t ON t.id = g.source
+		FROM grants g LEFT JOIN invites t ON t.id = g.source
 		WHERE g.until IS NULL OR g.until > ? ORDER BY g.created_at`, now)
 	if err != nil {
 		return nil, err
@@ -636,7 +624,7 @@ func rightsTx(tx *sql.Tx, visitor string, now int64) (*access.Rights, error) {
 // already redeemed from them stay.
 func revokeUngivable(tx *sql.Tx) error {
 	now := NowMs()
-	rows, err := tx.Query(`SELECT id, minted_by, access FROM tokens WHERE minted_by IS NOT NULL AND revoked_at IS NULL
+	rows, err := tx.Query(`SELECT id, minted_by, access FROM invites WHERE revoked_at IS NULL
 		AND (uses_left IS NULL OR uses_left > 0) AND (until IS NULL OR until > ?)`, now)
 	if err != nil {
 		return err
@@ -661,7 +649,7 @@ func revokeUngivable(tx *sql.Tx) error {
 		if r.CanInvite() && r.CanGive(l) {
 			continue
 		}
-		if _, err := tx.Exec(`UPDATE tokens SET revoked_at = ? WHERE id = ?`, now, t.id); err != nil {
+		if _, err := tx.Exec(`UPDATE invites SET revoked_at = ? WHERE id = ?`, now, t.id); err != nil {
 			return err
 		}
 	}
@@ -696,27 +684,11 @@ func (s *Store) Settings(space string) (access.Settings, error) {
 	return r.Settings, nil
 }
 
-// RotateOwner replaces the owner token and removes owner grants that came
-// from the old one, except keep's. It returns the new token.
-func (s *Store) RotateOwner(space, keep string) (string, error) {
-	token := names.RandomToken("ot_")
-	err := s.withSpace(space, func(tx *sql.Tx) error {
-		if err := setMeta(tx, "owner_hash", names.HashSecret(token)); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM grants WHERE source = 'owner-token' AND visitor <> ?`, keep); err != nil {
-			return err
-		}
-		return revokeUngivable(tx)
-	})
-	return token, err
-}
-
-// pruneAccess removes grants past their end, and tokens that can't be
+// pruneAccess removes grants past their end, and invites that can't be
 // redeemed, have no grants left, and ended over 30 days ago.
 func (s *Store) pruneAccess(space string) error {
 	now := NowMs()
-	cut := now - deadTokenKeep.Milliseconds()
+	cut := now - deadInviteKeep.Milliseconds()
 	err := s.withSpace(space, func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`DELETE FROM grants WHERE until IS NOT NULL AND until <= ?`, now); err != nil {
 			return err
@@ -724,7 +696,7 @@ func (s *Store) pruneAccess(space string) error {
 		if err := revokeUngivable(tx); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`DELETE FROM tokens WHERE NOT EXISTS (SELECT 1 FROM grants g WHERE g.source = tokens.id)
+		_, err := tx.Exec(`DELETE FROM invites WHERE NOT EXISTS (SELECT 1 FROM grants g WHERE g.source = invites.id)
 			AND ((uses_left IS NOT NULL AND uses_left <= 0 AND coalesce(ended_at, 0) < ?) OR (until IS NOT NULL AND until < ?)
 			OR (revoked_at IS NOT NULL AND revoked_at < ?))`, cut, cut, cut)
 		return err

@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -75,6 +76,7 @@ type Config struct {
 		DataDir        string   `toml:"data_dir"`
 		TrustedProxies []string `toml:"trusted_proxies"`
 		RateLimits     *bool    `toml:"rate_limits"`
+		PublicURL      string   `toml:"public_url"`
 	} `toml:"server"`
 	Retention struct {
 		VisitorIdleTTL      Duration `toml:"visitor_idle_ttl"`
@@ -171,6 +173,13 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	} else {
 		c.Server.Listen = l
+	}
+	if u := c.Server.PublicURL; u != "" {
+		pu, err := url.Parse(u)
+		if err != nil || (pu.Scheme != "https" && pu.Scheme != "http") || pu.Host == "" || strings.Trim(pu.Path, "/") != "" || pu.RawQuery != "" {
+			return nil, fmt.Errorf("config %s: public_url is the server's origin, like \"https://cubby.example.com\"", path)
+		}
+		c.Server.PublicURL = pu.Scheme + "://" + pu.Host
 	}
 	for _, p := range c.Server.TrustedProxies {
 		if !strings.Contains(p, "/") {

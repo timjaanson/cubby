@@ -2,7 +2,7 @@
 const S = process.env.S
 const { kv, createSpace, KvError } = await import(process.env.MOD)
 const assert = (c, m) => { if (!c) { console.error("FAIL:", m); process.exit(1) } }
-const opt = (k, extra = {}) => ({ server: S, tokenKey: k, ...extra })
+const opt = (k, extra = {}) => ({ server: S, keyName: k, ...extra })
 
 const { space } = await createSpace({ label: "quiz", anyone: "post", ...opt("host") })
 for (const live of [false, true]) {

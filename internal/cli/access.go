@@ -23,7 +23,9 @@ func (c *client) call(method, path string, body any, want int, out any) error {
 	if body != nil {
 		b, _ = json.Marshal(body)
 	}
-	resp, rb, err := c.do(method, path, b, reqOpts{})
+	// Everything here acts as someone, except reading limits and the time.
+	needToken := !strings.HasPrefix(path, "/v1/limits") && !strings.HasPrefix(path, "/v1/time")
+	resp, rb, err := c.do(method, path, b, reqOpts{needToken: needToken})
 	if err != nil {
 		return err
 	}
@@ -55,14 +57,14 @@ func settingsFlags(f *flags, body map[string]any) error {
 	return nil
 }
 
-// inviteToken takes a token, or a link with t=TOKEN in its fragment.
-func inviteToken(s string) string {
-	if strings.HasPrefix(s, "at_") || strings.HasPrefix(s, "ot_") {
+// inviteArg takes an invite, or a link with invite=INVITE in its fragment.
+func inviteArg(s string) string {
+	if strings.HasPrefix(s, "inv_") {
 		return s
 	}
 	if _, frag, ok := strings.Cut(s, "#"); ok {
-		if q, err := url.ParseQuery(frag); err == nil && q.Get("t") != "" {
-			return q.Get("t")
+		if q, err := url.ParseQuery(frag); err == nil && q.Get("invite") != "" {
+			return q.Get("invite")
 		}
 	}
 	return s
@@ -77,17 +79,16 @@ func fmtTime(ms *int64) string {
 
 func (c *client) join(f *flags) error {
 	if len(f.args) != 2 {
-		return usageCli("join takes a space and a token or link")
+		return usageCli("join takes a space and an invite or link")
 	}
 	space, err := spaceArg(f.args[0])
 	if err != nil {
 		return err
 	}
-	var out struct{ ID, Token, Access string }
-	if err := c.call("POST", "/v1/"+space+"/join", map[string]string{"token": inviteToken(f.args[1])}, 200, &out); err != nil {
+	var out struct{ ID, Access string }
+	if err := c.call("POST", "/v1/"+space+"/join", map[string]string{"invite": inviteArg(f.args[1])}, 200, &out); err != nil {
 		return err
 	}
-	c.adopt(out.Token, out.ID)
 	fmt.Println(out.Access)
 	return nil
 }
@@ -154,22 +155,6 @@ func (c *client) drop(f *flags) error {
 	return c.call("DELETE", "/v1/"+space, nil, 200, nil)
 }
 
-func (c *client) ownerToken(f *flags) error {
-	if len(f.args) != 1 {
-		return usageCli("owner-token takes a space")
-	}
-	space, err := spaceArg(f.args[0])
-	if err != nil {
-		return err
-	}
-	var out struct{ OwnerToken string }
-	if err := c.call("POST", "/v1/"+space+"/owner-token", nil, 200, &out); err != nil {
-		return err
-	}
-	fmt.Println(out.OwnerToken)
-	return nil
-}
-
 // limitFlags reads --uses and --until: "unlimited" and "never" are null.
 func limitFlags(f *flags, body map[string]any) error {
 	if f.has("uses") {
@@ -191,20 +176,20 @@ func limitFlags(f *flags, body map[string]any) error {
 	return nil
 }
 
-func (c *client) tokenCmd(f *flags) error {
+func (c *client) inviteCmd(f *flags) error {
 	if len(f.args) < 2 {
-		return usageCli("token new|ls|set|rm <space> ...")
+		return usageCli("invite new|ls|set|rm <space> ...")
 	}
 	sub := f.args[0]
 	space, err := spaceArg(f.args[1])
 	if err != nil {
 		return err
 	}
-	base := "/v1/" + space + "/tokens"
+	base := "/v1/" + space + "/invites"
 	switch sub {
 	case "new":
 		if len(f.args) != 2 {
-			return usageCli("token new takes a space")
+			return usageCli("invite new takes a space")
 		}
 		body := map[string]any{}
 		if f.has("access") {
@@ -219,7 +204,7 @@ func (c *client) tokenCmd(f *flags) error {
 		if err := limitFlags(f, body); err != nil {
 			return err
 		}
-		var out struct{ Token string }
+		var out struct{ Invite string }
 		if err := c.call("POST", base, body, 201, &out); err != nil {
 			return err
 		}
@@ -228,10 +213,10 @@ func (c *client) tokenCmd(f *flags) error {
 			if strings.Contains(l, "#") {
 				sep = "&"
 			}
-			fmt.Println(l + sep + "t=" + out.Token)
+			fmt.Println(l + sep + "invite=" + out.Invite)
 			return nil
 		}
-		fmt.Println(out.Token)
+		fmt.Println(out.Invite)
 		return nil
 	case "ls":
 		var out struct {
@@ -258,23 +243,23 @@ func (c *client) tokenCmd(f *flags) error {
 		return nil
 	case "set":
 		if len(f.args) != 3 {
-			return usageCli("token set takes a space and a token ID")
+			return usageCli("invite set takes a space and a token ID")
 		}
 		body := map[string]any{}
 		if err := limitFlags(f, body); err != nil {
 			return err
 		}
 		if len(body) == 0 {
-			return usageCli("token set needs --uses or --until")
+			return usageCli("invite set needs --uses or --until")
 		}
 		return c.call("PATCH", base+"/"+url.PathEscape(f.args[2]), body, 200, nil)
 	case "rm":
 		if len(f.args) != 3 {
-			return usageCli("token rm takes a space and a token ID")
+			return usageCli("invite rm takes a space and a token ID")
 		}
 		return c.call("DELETE", base+"/"+url.PathEscape(f.args[2]), nil, 200, nil)
 	}
-	return usageCli("token new|ls|set|rm <space> ...")
+	return usageCli("invite new|ls|set|rm <space> ...")
 }
 
 func (c *client) memberCmd(f *flags) error {

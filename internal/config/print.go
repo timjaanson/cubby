@@ -26,6 +26,14 @@ func (c *Config) TOML(def *Config, dataDirNote string) string {
 		w.comment(dataDirNote)
 		w.line(`# data_dir = "/var/lib/cubby"`)
 	}
+	if c.Server.PublicURL != "" {
+		w.set("public_url", quote(c.Server.PublicURL), "",
+			"The origin clients reach the server at. Tokens are signed for it (their aud).")
+	} else {
+		w.comment("The origin clients reach the server at; tokens are signed for it (their aud).")
+		w.comment("Unset, it's the origin each request came in on: Host, or X-Forwarded-Host and -Proto from a trusted proxy.")
+		w.line(`# public_url = "https://cubby.example.com"`)
+	}
 	w.set("trusted_proxies", list(c.Server.TrustedProxies), list(def.Server.TrustedProxies),
 		"Proxies whose X-Forwarded-For header to believe for the client's IP.")
 	w.set("rate_limits", strconv.FormatBool(c.RateLimitsOn()), strconv.FormatBool(def.RateLimitsOn()),

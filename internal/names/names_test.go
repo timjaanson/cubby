@@ -130,42 +130,38 @@ func TestSpaceNameIsFileSafe(t *testing.T) {
 	}
 }
 
-func TestTokenShapes(t *testing.T) {
-	if !VisitorTokenRe.MatchString(RandomToken("vt_")) || !AccessTokenRe.MatchString(RandomToken("at_")) || !OwnerTokenRe.MatchString(RandomToken("ot_")) {
-		t.Fatal("token shapes")
+func TestSecretShapes(t *testing.T) {
+	if !InviteRe.MatchString(RandomToken("inv_")) || !APIKeyRe.MatchString(RandomToken("cubby_")) || InviteRe.MatchString(RandomToken("cubby_")) {
+		t.Fatal("secret shapes")
 	}
-	if VisitorTokenRe.MatchString(RandomToken("at_")) {
-		t.Fatal("kinds mix")
-	}
-	if !ValidTokenID(NewTokenID()) || ValidTokenID(NewGrantID()) {
+	if !ValidInviteID(NewInviteID()) || ValidInviteID(NewGrantID()) || !ValidPairingID(NewPairingID()) || !ValidAPIKeyID(NewAPIKeyID()) {
 		t.Fatal("ids")
 	}
 }
 
-func TestLinkCodes(t *testing.T) {
+func TestPairingCodes(t *testing.T) {
 	seen := map[string]bool{}
-	for i := 0; i < 1000; i++ {
-		c := NewLinkCode()
-		if NormalizeLinkCode(c) != c || seen[c] {
+	for range 1000 {
+		c := NewPairingCode()
+		if NormalizePairingCode(c) != c || seen[c] {
 			t.Fatalf("code %q", c)
 		}
 		seen[c] = true
 	}
 	for in, want := range map[string]string{
-		"K7M2X-9Q4PA":   "lk_K7M2X9Q4PA",
-		" k7m2x 9q4pa ": "lk_K7M2X9Q4PA",
-		"LK_k7m2x9q4pa": "lk_K7M2X9Q4PA",
-		"OIL00-11111":   "lk_01100" + "11111",
+		"K7M2X-9Q4PA":   "K7M2X9Q4PA",
+		" k7m2x 9q4pa ": "K7M2X9Q4PA",
+		"OIL00-11111":   "01100" + "11111",
 		"K7M2X-9Q4P":    "",
 		"K7M2X-9Q4PAU":  "",
 		"K7M2X-9Q4PU":   "",
 		"":              "",
 	} {
-		if got := NormalizeLinkCode(in); got != want {
-			t.Errorf("NormalizeLinkCode(%q) = %q, want %q", in, got, want)
+		if got := NormalizePairingCode(in); got != want {
+			t.Errorf("NormalizePairingCode(%q) = %q, want %q", in, got, want)
 		}
 	}
-	if d := DisplayLinkCode("lk_K7M2X9Q4PA"); d != "K7M2X-9Q4PA" {
+	if d := DisplayPairingCode("K7M2X9Q4PA"); d != "K7M2X-9Q4PA" {
 		t.Fatal(d)
 	}
 }

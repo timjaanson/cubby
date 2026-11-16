@@ -88,10 +88,6 @@ func TestToAndInbox(t *testing.T) {
 	if _, _, body := c.req("GET", sp+"/by/"+bobID+"/name", ""); body != `"Bob"` {
 		t.Fatalf("by/me: %s", body)
 	}
-	// users/ is gone, with a pointer.
-	if s, _, body := c.req("GET", sp+"/users/me/name", "", b...); s != 404 || !strings.Contains(body, "by/") {
-		t.Fatalf("users/: %d %s", s, body)
-	}
 	// The inbox is read and delete only.
 	if s, _, _ := c.req("PUT", sp+"/inbox/"+bobID+"/message", `1`, a...); s != 405 {
 		t.Fatalf("PUT inbox: %d", s)
@@ -320,7 +316,7 @@ func TestBanBlocksJoin(t *testing.T) {
 	_, link := c.mint(own.Space, own.Token, `{"uses":null}`)
 	_, bobTok, _ := c.join(own.Space, link, "")
 	var who struct{ ID string }
-	_, _, body := c.req("GET", "/v1/whoami", "", bearer(bobTok)...)
+	_, _, body := c.req("GET", "/v1/me", "", bearer(bobTok)...)
 	json.Unmarshal([]byte(body), &who)
 
 	// A banned member can't rejoin, and their own invites end.

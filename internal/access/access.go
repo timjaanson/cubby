@@ -166,15 +166,21 @@ type Rights struct {
 	// lasts.
 	Banned      bool
 	BannedUntil int64 // ms, 0 for no end
+	// Cap, when set, is the most this request may do: an API key's level.
+	Cap *Level
 }
 
 // Level is what the visitor may do: their membership or the anyone level,
-// whichever is higher, unless banned.
+// whichever is higher, unless banned, and never above Cap.
 func (r *Rights) Level() Level {
 	if r.Banned {
 		return Banned
 	}
-	return max(r.Member, r.Settings.Anyone)
+	l := max(r.Member, r.Settings.Anyone)
+	if r.Cap != nil {
+		l = min(l, *r.Cap)
+	}
+	return l
 }
 
 func (r *Rights) Owner() bool { return r.Level() == Owner }
@@ -208,7 +214,7 @@ func (r *Rights) Allows(op Op) bool { return r.Level() >= op.Need() }
 // space's invite level or above. The anyone level doesn't count, so
 // strangers in an open space can't fill it with tokens.
 func (r *Rights) CanInvite() bool {
-	return !r.Banned && r.Member >= Read && r.Member >= r.Settings.Invite
+	return !r.Banned && r.Cap == nil && r.Member >= Read && r.Member >= r.Settings.Invite
 }
 
 // CanGive reports whether this visitor may hand out level l: owners any,

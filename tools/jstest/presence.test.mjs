@@ -11,15 +11,15 @@ const until = async (f, m, ms = 4000) => {
 const sockets = []
 class TrackedWS extends WebSocket { constructor(u) { super(u); sockets.push(this) } }
 
-const { space } = await createSpace({ server: S, tokenKey: "w-owner", anyone: "all" })
-const watcher = kv(space, { server: S, tokenKey: "w-watch", live: true })
+const { space } = await createSpace({ server: S, keyName: "w-owner", anyone: "all" })
+const watcher = kv(space, { server: S, keyName: "w-watch", live: true })
 const heard = []
 watcher.by.onPulse("here", p => heard.push(p))
 await sleep(200)
 
 // A will fires when the socket dies, and is registered again after a reconnect.
 {
-  const a = kv(space, { server: S, tokenKey: "w-a", live: true, WebSocket: TrackedWS })
+  const a = kv(space, { server: S, keyName: "w-a", live: true, WebSocket: TrackedWS })
   await a.shared.get("x")
   await until(() => a.live.status === "open", "socket")
   const clear = await a.mine.will("here", { left: true })
@@ -42,17 +42,17 @@ await sleep(200)
   await sleep(500)
   assert(!heard.some(p => p.value?.left), "cleared will doesn't fire")
   // Errors surface at registration.
-  const other = await kv(space, { server: S, tokenKey: "w-b" }).id()
+  const other = await kv(space, { server: S, keyName: "w-b" }).id()
   const err = await a.by(other).will("here", 1).catch(e => e)
   assert(err?.code === "not_yours", "will into another's area " + err?.code)
   // Over HTTP it's a no-op.
-  const h = kv(space, { server: S, tokenKey: "w-http" })
+  const h = kv(space, { server: S, keyName: "w-http" })
   assert(typeof await h.mine.will("here", { left: true }) === "function", "http will is a no-op")
 }
 
 // Presence: join, value changes, a closed tab leaves through its will.
 {
-  const mk = (name, extra = {}) => kv(space, { server: S, tokenKey: "p-" + name, live: true, ...extra })
+  const mk = (name, extra = {}) => kv(space, { server: S, keyName: "p-" + name, live: true, ...extra })
   const a = mk("a", { WebSocket: TrackedWS }), b = mk("b")
   const pa = a.presence("room", { value: { name: "A" } })
   const pb = b.presence("room", { value: { name: "B" } })
@@ -79,7 +79,7 @@ await sleep(200)
 {
   let cut = false
   const cuttable = (url, o) => cut && o?.method === "POST" ? Promise.reject(new Error("offline")) : fetch(url, o)
-  const a = kv(space, { server: S, tokenKey: "h-a", fetch: cuttable }), b = kv(space, { server: S, tokenKey: "h-b" })
+  const a = kv(space, { server: S, keyName: "h-a", fetch: cuttable }), b = kv(space, { server: S, keyName: "h-b" })
   const pa = a.presence("hall", { value: 1, interval: 200, onError: () => {} })
   const pb = b.presence("hall", { value: 2, interval: 200 })
   await until(() => pb.peers.size === 1 && pa.peers.size === 1, "http presence")

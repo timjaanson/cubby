@@ -14,13 +14,12 @@ import (
 // CreateSpace makes a new empty space owned by the visitor. With name it
 // takes exactly that name, which the caller has validated, and fails with
 // space_exists if it's taken; otherwise it generates one from label. It
-// returns the name and the owner token, which is stored only as a hash.
-func (s *Store) CreateSpace(name, label string, settings access.Settings, owner string) (string, string, error) {
+// returns the name. owner gets the owner grant.
+func (s *Store) CreateSpace(name, label string, settings access.Settings, owner string) (string, error) {
 	if s.SpaceCount() >= s.cfg.Limits.MaxSpaces {
-		return "", "", apierr.ServerFull
+		return "", apierr.ServerFull
 	}
-	ownerToken := names.RandomToken("ot_")
-	ns := &newSpace{settings: settings, ownerHash: names.HashSecret(ownerToken), owner: owner}
+	ns := &newSpace{settings: settings, owner: owner}
 	fixed := name != ""
 	for range 10 {
 		if !fixed {
@@ -28,24 +27,24 @@ func (s *Store) CreateSpace(name, label string, settings access.Settings, owner 
 		}
 		if s.SpaceExists(name) {
 			if fixed {
-				return "", "", apierr.SpaceExists(name)
+				return "", apierr.SpaceExists(name)
 			}
 			continue
 		}
 		sp, created, err := s.acquire(name, ns)
 		if err != nil {
-			return "", "", err
+			return "", err
 		}
 		s.Release(sp)
 		if created {
 			s.noteVisitorSpace(owner, name)
-			return name, ownerToken, nil
+			return name, nil
 		}
 		if fixed {
-			return "", "", apierr.SpaceExists(name) // lost a race with another request
+			return "", apierr.SpaceExists(name) // lost a race with another request
 		}
 	}
-	return "", "", errors.New("could not generate a free name")
+	return "", errors.New("could not generate a free name")
 }
 
 // deleteSpace removes a space's file. Its counter is remembered, so a space
@@ -84,6 +83,7 @@ func (s *Store) DeleteSpace(name string) error {
 
 		s.srv.Exec(`INSERT INTO graveyard (name, seq) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET seq = max(seq, excluded.seq)`, name, m.seq)
 		s.srv.Exec(`DELETE FROM visitor_spaces WHERE space = ?`, name)
+		s.dropSpaceAPIKeys(name)
 		s.cacheMu.Lock()
 		s.vbytes = map[string]int64{}
 		for k := range s.vspaces {

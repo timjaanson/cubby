@@ -104,10 +104,10 @@ func (c *client) parsePath(s string) (kvPath, error) {
 }
 
 func (c *client) visitorID() (string, error) {
-	if c.envToken == "" && c.sc.ID != "" && c.sc.Token != "" {
-		return c.sc.ID, nil
+	if c.apiKey == "" && c.dc != nil && c.dc.Visitor != "" {
+		return c.dc.Visitor, nil
 	}
-	resp, b, err := c.do("GET", "/v1/whoami", nil, reqOpts{needToken: true})
+	resp, b, err := c.do("GET", "/v1/me", nil, reqOpts{needToken: true})
 	if err != nil {
 		return "", err
 	}
@@ -116,9 +116,9 @@ func (c *client) visitorID() (string, error) {
 	}
 	var out struct{ ID string }
 	json.Unmarshal(b, &out)
-	if c.envToken == "" {
-		c.sc.ID = out.ID
-		c.creds.save()
+	if c.dc != nil && c.apiKey == "" {
+		c.dc.Visitor = out.ID
+		c.adopt(c.dc, c.signer)
 	}
 	return out.ID, nil
 }

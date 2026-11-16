@@ -13,7 +13,7 @@ const usage = `cubby: a key-value store over plain HTTP, server and client in on
 Server:
   cubby serve [-p PORT]           run the server, port 28229 unless told (see 'cubby help serve')
   cubby config [--defaults]       print the server config as TOML, to check it or start a file
-  cubby admin <command>           look after the server's data (spaces, export, delete, owner-token, stats, cleanup)
+  cubby admin <command>           look after the server's data (spaces, export, delete, owner, stats, cleanup)
 
 Client (talks to --server or $CUBBY_SERVER, default http://localhost:28229; a bare port means localhost):
   cubby new [label] [--anyone L]  create a space you own; private unless --anyone read|post|all
@@ -30,17 +30,23 @@ Client (talks to --server or $CUBBY_SERVER, default http://localhost:28229; a ba
   cubby limits [space]           show effective limits and usage
   cubby time                     estimate server clock offset and round trip
   cubby name [label]              make up a valid space name, no server needed
-  cubby whoami [--show-token] | url <path>
+  cubby whoami | url <path>
+
+Signing in (the first command that needs it makes this machine's key, ES256):
+  cubby token [--ttl 1h]                             print a token for curl: Bearer $(cubby token)
+  cubby device backup > backup.json                  a backup key: keep it in a password manager
+  cubby login <file | ->                             use a backup key or credentials file here
+  cubby api-key new <space> [--until 30d|never]      static key for webhooks and tools that can't sign
 
 Sharing (levels: read < post < all < owner; banned keeps someone out):
-  cubby token new <space> [--access L] [--link URL]  mint an invite: access all, 10 uses, 7 days
-  cubby join <space> <token or link>                 redeem an invite on this machine
-  cubby access <space> | settings <space> | token ls|set|rm | member ls|set|rm
-  cubby owner-token <space> | drop <space>
+  cubby invite new <space> [--access L] [--link URL] mint an invite: access all, 10 uses, 7 days
+  cubby join <space> <invite or link>                redeem an invite on this machine
+  cubby access <space> | settings <space> | invite ls|set|rm | member ls|set|rm
+  cubby drop <space>
 
-Your devices (this visitor on another machine, not sharing):
-  cubby device link [--ttl 10m]                      one-use code for another device, then wait
-  cubby device accept <code or link>                 become the visitor that made the code
+Your devices (your visitor on another machine, not sharing):
+  cubby device pair [--ttl 10m]                      one-use code for another device, then wait
+  cubby device accept <code or link>                 join the visitor that made the code
   cubby device ls | name <label> | rm <id> | rm --others
 
 Paths mirror the URL after /v1/:

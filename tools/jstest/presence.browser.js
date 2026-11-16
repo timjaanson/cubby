@@ -18,7 +18,7 @@ async page => {
   await tab.goto(base + '/health')
   const other = await tab.evaluate(async ([base, space]) => {
     const { kv } = await import(base + '/kv.js')
-    const db = kv(space, { server: base, live: true, tokenKey: 'second-tab-' + Date.now() })
+    const db = kv(space, { server: base, live: true, keyName: 'second-tab-' + Date.now() })
     window.here = db.presence('here', { value: { name: 'second tab' } })
     return db.id()
   }, [base, space])

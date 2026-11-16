@@ -15,14 +15,18 @@ import (
 
 	"github.com/timjaanson/cubby/internal/access"
 	"github.com/timjaanson/cubby/internal/apierr"
+	"github.com/timjaanson/cubby/internal/auth"
+	"github.com/timjaanson/cubby/internal/store"
 )
 
 type reqCtx struct {
 	w       http.ResponseWriter
 	r       *http.Request
-	ip      string // rate-limit key: the IPv4 address or the IPv6 /64
-	visitor string // "" when no valid token was sent
-	device  string // the device of that token
+	ip      string        // rate-limit key: the IPv4 address or the IPv6 /64
+	visitor string        // "" when no valid credential was sent
+	device  string        // the device that signed the token, or minted the API key
+	apiKey  *store.APIKey // set when the credential was an API key
+	token   *auth.Token   // the parsed token, also when its key is unknown
 	tokErr  *apierr.Error
 	status  int
 
@@ -65,6 +69,9 @@ func (c *reqCtx) fail(err error) {
 	if ae.Status == 405 {
 		c.header().Set("Allow", fmt.Sprint(ae.Extra["allow"]))
 	}
+	if ae.Status == 401 {
+		c.header().Set("WWW-Authenticate", wwwAuthenticate(ae))
+	}
 	c.json(ae.Status, body)
 }
 
@@ -93,13 +100,18 @@ func (c *reqCtx) needVisitor() (string, error) {
 	return "", apierr.MissingToken
 }
 
-func (s *Server) clientIP(r *http.Request) netip.Addr {
+// remoteAddr is the address of whoever connected: the client, or a proxy.
+func remoteAddr(r *http.Request) netip.Addr {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
 	addr, _ := netip.ParseAddr(host)
-	addr = addr.Unmap()
+	return addr.Unmap()
+}
+
+func (s *Server) clientIP(r *http.Request) netip.Addr {
+	addr := remoteAddr(r)
 	if !s.trusted(addr) {
 		return addr
 	}

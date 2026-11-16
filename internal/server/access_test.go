@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"github.com/timjaanson/cubby/internal/auth"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,31 +14,26 @@ import (
 func bearer(tok string) []string { return []string{"Authorization", "Bearer " + tok} }
 
 // mint makes an invite as the owner and returns it.
-func (c *tc) mint(space, ownerTok, body string) (id, token string) {
+func (c *tc) mint(space, ownerTok, body string) (id, invite string) {
 	c.t.Helper()
-	s, _, b := c.req("POST", "/v1/"+space+"/tokens", body, bearer(ownerTok)...)
-	var out struct{ ID, Token string }
+	s, _, b := c.req("POST", "/v1/"+space+"/invites", body, bearer(ownerTok)...)
+	var out struct{ ID, Invite string }
 	json.Unmarshal([]byte(b), &out)
-	if s != 201 || !strings.HasPrefix(out.Token, "at_") {
+	if s != 201 || !strings.HasPrefix(out.Invite, "inv_") {
 		c.t.Fatalf("mint %s: %d %s", body, s, b)
 	}
-	return out.ID, out.Token
+	return out.ID, out.Invite
 }
 
-// join redeems token as tok, or as a new visitor, and returns the visitor token.
-func (c *tc) join(space, token, tok string) (int, string, string) {
+// join redeems invite as tok, or as a new visitor, and returns that
+// visitor's token.
+func (c *tc) join(space, invite, tok string) (int, string, string) {
 	c.t.Helper()
-	var hdr []string
-	if tok != "" {
-		hdr = bearer(tok)
+	if tok == "" {
+		tok, _ = c.anon()
 	}
-	s, _, b := c.req("POST", "/v1/"+space+"/join", `{"token":"`+token+`"}`, hdr...)
-	var out struct{ Token string }
-	json.Unmarshal([]byte(b), &out)
-	if out.Token == "" {
-		out.Token = tok
-	}
-	return s, out.Token, b
+	s, _, b := c.req("POST", "/v1/"+space+"/join", `{"invite":"`+invite+`"}`, bearer(tok)...)
+	return s, tok, b
 }
 
 func TestPrivateByDefault(t *testing.T) {
@@ -60,7 +56,7 @@ func TestPrivateByDefault(t *testing.T) {
 	for _, r := range []struct{ method, path, body string }{
 		{"GET", "/shared/k", ""}, {"GET", "/shared/*", ""}, {"GET", "/shared/*/watch?version=0", ""},
 		{"PUT", "/shared/k", "x"}, {"GET", "/to/me/k", ""}, {"GET", "/by/*/k", ""}, {"GET", "/shared/k/series", ""},
-		{"GET", "/access", ""}, {"GET", "/tokens", ""}, {"PATCH", "", `{"anyone":"all"}`}, {"DELETE", "", ""},
+		{"GET", "/access", ""}, {"GET", "/invites", ""}, {"PATCH", "", `{"anyone":"all"}`}, {"DELETE", "", ""},
 	} {
 		for _, who := range [][]string{nil, bearer(stranger)} {
 			s1, h1, b1 := c.req(r.method, sp+r.path, r.body, who...)
@@ -79,8 +75,8 @@ func TestPrivateByDefault(t *testing.T) {
 		t.Error("no_space message doesn't name both causes")
 	}
 	// A failed join looks the same for both.
-	_, _, b1 := c.join(own.Space, "at_"+strings.Repeat("a", 43), stranger)
-	_, _, b2 := c.join("gone-cedar-pilot-mango-frost", "at_"+strings.Repeat("a", 43), stranger)
+	_, _, b1 := c.join(own.Space, "inv_"+strings.Repeat("a", 43), stranger)
+	_, _, b2 := c.join("gone-cedar-pilot-mango-frost", "inv_"+strings.Repeat("a", 43), stranger)
 	if errCode(b1) != "invite_invalid" || b1 != b2 {
 		t.Fatalf("join: %s / %s", b1, b2)
 	}
@@ -126,7 +122,7 @@ func TestAnyoneLevels(t *testing.T) {
 			t.Errorf("%s access: %s", k.anyone, b)
 		}
 		// Strangers neither invite nor list members, whatever the anyone level.
-		if s, _, _ := c.req("POST", sp+"/tokens", ``, bearer(stranger)...); s != 403 {
+		if s, _, _ := c.req("POST", sp+"/invites", ``, bearer(stranger)...); s != 403 {
 			t.Errorf("%s stranger invites: %d", k.anyone, s)
 		}
 		if s, _, b := c.req("GET", sp+"/members", ``, bearer(stranger)...); s != 403 || errCode(b) != "not_member" {
@@ -163,12 +159,12 @@ func TestInvites(t *testing.T) {
 	sp := "/v1/" + own.Space
 
 	// Defaults: access all, 10 uses, 7 days.
-	s, _, b := c.req("POST", sp+"/tokens", ``, bearer(own.Token)...)
+	s, _, b := c.req("POST", sp+"/invites", ``, bearer(own.Token)...)
 	var mint struct {
-		ID, Token, Access string
-		Uses              *int64
-		Until             *int64
-		GrantFor          *int64
+		ID, Invite, Access string
+		Uses               *int64
+		Until              *int64
+		GrantFor           *int64
 	}
 	json.Unmarshal([]byte(b), &mint)
 	week := time.Now().Add(7 * 24 * time.Hour).UnixMilli()
@@ -179,17 +175,17 @@ func TestInvites(t *testing.T) {
 	// Ten visitors join, the eleventh can't. Each is a new visitor.
 	var members []string
 	for i := range 10 {
-		s, vt, b := c.join(own.Space, mint.Token, "")
-		if s != 201 || !strings.HasPrefix(vt, "vt_") {
+		s, vt, b := c.join(own.Space, mint.Invite, "")
+		if s != 200 || vt == "" {
 			t.Fatalf("join %d: %d %s", i, s, b)
 		}
 		members = append(members, vt)
 	}
-	if s, _, b := c.join(own.Space, mint.Token, ""); s != 404 || errCode(b) != "invite_invalid" {
+	if s, _, b := c.join(own.Space, mint.Invite, ""); s != 404 || errCode(b) != "invite_invalid" {
 		t.Fatalf("11th: %d %s", s, b)
 	}
 	// Redeeming again is a no-op for the same visitor, even now it's used up.
-	if s, vt, b := c.join(own.Space, mint.Token, members[0]); s != 200 || vt != members[0] {
+	if s, vt, b := c.join(own.Space, mint.Invite, members[0]); s != 200 || vt != members[0] {
 		t.Fatalf("again: %d %s", s, b)
 	}
 	// Members read and write.
@@ -201,19 +197,19 @@ func TestInvites(t *testing.T) {
 		t.Fatalf("member read: %d", s)
 	}
 	// Unknown fields are refused instead of falling back to defaults.
-	if s, _, b := c.req("POST", sp+"/tokens", `{"use":1}`, bearer(own.Token)...); s != 400 || !strings.Contains(b, `"parameter":"use"`) {
+	if s, _, b := c.req("POST", sp+"/invites", `{"use":1}`, bearer(own.Token)...); s != 400 || !strings.Contains(b, `"parameter":"use"`) {
 		t.Fatalf("typo: %d %s", s, b)
 	}
 	for _, bad := range []string{`{"access":"editor"}`, `{"access":"owner"}`, `{"access":"banned"}`, `{"allow":"member"}`} {
-		if s, _, b := c.req("POST", sp+"/tokens", bad, bearer(own.Token)...); s != 400 {
+		if s, _, b := c.req("POST", sp+"/invites", bad, bearer(own.Token)...); s != 400 {
 			t.Fatalf("bad access %s: %d %s", bad, s, b)
 		}
 	}
 	// Members invite by default, and see only their own tokens.
-	if s, _, b := c.req("POST", sp+"/tokens", `{"label":"from member"}`, m...); s != 201 || !strings.Contains(b, `"access":"all"`) {
+	if s, _, b := c.req("POST", sp+"/invites", `{"label":"from member"}`, m...); s != 201 || !strings.Contains(b, `"access":"all"`) {
 		t.Fatalf("member mint: %d %s", s, b)
 	}
-	if _, _, b := c.req("GET", sp+"/tokens", "", m...); strings.Count(b, `"id"`) != 1 || !strings.Contains(b, "from member") {
+	if _, _, b := c.req("GET", sp+"/invites", "", m...); strings.Count(b, `"id"`) != 1 || !strings.Contains(b, "from member") {
 		t.Fatalf("member list: %s", b)
 	}
 	// Owner-only routes stay owner-only.
@@ -222,13 +218,13 @@ func TestInvites(t *testing.T) {
 	}
 
 	// The list shows state and grant counts, never token values.
-	_, _, b = c.req("GET", sp+"/tokens", "", bearer(own.Token)...)
+	_, _, b = c.req("GET", sp+"/invites", "", bearer(own.Token)...)
 	if !strings.Contains(b, `"state":"used_up"`) || !strings.Contains(b, `"members":10`) || strings.Contains(b, "at_") {
 		t.Fatalf("list: %s", b)
 	}
 
 	// Revoking the token removes its grants.
-	if s, _, _ := c.req("DELETE", sp+"/tokens/"+mint.ID, "", bearer(own.Token)...); s != 200 {
+	if s, _, _ := c.req("DELETE", sp+"/invites/"+mint.ID, "", bearer(own.Token)...); s != 200 {
 		t.Fatal("revoke")
 	}
 	if s, _, b := c.req("GET", sp+"/shared/item.1", "", m...); s != 404 || errCode(b) != "no_space" {
@@ -262,7 +258,7 @@ func TestGrantLifetimes(t *testing.T) {
 		t.Fatalf("grant past grantFor still works: %d", s)
 	}
 	// The unlimited token still lets new people in.
-	if s, _, _ := c.join(own.Space, brief, ""); s != 201 {
+	if s, _, _ := c.join(own.Space, brief, ""); s != 200 {
 		t.Fatalf("unlimited token: %d", s)
 	}
 	// Cleanup removes the ended grant and keeps the live one.
@@ -297,10 +293,10 @@ func TestMembers(t *testing.T) {
 		}
 	}
 	// A post member may invite (the default invite level) but not give all.
-	if s, _, b := c.req("POST", sp+"/tokens", `{"access":"all"}`, a...); s != 403 || errCode(b) != "exceeds_rights" {
+	if s, _, b := c.req("POST", sp+"/invites", `{"access":"all"}`, a...); s != 403 || errCode(b) != "exceeds_rights" {
 		t.Fatalf("give more: %d %s", s, b)
 	}
-	if s, _, b := c.req("POST", sp+"/tokens", ``, a...); s != 201 || !strings.Contains(b, `"access":"post"`) {
+	if s, _, b := c.req("POST", sp+"/invites", ``, a...); s != 201 || !strings.Contains(b, `"access":"post"`) {
 		t.Fatalf("member default invite: %d %s", s, b)
 	}
 	// Members see who is in, nothing more; owners see the details.
@@ -312,7 +308,7 @@ func TestMembers(t *testing.T) {
 		t.Fatalf("owner list: %s", b)
 	}
 	// Revoking one invite leaves the other grant.
-	c.req("DELETE", sp+"/tokens/"+idPost, "", o...)
+	c.req("DELETE", sp+"/invites/"+idPost, "", o...)
 	if _, _, b := c.req("GET", sp+"/access", "", a...); !strings.Contains(b, `"access":"read"`) {
 		t.Fatalf("after revoking post: %s", b)
 	}
@@ -382,51 +378,35 @@ func TestConcurrentRedeem(t *testing.T) {
 		go func() { defer wg.Done(); c.join(own.Space, tok, vt) }()
 	}
 	wg.Wait()
-	_, _, b := c.req("GET", "/v1/"+own.Space+"/tokens", "", bearer(own.Token)...)
+	_, _, b := c.req("GET", "/v1/"+own.Space+"/invites", "", bearer(own.Token)...)
 	if !strings.Contains(b, `"usesLeft":1`) || !strings.Contains(b, `"members":1`) {
 		t.Fatalf("double redeem: %s", b)
 	}
 }
 
-func TestOwnerToken(t *testing.T) {
+func TestAdminOwner(t *testing.T) {
 	c := newTest(t)
 	c.cfg.Server.RateLimits = new(bool)
 	own := c.create(``, "")
 	sp := "/v1/" + own.Space
-
-	// A second device becomes an owner with the owner token.
-	s, dev, b := c.join(own.Space, own.OwnerToken, "")
-	if s != 201 || !strings.Contains(b, `"access":"owner"`) {
-		t.Fatalf("owner join: %d %s", s, b)
+	// Every owner device is gone; the operator makes another visitor owner.
+	dev, devID := c.anon()
+	if s, _, _ := c.req("POST", sp+"/invites", ``, bearer(dev)...); s != 404 {
+		t.Fatalf("a stranger sees the private space: %d", s)
 	}
-	if s, _, _ := c.req("POST", sp+"/tokens", ``, bearer(dev)...); s != 201 {
-		t.Fatal("second owner can't mint")
-	}
-	// Rotating keeps the caller and the creator, drops grants from the old token.
-	s, _, b = c.req("POST", sp+"/owner-token", "", bearer(own.Token)...)
-	var rot struct{ OwnerToken string }
-	json.Unmarshal([]byte(b), &rot)
-	if s != 200 || !strings.HasPrefix(rot.OwnerToken, "ot_") {
-		t.Fatalf("rotate: %d %s", s, b)
-	}
-	if s, _, _ := c.req("POST", sp+"/tokens", ``, bearer(dev)...); s != 404 {
-		t.Fatalf("old owner-token grant survived: %d", s)
-	}
-	if s, _, _ := c.join(own.Space, own.OwnerToken, ""); s != 404 {
-		t.Fatal("old owner token still works")
-	}
-	if s, _, _ := c.join(own.Space, rot.OwnerToken, dev); s != 200 {
-		t.Fatal("new owner token doesn't work")
-	}
-	// The operator can issue a fresh one with no owner around.
 	srv := New(c.cfg, c.store, nil)
 	rec := httptest.NewRecorder()
-	srv.AdminHandler().ServeHTTP(rec, httptest.NewRequest("POST", "/spaces/"+own.Space+"/owner-token", nil))
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"ownerToken":"ot_`) {
-		t.Fatalf("admin owner-token: %d %s", rec.Code, rec.Body)
+	srv.AdminHandler().ServeHTTP(rec, httptest.NewRequest("PUT", "/spaces/"+own.Space+"/owners/"+devID, nil))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"owner":"`+devID+`"`) {
+		t.Fatalf("admin owner: %d %s", rec.Code, rec.Body)
 	}
-	if s, _, _ := c.join(own.Space, rot.OwnerToken, ""); s != 404 {
-		t.Fatal("rotated-away token still works after admin reissue")
+	if s, _, _ := c.req("POST", sp+"/invites", ``, bearer(dev)...); s != 201 {
+		t.Fatal("the new owner can't mint")
+	}
+	rec = httptest.NewRecorder()
+	srv.AdminHandler().ServeHTTP(rec, httptest.NewRequest("PUT", "/spaces/"+own.Space+"/owners/u_aaaaaaaaaaaaaaaa", nil))
+	if rec.Code != 404 {
+		t.Fatalf("unknown visitor: %d %s", rec.Code, rec.Body)
 	}
 	// The owner deletes the space.
 	if s, _, _ := c.req("DELETE", sp, "", bearer(own.Token)...); s != 200 {
@@ -448,20 +428,19 @@ func TestPreflightAllowsPatch(t *testing.T) {
 }
 
 // A visitor created by join counts against the same per-IP limit as /anon.
-func TestJoinCreatesVisitorsWithinLimit(t *testing.T) {
+func TestVisitorsWithinLimit(t *testing.T) {
 	c := newTest(t)
-	own := c.create(``, "")
-	_, tok := c.mint(own.Space, own.Token, `{"uses":null}`)
 	ip := []string{"X-Forwarded-For", "203.0.113.50"}
 	n := 0
 	for range 120 {
-		s, _, _ := c.req("POST", "/v1/"+own.Space+"/join", `{"token":"`+tok+`"}`, ip...)
+		k, _ := auth.NewSigner()
+		s, _, _ := c.req("POST", "/v1/visitors", "", append(ip, "Authorization", "Bearer "+k.Token(c.url, time.Minute, true))...)
 		if s == 429 {
 			break
 		}
 		n++
 	}
 	if n != 100 {
-		t.Fatalf("visitors per IP through join: %d", n)
+		t.Fatalf("visitors per IP: %d", n)
 	}
 }

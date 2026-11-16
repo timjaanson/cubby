@@ -52,19 +52,6 @@ func decodeBody(c *reqCtx, v any) error {
 
 func isNull(raw json.RawMessage) bool { return raw != nil && string(bytes.TrimSpace(raw)) == "null" }
 
-// identity returns the request's visitor, or creates one when no token was
-// sent. created is the new token, "" when the visitor already existed.
-func (s *Server) identity(c *reqCtx) (id, created string, err error) {
-	if c.visitor != "" {
-		return c.visitor, "", nil
-	}
-	if c.tokErr != nil {
-		return "", "", c.tokErr
-	}
-	tok, id, err := s.newVisitor(c)
-	return id, tok, err
-}
-
 func (s *Server) createSpace(c *reqCtx) error {
 	var in struct {
 		Name   string          `json:"name"`
@@ -91,44 +78,37 @@ func (s *Server) createSpace(c *reqCtx) error {
 	if in.Name != "" && s.store.SpaceExists(in.Name) {
 		return apierr.SpaceExists(in.Name) // before any limit, so a taken name costs nothing
 	}
-	if c.visitor != "" {
-		if err := s.spaceRate(c, c.visitor); err != nil {
-			return err
-		}
-	}
-	id, newToken, err := s.identity(c)
+	id, err := c.needVisitor()
 	if err != nil {
 		return err
 	}
-	if newToken != "" {
-		if err := s.spaceRate(c, id); err != nil {
-			return err
-		}
+	if err := s.spaceRate(c, id); err != nil {
+		return err
 	}
-	name, ownerToken, err := s.store.CreateSpace(in.Name, in.Label, settings, id)
+	name, err := s.store.CreateSpace(in.Name, in.Label, settings, id)
 	if err != nil {
 		return err
 	}
 	s.lim.misses.remember(c.ip, name, s.lim.misses.now()) // its creator can use it even while out of miss budget
-	out := map[string]any{"space": name, "ownerToken": ownerToken, "id": id, "settings": settings}
-	if newToken != "" {
-		out["token"] = newToken
-	}
-	c.json(201, out)
+	c.json(201, map[string]any{"space": name, "id": id, "settings": settings})
 	return nil
 }
 
-// join redeems an invite or the owner token. Any failure answers invite_invalid,
-// the same for a space that doesn't exist, and costs one miss.
+// join redeems an invite. Any failure answers invite_invalid, the same for
+// a space that doesn't exist, and costs one miss.
 func (s *Server) join(c *reqCtx, space string, rights *access.Rights) error {
 	var in struct {
-		Token string `json:"token"`
+		Invite string `json:"invite"`
 	}
 	if err := decodeBody(c, &in); err != nil {
 		return err
 	}
-	if in.Token == "" {
-		return apierr.BadParam("token", `join takes {"token": "at_..."} or an owner token, "ot_...".`)
+	if in.Invite == "" {
+		return apierr.BadParam("invite", `join takes {"invite": "inv_..."}.`)
+	}
+	id, err := c.needVisitor()
+	if err != nil {
+		return err
 	}
 	if s.cfg.RateLimitsOn() {
 		if ok, retry := s.lim.misses.allowed(c.ip, space); !ok {
@@ -141,26 +121,11 @@ func (s *Server) join(c *reqCtx, space string, rights *access.Rights) error {
 		}
 		return apierr.InviteInvalid
 	}
-	if rights == nil || !(names.AccessTokenRe.MatchString(in.Token) || names.OwnerTokenRe.MatchString(in.Token)) {
+	if rights == nil || !names.InviteRe.MatchString(in.Invite) {
 		return fail()
 	}
-	if c.visitor == "" && c.tokErr != nil {
-		return c.tokErr
-	}
-	id, newToken := c.visitor, ""
-	if id == "" {
-		// A new visitor, created first so the grant has someone to belong
-		// to, and removed again if the invite turns out to be no good.
-		var err error
-		if newToken, id, err = s.newVisitor(c); err != nil {
-			return err
-		}
-	}
-	j, err := s.store.Redeem(space, id, in.Token)
+	j, err := s.store.Redeem(space, id, in.Invite)
 	if err != nil {
-		if newToken != "" {
-			s.store.DeleteVisitor(id)
-		}
 		if err == apierr.InviteInvalid {
 			return fail()
 		}
@@ -171,17 +136,12 @@ func (s *Server) join(c *reqCtx, space string, rights *access.Rights) error {
 	if err != nil {
 		return err
 	}
-	out := map[string]any{"space": space, "id": id, "access": j.Access, "until": j.Until, "settings": settings}
-	status := 200
-	if newToken != "" {
-		out["token"], status = newToken, 201
-	}
-	c.json(status, out)
+	c.json(200, map[string]any{"space": space, "id": id, "access": j.Access, "until": j.Until, "settings": settings})
 	return nil
 }
 
-// spaceRoute handles /v1/{space} and its access, tokens, members and
-// owner-token routes. rest is the path after the space name.
+// spaceRoute handles /v1/{space} and its access, invites and members
+// routes. rest is the path after the space name.
 func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest []string) error {
 	m := c.r.Method
 	if len(rest) == 1 && rest[0] == "access" {
@@ -220,7 +180,7 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 		route = rest[0]
 	}
 	switch {
-	case route == "tokens":
+	case route == "invites":
 		if !rights.CanInvite() {
 			return apierr.OwnerOnly
 		}
@@ -252,32 +212,18 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 		}
 		return methodErr("PATCH, DELETE")
 
-	case rest[0] == "owner-token" && len(rest) == 1:
-		if m != http.MethodPost {
-			return methodErr("POST")
-		}
-		if err := checkParams(c.r); err != nil {
-			return err
-		}
-		tok, err := s.store.RotateOwner(space, c.visitor)
-		if err != nil {
-			return err
-		}
-		c.json(200, map[string]any{"ownerToken": tok})
-		return nil
-
-	case rest[0] == "tokens" && len(rest) == 1:
+	case rest[0] == "invites" && len(rest) == 1:
 		switch m {
 		case http.MethodPost:
 			if err := checkParams(c.r); err != nil {
 				return err
 			}
-			return s.mintToken(c, space, rights)
+			return s.mintInvite(c, space, rights)
 		case http.MethodGet, http.MethodHead:
 			if err := checkParams(c.r); err != nil {
 				return err
 			}
-			items, err := s.store.ListTokens(space, by)
+			items, err := s.store.ListInvites(space, by)
 			if err != nil {
 				return err
 			}
@@ -286,9 +232,9 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 		}
 		return methodErr("GET, HEAD, POST")
 
-	case rest[0] == "tokens" && len(rest) == 2:
+	case rest[0] == "invites" && len(rest) == 2:
 		id := rest[1]
-		if !names.ValidTokenID(id) {
+		if !names.ValidInviteID(id) {
 			return &apierr.Error{Status: 404, Code: "not_found", Message: "No such invite in this space."}
 		}
 		if err := checkParams(c.r); err != nil {
@@ -296,9 +242,9 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 		}
 		switch m {
 		case http.MethodPatch:
-			return s.patchToken(c, space, id, by)
+			return s.patchInvite(c, space, id, by)
 		case http.MethodDelete:
-			if err := s.store.DeleteToken(space, id, by); err != nil {
+			if err := s.store.DeleteInvite(space, id, by); err != nil {
 				return err
 			}
 			c.json(200, map[string]any{})
@@ -398,11 +344,11 @@ func (s *Server) patchSettings(c *reqCtx, space string, cur access.Settings) err
 
 // Defaults for a new invite: 10 uses, 7 days.
 const (
-	defaultTokenUses = 10
-	defaultTokenTTL  = 7 * 24 * time.Hour
+	defaultInviteUses = 10
+	defaultInviteTTL  = 7 * 24 * time.Hour
 )
 
-func (s *Server) mintToken(c *reqCtx, space string, rights *access.Rights) error {
+func (s *Server) mintInvite(c *reqCtx, space string, rights *access.Rights) error {
 	var in struct {
 		Label    string          `json:"label"`
 		Access   json.RawMessage `json:"access"`
@@ -429,20 +375,20 @@ func (s *Server) mintToken(c *reqCtx, space string, rights *access.Rights) error
 		}
 	}
 	now := time.Now()
-	spec := store.TokenSpec{By: c.visitor, Label: in.Label, Access: level}
+	spec := store.InviteSpec{By: c.visitor, Label: in.Label, Access: level}
 
-	uses := int64(defaultTokenUses)
+	uses := int64(defaultInviteUses)
 	spec.Uses = &uses
 	switch {
 	case isNull(in.Uses):
 		spec.Uses = nil
 	case in.Uses != nil:
 		if json.Unmarshal(in.Uses, &uses) != nil || uses < 1 {
-			return apierr.BadParam("uses", "uses is how many visitors can redeem the token, 1 or more, or null for no limit.")
+			return apierr.BadParam("uses", "uses is how many visitors can redeem the invite, 1 or more, or null for no limit.")
 		}
 	}
 
-	until := now.Add(defaultTokenTTL).UnixMilli()
+	until := now.Add(defaultInviteTTL).UnixMilli()
 	spec.Until = &until
 	switch {
 	case isNull(in.Until):
@@ -469,16 +415,16 @@ func (s *Server) mintToken(c *reqCtx, space string, rights *access.Rights) error
 		spec.GrantFor = &ms
 	}
 
-	info, token, err := s.store.CreateToken(space, spec)
+	info, token, err := s.store.CreateInvite(space, spec)
 	if err != nil {
 		return err
 	}
-	c.json(201, map[string]any{"id": info.ID, "token": token, "label": info.Label, "access": info.Access,
+	c.json(201, map[string]any{"id": info.ID, "invite": token, "label": info.Label, "access": info.Access,
 		"uses": info.UsesLeft, "until": info.Until, "grantFor": info.GrantFor})
 	return nil
 }
 
-func (s *Server) patchToken(c *reqCtx, space, id, by string) error {
+func (s *Server) patchInvite(c *reqCtx, space, id, by string) error {
 	var in struct {
 		Uses  json.RawMessage `json:"uses"`
 		Until json.RawMessage `json:"until"`
@@ -486,7 +432,7 @@ func (s *Server) patchToken(c *reqCtx, space, id, by string) error {
 	if err := decodeBody(c, &in); err != nil {
 		return err
 	}
-	var ch store.TokenChange
+	var ch store.InviteChange
 	if in.Uses != nil {
 		ch.SetUses = true
 		if !isNull(in.Uses) {
@@ -507,7 +453,7 @@ func (s *Server) patchToken(c *reqCtx, space, id, by string) error {
 			ch.Until = &ms
 		}
 	}
-	info, err := s.store.UpdateToken(space, id, by, ch)
+	info, err := s.store.UpdateInvite(space, id, by, ch)
 	if err != nil {
 		return err
 	}

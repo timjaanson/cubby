@@ -1,57 +1,76 @@
 package store
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/timjaanson/cubby/internal/auth"
 	"github.com/timjaanson/cubby/internal/config"
-	"github.com/timjaanson/cubby/internal/names"
 )
 
-// A server.db from before devices keeps every visitor's token working, as
-// that visitor's first device.
-func TestMigrateServerDevices(t *testing.T) {
+// newVisitor registers a fresh key as a new visitor.
+func newVisitor(t *testing.T, s *Store) string {
+	t.Helper()
+	k, err := auth.NewSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _, err := s.NewVisitor(k.Key, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestDeviceKeys(t *testing.T) {
+	s, _, _ := testStore(t)
+	k, _ := auth.NewEdSigner()
+	id, created, err := s.NewVisitor(k.Key, "phone")
+	if err != nil || !created {
+		t.Fatal(err)
+	}
+	if again, created, _ := s.NewVisitor(k.Key, ""); again != id || created {
+		t.Fatalf("again: %s %v", again, created)
+	}
+	v, key, err := s.DeviceKey(k.Key.ID)
+	if err != nil || v != id || key.ID != k.Key.ID || key.Alg != "EdDSA" {
+		t.Fatalf("device key: %s %+v %v", v, key, err)
+	}
+	if v, key, _ := s.DeviceKey("nope"); v != "" || key != nil {
+		t.Fatal("unknown device")
+	}
+}
+
+// Data from before v0.19 is refused with a clear message, not migrated.
+func TestRefusesOldData(t *testing.T) {
 	dir := t.TempDir()
 	db, err := openDB(filepath.Join(dir, "server.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok := names.RandomToken("vt_")
-	for _, q := range []string{
-		`CREATE TABLE visitors (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, stored INTEGER NOT NULL DEFAULT 0)`,
-		`CREATE TABLE visitor_spaces (visitor TEXT NOT NULL, space TEXT NOT NULL, PRIMARY KEY (visitor, space)) WITHOUT ROWID`,
-		`INSERT INTO visitors VALUES ('u_aaaaaaaaaaaaaaaa', '` + names.HashSecret(tok) + `', 1700000000, 1700000100, 1)`,
-	} {
-		if _, err := db.Exec(q); err != nil {
-			t.Fatal(q, err)
-		}
-	}
+	db.Exec(`CREATE TABLE visitors (id TEXT PRIMARY KEY); PRAGMA user_version = 1`)
 	db.Close()
-
 	cfg := config.Default()
 	cfg.Server.DataDir = dir
+	if _, err := Open(cfg); err == nil || !strings.Contains(err.Error(), "v0.19") {
+		t.Fatalf("old server.db: %v", err)
+	}
+
+	// An old space file next to a new server.db.
+	dir2 := t.TempDir()
+	cfg.Server.DataDir = dir2
 	s, err := Open(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
-	id, dev, err := s.VisitorByToken(tok)
-	if err != nil || id != "u_aaaaaaaaaaaaaaaa" || !names.ValidDeviceID(dev) {
-		t.Fatalf("token after migration: %q %q %v", id, dev, err)
-	}
-	ds, _ := s.Devices(id, dev)
-	if len(ds) != 1 || ds[0].Created != 1700000000_000 || !ds[0].Current {
-		t.Fatalf("devices %+v", ds)
-	}
-	var stored, v int
-	s.srv.QueryRow(`SELECT stored FROM visitors WHERE id = ?`, id).Scan(&stored)
-	s.srv.QueryRow(`PRAGMA user_version`).Scan(&v)
-	if stored != 1 || v != serverVersion {
-		t.Fatalf("stored %d, version %d", stored, v)
-	}
-	// A new visitor works alongside.
-	tok2, id2, err := s.NewVisitor()
-	if got, _, _ := s.VisitorByToken(tok2); err != nil || got != id2 {
-		t.Fatalf("new visitor %q %v", got, err)
+	s.Close()
+	os.MkdirAll(filepath.Join(dir2, "spaces"), 0o700)
+	db, _ = openDB(filepath.Join(dir2, "spaces", "old-cedar-pilot-mango.db"))
+	db.Exec(`CREATE TABLE meta (k TEXT PRIMARY KEY, v); PRAGMA user_version = 4`)
+	db.Close()
+	if _, err := Open(cfg); err == nil || !strings.Contains(err.Error(), "v0.19") {
+		t.Fatalf("old space: %v", err)
 	}
 }

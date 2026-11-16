@@ -22,7 +22,7 @@ async page => {
     const { createSpace, kv } = await import(base + '/kv.js')
     const { space } = await createSpace({ server: base, anyone: 'all' })
     const a = kv(space, { server: base, live: true })
-    const b = kv(space, { server: base, tokenKey: 'second-person' }) // plain HTTP participant
+    const b = kv(space, { server: base, keyName: 'second-person' }) // plain HTTP participant
     const states = []
     a.live.onStatus = s => states.push(s)
 

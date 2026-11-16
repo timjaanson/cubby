@@ -1,17 +1,18 @@
 // cubby share panel. A custom element that gives a space's owners invite
 // links, a QR code, the member list with each person's level, who can see
-// the space, and its recovery key. Members who may invite get invite links;
-// other members can see a "shared with you" line; everyone else sees nothing.
+// the space, and a backup key for getting back in. Members who may invite get
+// invite links; other members can see a "shared with you" line; everyone else
+// sees nothing.
 //
 //   <script type="module" src="https://kv.example.com/share.js"></script>
 //   <cubby-share space="family-cedar-pilot-mango-frost" members></cubby-share>
 //
-// After createSpace(), set el.ownerToken = ownerToken and the panel opens
-// once at the recovery key step, so the person saves it.
+// After createSpace(), call el.showBackup() to open the panel at the backup
+// key step, so the person can save a way back in.
 //
 // Headless: import { qrSvg } from ".../share.js" for an SVG QR code of any text.
 
-import { kv, inviteLink } from "./kv.js"
+import { kv, devices, inviteLink } from "./kv.js"
 
 // ---------- QR code: byte mode, error correction M, versions 1 to 40 ----------
 
@@ -243,7 +244,7 @@ const LEVEL_NAMES = { read: "Can look", post: "Can add their own", all: "Can cha
 
 const CSS = `
 :host { display: inline-block; font: inherit; color: inherit; --a: var(--cubby-accent, #2a6df4); --r: var(--cubby-radius, 8px); }
-button { font: inherit; border: 1px solid currentColor; border-radius: var(--r); background: none; color: inherit; padding: .35em .8em; cursor: pointer; }
+button, a.button { font: inherit; border: 1px solid currentColor; border-radius: var(--r); background: none; color: inherit; padding: .35em .8em; cursor: pointer; text-decoration: none; }
 button.main { background: var(--a); border-color: var(--a); color: #fff; }
 button:disabled { opacity: .5; cursor: default; }
 dialog { font: inherit; color: CanvasText; background: Canvas; border: 1px solid #8884; border-radius: var(--r); padding: 1.2em 1.4em; width: min(30em, 92vw); max-height: 90vh; overflow: auto; }
@@ -260,7 +261,7 @@ input.link { width: 100%; box-sizing: border-box; font-size: .85em; }
 ul { padding: 0; list-style: none; }
 li { display: flex; justify-content: space-between; gap: .5em; align-items: center; padding: .3em 0; border-top: 1px solid #8883; }
 label.choice { display: block; margin: .4em 0; }
-.key { font-family: ui-monospace, monospace; font-size: .85em; word-break: break-all; padding: .5em; border: 1px dashed #8888; border-radius: var(--r); }
+.key { font-family: ui-monospace, monospace; font-size: .85em; word-break: break-all; padding: .5em; border: 1px dashed #8888; border-radius: var(--r); width: 100%; box-sizing: border-box; background: none; color: inherit; resize: vertical; }
 .close { float: right; border: none; font-size: 1.3em; padding: 0 .3em; }
 .shared { opacity: .7; font-size: .9em; }
 `
@@ -274,15 +275,15 @@ class CubbyShare extends Base {
   constructor() {
     super()
     this.attachShadow({ mode: "open" })
-    this._ownerToken = null
     this._access = null
+    this._backupFirst = false
   }
 
-  set ownerToken(v) {
-    this._ownerToken = v
-    if (v) this._load()
+  // Open the panel at the backup key step.
+  showBackup() {
+    this._backupFirst = true
+    return this._load()
   }
-  get ownerToken() { return this._ownerToken }
 
   connectedCallback() { this._load() }
   attributeChangedCallback() { if (this.isConnected) this._load() }
@@ -309,7 +310,7 @@ class CubbyShare extends Base {
     const style = h("style", {}, CSS)
     if (a?.access === "owner" || a?.canInvite) {
       root.replaceChildren(style, h("button", { part: "button", className: "main", onclick: () => this._show("invite") }, "Share"))
-      if (this._ownerToken || this.hasAttribute("open")) this._show(this._ownerToken ? "recovery" : "invite")
+      if (this._backupFirst || this.hasAttribute("open")) this._show(this._backupFirst ? "backup" : "invite")
     } else if (a?.can("read") && a.settings?.anyone !== a.access && this.hasAttribute("members")) {
       root.replaceChildren(style, h("span", { className: "shared", part: "button" }, "Shared with you by the owner"))
     } else {
@@ -320,48 +321,54 @@ class CubbyShare extends Base {
   _changed() { this.dispatchEvent(new CustomEvent("cubby-change", { bubbles: true, composed: true })) }
 
   async _show(focus) {
-    if (this._ownerToken) focus = "recovery"
-    const recoveryToken = this._ownerToken
+    if (this._backupFirst) focus = "backup"
+    this._backupFirst = false
     const db = this._db
     this.shadowRoot.querySelector("dialog")?.remove()
     const dlg = h("dialog", { part: "panel", "aria-label": "Share" })
-    dlg.addEventListener("close", () => {
-      if (dlg.isConnected && focus === "recovery" && this._ownerToken === recoveryToken) this._ownerToken = null
-      dlg.remove()
-    })
+    dlg.addEventListener("close", () => dlg.remove())
     this.shadowRoot.append(dlg)
     const render = async () => {
       // Owners manage everything; members invite and see their own open invites.
       const a = await db.access()
       const owner = a.access === "owner"
-      const [tokens, members] = await Promise.all([db.tokens.list(), owner ? db.members() : []])
+      const [invites, members] = await Promise.all([db.invites.list(), owner ? db.members() : []])
       dlg.replaceChildren(
         h("button", { className: "close", "aria-label": "Close", onclick: () => dlg.close() }, "×"),
         h("h2", {}, "Share"),
-        owner ? this._recovery(db, focus === "recovery") : null,
+        focus === "backup" ? this._backup(true) : null,
         this._invite(db, render, a.access),
-        this._people(db, tokens, members, render, owner, a.id),
-        owner ? this._visibility(db, a.settings, render) : null,
+        this._people(db, invites, members, render, owner, a.id),
+        owner ? this._visibility(db, a.settings, render, focus !== "backup") : null,
       )
     }
     await render()
     if (dlg.isConnected) dlg.showModal()
   }
 
-  _recovery(db, now) {
+  // A backup key is one more device of this visitor, kept by the person.
+  _backup(first) {
     const box = h("section")
-    const showKey = (key, note) => box.replaceChildren(
-      h("h3", {}, "Recovery key"),
-      h("p", {}, note),
-      h("p", { className: "key" }, key),
-      h("div", { className: "row" },
-        h("button", { onclick: e => { navigator.clipboard?.writeText(key); e.target.textContent = "Copied" } }, "Copy"),
-      ),
+    const intro = () => box.replaceChildren(
+      h("h3", {}, "Backup key"),
+      h("p", { className: first ? "" : "muted" }, "This browser is your way in. A backup key gets you back in from another device, or after clearing this browser. Keep it in a password manager."),
+      h("div", { className: "row" }, h("button", { className: first ? "main" : "", onclick: make }, "Save a backup key")),
     )
-    if (now && this._ownerToken) {
-      showKey(this._ownerToken, "Save this in a password manager. It's the only way back in if you clear this browser or use another device, and it's shown only now.")
-      return box
+    const make = async () => {
+      const server = this.getAttribute("server") || undefined
+      const text = await devices(server ? { server } : {}).backup()
+      const file = URL.createObjectURL(new Blob([text], { type: "application/json" }))
+      box.replaceChildren(
+        h("h3", {}, "Backup key"),
+        h("p", {}, "Save this now. It's shown once, and anyone with it can act as you. To use it, restore it on the new device; to cancel it, sign out its device."),
+        h("textarea", { className: "key", readOnly: true, rows: 4, value: text, "aria-label": "Backup key" }),
+        h("div", { className: "row" },
+          h("button", { onclick: e => { navigator.clipboard?.writeText(text); e.target.textContent = "Copied" } }, "Copy"),
+          h("a", { href: file, download: "cubby-backup-key.json", className: "button" }, "Download"),
+        ),
+      )
     }
+    intro()
     return box
   }
 
@@ -423,8 +430,8 @@ class CubbyShare extends Base {
     )
   }
 
-  _people(db, tokens, members, rerender, owner, me) {
-    const pending = tokens.filter(t => t.state === "active")
+  _people(db, invites, members, rerender, owner, me) {
+    const pending = invites.filter(t => t.state === "active")
     const act = fn => async () => { await fn(); this._changed(); rerender() }
     const others = members.filter(m => m.id !== me)
     const level = m => m.access === "banned" ? h("span", { className: "muted" }, " · banned") :
@@ -443,15 +450,15 @@ class CubbyShare extends Base {
           h("span", {}, t.label || "Invite", h("span", { className: "muted" },
             ` · ${t.usesLeft === null ? "no limit" : `${t.usesLeft} left`}, until ${when(t.until)}`)),
           h("span", { className: "row" },
-            h("button", { onclick: act(() => db.tokens.update(t.id, { until: "7d" })) }, "Extend"),
-            h("button", { onclick: act(() => t.members ? db.tokens.update(t.id, { uses: 0 }) : db.tokens.revoke(t.id)) }, "Cancel"),
+            h("button", { onclick: act(() => db.invites.update(t.id, { until: "7d" })) }, "Extend"),
+            h("button", { onclick: act(() => t.members ? db.invites.update(t.id, { uses: 0 }) : db.invites.revoke(t.id)) }, "Cancel"),
           ),
         ))),
       ) : null,
     )
   }
 
-  _visibility(db, settings, rerender) {
+  _visibility(db, settings, rerender, backup) {
     const current = settings?.anyone
     return h("section", {},
       h("h3", {}, "Who can see this"),
@@ -465,15 +472,7 @@ class CubbyShare extends Base {
             rerender()
           },
         }), " ", title)),
-      h("h3", {}, "Recovery key"),
-      h("p", { className: "muted" }, "The recovery key makes any device an owner. Making a new one stops the old one working."),
-      h("div", { className: "row" }, h("button", {
-        onclick: async e => {
-          if (!confirm("Make a new recovery key? The old one stops working, and devices that became owners with it lose that.")) return
-          const key = await db.owner.rotateOwnerToken()
-          e.target.replaceWith(h("p", { className: "key" }, key), h("p", { className: "muted" }, "Save it now. It isn't shown again."))
-        },
-      }, "Make a new recovery key")),
+      backup ? this._backup(false) : null,
     )
   }
 }

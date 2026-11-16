@@ -1,18 +1,14 @@
 # cubby
 
-A small back-end for live web apps. One binary gives you a key-value store with live updates, so a static page gets shared state that everyone sees change as it happens. No accounts, no schema, no server code to write.
+A small back-end for live web apps. One binary serves a key-value store with live updates, so a static page gets shared state that everyone sees change as it happens. No accounts, no schema, no server code.
 
-It's for the things that are too small for a real back-end: a poll for the group chat, a shared shopping list, a quiz night, a scoreboard, a board several people edit at once, a sensor dashboard, a script that tells another script something changed.
+- **No sign-up.** Each browser makes its own key pair and signs short-lived tokens with it. Nothing permanent crosses the wire.
+- **Private by default.** A space is invite-only. Everyone in it has one level: `read`, `post` (their own keys), `all` (common keys too) or `owner`.
+- **Live.** Watch a key or a pattern over one WebSocket per page, or plain HTTP long polling. Pulses carry cursors and other fast, unstored values.
+- **Safe with many writers.** Every write has a version, and `ifVersion` refuses a write if someone got there first.
+- **Plain HTTP underneath.** A browser client at `/kv.js`, a CLI in the same binary, `curl` for the rest.
 
-- **Live updates.** Watch a key or a pattern and changes arrive as they happen, over one WebSocket per page or plain HTTP long polling.
-- **No sign-up.** Each browser gets an anonymous identity by itself. One request creates a space. A one-use code links a second device to the same identity.
-- **Private unless you say so.** Spaces are invite-only. Everyone in a space has one level: `read`, `post` (their own keys), `all` (common keys too) or `owner`. One word (`anyone: "read"`, `"post"`, `"all"`) opens a space to strangers.
-- **Safe with many writers.** Every value has a version, and `ifVersion` refuses a write if someone got there first. Each visitor has keys only they can write, so votes, messages and names can't be faked.
-- **Pulses for the fast stuff.** Cursors, drags, reactions and game inputs go out as pulses: values that are never stored, reach whoever is listening right now, and can be sent dozens of times a second.
-- **Live primitives.** Expiring keys for presence and locks, a shared server clock, write deadlines, and time series for sensor readings.
-- **Plain HTTP underneath.** A browser client at `/kv.js`, a CLI in the same binary, and `curl` for everything else.
-
-## A live poll in 20 lines
+## A live poll
 
 ```html
 <button>Pizza</button> <button>Tacos</button> <p id="results"></p>
@@ -20,16 +16,13 @@ It's for the things that are too small for a real back-end: a poll for the group
 <script type="module">
 import { kv, createSpace } from "https://cubby.example.com/kv.js"
 
-// One poll per link: the space name lives in the URL fragment.
 const space = location.hash.slice(1) || (await createSpace({ anyone: "post" })).space
 location.hash = space
 const db = kv(space, { live: true })
 
-// A vote is the voter's own key, so nobody else can change it.
 for (const b of document.querySelectorAll("button"))
-  b.onclick = () => db.mine.set("vote", b.textContent)
+  b.onclick = () => db.mine.set("vote", b.textContent)    // your own key: nobody else can change it
 
-// Every open page sees votes the moment they're cast.
 const votes = new Map()
 db.by.watch("vote", c => c.deleted ? votes.delete(c.by) : votes.set(c.by, c.value), {
   onSync: () => results.textContent = ["Pizza", "Tacos"]
@@ -38,51 +31,26 @@ db.by.watch("vote", c => c.deleted ? votes.delete(c.by) : votes.set(c.by, c.valu
 </script>
 ```
 
-Open it, send the link around, and the counts move on every screen as people tap. For something that moves rather than something to keep, like everyone's cursor, send pulses: `db.mine.pulse("cursor", { x, y })` on every mouse move, and `db.by.onPulse("cursor", p => draw(p.by, p.value))` on every screen. A page that only needs to save something is shorter still: `await db.shared.set("list", items)` and `await db.shared.get("list")`.
-
-## Install and run
-
-With Go 1.26 or newer:
+## Run it
 
 ```sh
-go install github.com/timjaanson/cubby@latest
-cubby serve
+go install github.com/timjaanson/cubby@latest    # Go 1.26+, or ./build.sh for static binaries
+cubby serve                                      # port 28229
 ```
 
-Or build static binaries for Linux and macOS with `./build.sh` (they land in `dist/`).
-
-`cubby serve` listens on port 28229 and keeps its data in the usual place for your OS. No config file is needed. Pages load the client from your server, `https://your-host/kv.js`. To put it on the internet, run it behind a TLS proxy: [docs/deploy.md](docs/deploy.md) has Caddy, nginx and Apache configs and a systemd unit.
-
-## The same from a shell
-
 ```sh
-$ cubby new notes                          # a private space you own
+$ cubby new notes                                 # a private space you own
 notes-cedar-pilot-mango-frost
-ot_8Hq3vT...                               # owner token: your recovery key, shown once
 $ cubby set notes-cedar-pilot-mango-frost/shared/hello "Hello there"
-$ cubby watch notes-cedar-pilot-mango-frost/shared/hello      # prints each change as it happens
-$ curl "localhost:28229/v1/notes-cedar-pilot-mango-frost/shared/hello?token=$(cubby whoami --show-token)"
+$ curl -H "Authorization: Bearer $(cubby token)" localhost:28229/v1/notes-cedar-pilot-mango-frost/shared/hello
 Hello there
 ```
 
-## How data is laid out
-
-```
-space                 notes-cedar-pilot-mango-frost   one per app or room
-├── shared/{key}      common keys, written at level all
-├── by/{id}/{key}     each visitor's own keys: posts, votes, names; only they write them
-└── to/{id}/{key}     sent to one visitor, read in their inbox/; to/me/ is private, to/owners/ goes to the owners
-```
-
-Keys group with dots (`msg.1791449600123`), and a pattern like `msg.*` lists or watches them all. Values are JSON or text up to 512 KB.
-
 ## Docs
 
-- [docs/usage.md](docs/usage.md): the JS client, the CLI and plain HTTP, sharing, series, expiry and limits
-- [docs/deploy.md](docs/deploy.md): installing, reverse proxies, systemd, configuration, data and backups
-- [docs/scenarios.md](docs/scenarios.md): worked examples, from a shared note to a chat room and a sensor board
-- [docs/agents.md](docs/agents.md): a guide for coding agents building pages on cubby
-- [docs/spec.md](docs/spec.md): the full contract; [docs/design.md](docs/design.md): why it works this way
-- [docs/development.md](docs/development.md): building, tests and code layout
+- [docs/usage.md](docs/usage.md): the JS client, the CLI and curl. Start here, person or coding agent.
+- [docs/api.md](docs/api.md): the HTTP API, for clients in other languages.
+- [docs/deploy.md](docs/deploy.md): running it on a server.
+- [docs/development.md](docs/development.md): building and testing.
 
 Private spaces keep strangers out, but the server's operator can read everything. Don't store secrets in it.

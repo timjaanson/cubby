@@ -20,7 +20,6 @@ type spaceMeta struct {
 	seq, createdAt, lastActive, floor, bytes int64
 	keys                                     int
 	settings                                 access.Settings
-	ownerHash                                string
 }
 
 type queryer interface {
@@ -58,8 +57,6 @@ func readMeta(q queryer) (spaceMeta, error) {
 		case "settings":
 			str, _ := v.(string)
 			m.settings = access.Decode(str)
-		case "owner_hash":
-			m.ownerHash, _ = v.(string)
 		}
 	}
 	return m, rows.Err()
@@ -99,9 +96,8 @@ func (s *Store) graveSeq(name string) int64 {
 
 // newSpace is what a space starts with: its settings and its first owner.
 type newSpace struct {
-	settings  access.Settings
-	ownerHash string // SHA-256 of the owner token
-	owner     string // visitor ID of the creator
+	settings access.Settings
+	owner    string // visitor ID of the creator
 }
 
 // initSpace creates the tables of a new space file, its settings and the
@@ -124,7 +120,7 @@ func (s *Store) initSpace(db *sql.DB, name string, ns newSpace) error {
 		"seq": max(NowMs(), g+1), "created_at": now, "last_active_at": now,
 		// Watchers from a deleted space of the same name must start over.
 		"tombstone_floor": g + 1, "bytes": 0, "keys": 0,
-		"settings": ns.settings.Encode(), "owner_hash": ns.ownerHash,
+		"settings": ns.settings.Encode(),
 	} {
 		if err := setMeta(tx, k, v); err != nil {
 			return err
@@ -177,15 +173,14 @@ func (s *Store) acquire(name string, ns *newSpace) (sp *spaceDB, created bool, e
 					return nil, false, fmt.Errorf("create space %s: %w", name, err)
 				}
 				created = true
+			} else if err := checkSpaceVersion(db, path); err != nil {
+				db.Close()
+				s.mu.Unlock()
+				return nil, false, err
 			} else if _, err := db.Exec(spaceSchema); err != nil {
 				db.Close()
 				s.mu.Unlock()
 				return nil, false, fmt.Errorf("open space %s: %w", name, err)
-			}
-			if err := migrateSpace(db); err != nil {
-				db.Close()
-				s.mu.Unlock()
-				return nil, false, err
 			}
 			m, err := readMeta(db)
 			if err != nil {
@@ -308,7 +303,7 @@ func (s *Store) Rescan() error {
 		if err != nil {
 			return err
 		}
-		if err := migrateSpace(db); err != nil {
+		if err := checkSpaceVersion(db, s.spacePath(name)); err != nil {
 			db.Close()
 			return err
 		}

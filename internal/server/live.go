@@ -22,7 +22,6 @@ import (
 	"github.com/timjaanson/cubby/internal/access"
 	"github.com/timjaanson/cubby/internal/apierr"
 	"github.com/timjaanson/cubby/internal/config"
-	"github.com/timjaanson/cubby/internal/names"
 	"github.com/timjaanson/cubby/internal/store"
 )
 
@@ -107,9 +106,9 @@ func (s *Server) closeBanned(space, visitor string, until int64) {
 
 // signOutLive treats live connections of devices that were signed out as
 // if their token had stopped working, the same as a bad token on HTTP:
-// reads go on without a visitor, writes answer invalid_token, watches on
-// the visitor's own areas end. Wills stay and fire as they would. The connection stays
-// open, so a page that just linked can send auth with its new token.
+// every data message answers unknown_key, watches on the visitor's own
+// areas end. Wills stay and fire as they would. The connection stays open,
+// so the client can register again or pair and send auth with a new token.
 func (s *Server) signOutLive(devices []string) {
 	if len(devices) == 0 {
 		return
@@ -129,7 +128,7 @@ func (s *Server) signOutLive(devices []string) {
 	}
 	s.live.mu.Unlock()
 	for _, l := range conns {
-		l.setIdentity("", "", apierr.InvalidToken)
+		l.setIdentity("", "", apierr.UnknownKey)
 	}
 }
 
@@ -187,6 +186,7 @@ type liveConn struct {
 	ip     string
 	addr   string
 	space  string
+	req    *http.Request // the upgrade request: tokens are checked against its origin
 
 	mu      sync.Mutex
 	visitor string
@@ -232,7 +232,7 @@ func (s *Server) liveRoute(c *reqCtx, space string) error {
 		return methodErr("GET")
 	}
 	if c.r.URL.Query().Has("token") {
-		return apierr.BadParam("token", "A live connection doesn't take a token in the URL. Send {\"op\":\"auth\",\"token\":\"vt_...\"} as the first message, or an Authorization header.")
+		return apierr.BadParam("token", "A live connection doesn't take a token in the URL. Send {\"op\":\"auth\",\"token\":\"...\"} as the first message, or an Authorization header.")
 	}
 	if err := checkParams(c.r); err != nil {
 		return err
@@ -267,7 +267,7 @@ func (s *Server) liveRoute(c *reqCtx, space string) error {
 	// The request's context ends when the handler returns; the connection
 	// gets its own.
 	ctx, cancel := context.WithCancel(context.Background())
-	l := &liveConn{s: s, conn: conn, ctx: ctx, cancel: cancel, ip: c.ip, space: space,
+	l := &liveConn{s: s, conn: conn, ctx: ctx, cancel: cancel, ip: c.ip, space: space, req: c.r,
 		addr: s.clientIP(c.r).String(), visitor: c.visitor, device: c.device, watches: map[string]*liveWatch{}, wills: map[string]liveWill{}}
 	s.live.add(l)
 	defer s.live.remove(l)
@@ -468,29 +468,23 @@ func (l *liveConn) handle(data []byte) {
 
 // auth sets who the following messages come from. It can come at any time
 // and as often as needed: a header and an auth message together are fine.
-// A bad token behaves like a bad token on HTTP: reads go on without a
-// visitor and writes answer invalid_token.
+// A bad token behaves like a bad token on HTTP: every data message answers
+// why, until an auth with a good token or none.
 func (l *liveConn) auth(m liveIn) {
 	tok := ""
 	if m.Token != nil {
 		tok = *m.Token
 	}
-	visitor, device := "", ""
-	var tokErr *apierr.Error
-	switch {
-	case tok == "":
-	case !names.VisitorTokenRe.MatchString(tok):
-		tokErr = apierr.InvalidToken
-	default:
-		id, dev, err := l.s.store.VisitorByToken(tok)
-		if err != nil {
-			l.sendErr(m.ID, err)
-			return
-		}
-		if id == "" {
-			tokErr = apierr.InvalidToken
-		}
-		visitor, device = id, dev
+	in, err := l.s.signIn(l.req, tok)
+	if err != nil {
+		l.sendErr(m.ID, err)
+		return
+	}
+	visitor, device, tokErr := in.visitor, in.device, in.err
+	if in.apiKey != nil {
+		visitor, device, tokErr = "", "", apierr.APIKeyNotAllowed
+	} else if tokErr == nil && tok != "" && visitor == "" {
+		tokErr = apierr.UnknownKey // a token for a key not registered yet
 	}
 
 	l.setIdentity(visitor, device, tokErr)

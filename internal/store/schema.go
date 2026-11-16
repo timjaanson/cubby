@@ -1,8 +1,12 @@
 package store
 
-// serverVersion is server.db's user_version. 1: tokens moved from visitors
-// to devices.
-const serverVersion = 1
+// serverVersion is server.db's user_version and spaceVersion a space
+// file's. v0.19 (sign-in with device keys) started both over; older files
+// are refused, not migrated.
+const (
+	serverVersion = 2
+	spaceVersion  = 5
+)
 
 const serverSchema = `
 CREATE TABLE IF NOT EXISTS visitors (
@@ -11,30 +15,46 @@ CREATE TABLE IF NOT EXISTS visitors (
   last_seen_at INTEGER NOT NULL,           -- s, the newest of its devices
   stored       INTEGER NOT NULL DEFAULT 0
 );
--- Every visitor token is a device. A visitor has one or more.
+-- A device is a public key. A visitor has one or more.
 CREATE TABLE IF NOT EXISTS devices (
-  id           TEXT PRIMARY KEY,           -- d_ + 8 base32
+  id           TEXT PRIMARY KEY,           -- the key's JWK thumbprint (RFC 7638)
   visitor      TEXT NOT NULL,
-  token_hash   TEXT NOT NULL UNIQUE,       -- SHA-256 of the vt_ token
+  key          TEXT NOT NULL,              -- the canonical public JWK
   label        TEXT NOT NULL DEFAULT '',
   created_at   INTEGER NOT NULL,           -- ms
   last_seen_at INTEGER NOT NULL,           -- ms
-  linked_by    TEXT                        -- the device whose link made this one, NULL for the first
+  paired_by    TEXT                        -- the device whose pairing code added this one, NULL for the first
 );
 CREATE INDEX IF NOT EXISTS devices_by_visitor ON devices (visitor);
--- One-use codes that make another device the same visitor.
-CREATE TABLE IF NOT EXISTS links (
-  id         TEXT PRIMARY KEY,             -- l_ + 8 base32
-  code_hash  TEXT NOT NULL UNIQUE,         -- SHA-256 of lk_ + the 10-character code
+-- One-use codes that add another device to the same visitor.
+CREATE TABLE IF NOT EXISTS pairing_codes (
+  id         TEXT PRIMARY KEY,             -- pc_ + 8 base32
+  code_hash  TEXT NOT NULL UNIQUE,         -- SHA-256 of the 10-character code
   visitor    TEXT NOT NULL,
   by_device  TEXT NOT NULL,
   created_at INTEGER NOT NULL,             -- ms
   expires    INTEGER NOT NULL,             -- ms
   state      TEXT NOT NULL DEFAULT 'open', -- open, used, cancelled
   ended_at   INTEGER,                      -- ms
-  device     TEXT                          -- the device it made
+  device     TEXT                          -- the device it added
 );
-CREATE INDEX IF NOT EXISTS links_by_visitor ON links (visitor);
+CREATE INDEX IF NOT EXISTS pairing_codes_by_visitor ON pairing_codes (visitor);
+-- Static credentials for tools that can't sign: one space, a capped level.
+CREATE TABLE IF NOT EXISTS api_keys (
+  id           TEXT PRIMARY KEY,           -- ak_ + 8 base32
+  hash         TEXT NOT NULL UNIQUE,       -- SHA-256 of the cubby_ key
+  visitor      TEXT NOT NULL,
+  device       TEXT NOT NULL,              -- the device that minted it; signing it out ends the key
+  space        TEXT NOT NULL,
+  access       TEXT NOT NULL,              -- read, post or all
+  label        TEXT NOT NULL DEFAULT '',
+  created_at   INTEGER NOT NULL,           -- ms
+  until        INTEGER,                    -- ms, NULL: no end
+  last_used_at INTEGER                     -- ms
+);
+CREATE INDEX IF NOT EXISTS api_keys_by_visitor ON api_keys (visitor);
+CREATE INDEX IF NOT EXISTS api_keys_by_device ON api_keys (device);
+CREATE INDEX IF NOT EXISTS api_keys_by_space ON api_keys (space);
 CREATE TABLE IF NOT EXISTS visitor_spaces (
   visitor TEXT NOT NULL,
   space   TEXT NOT NULL,
@@ -49,7 +69,7 @@ CREATE TABLE IF NOT EXISTS graveyard (
 
 const spaceSchema = `
 CREATE TABLE IF NOT EXISTS meta (
-  k TEXT PRIMARY KEY,   -- seq, created_at, last_active_at, tombstone_floor, bytes, keys, settings, owner_hash
+  k TEXT PRIMARY KEY,   -- seq, created_at, last_active_at, tombstone_floor, bytes, keys, settings
   v
 );
 CREATE TABLE IF NOT EXISTS kv (
@@ -80,9 +100,9 @@ CREATE TABLE IF NOT EXISTS points (
   is_json INTEGER NOT NULL,
   PRIMARY KEY (area, key, t)
 ) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS tokens (
-  id               TEXT PRIMARY KEY,     -- t_ + 8 base32
-  hash             TEXT NOT NULL UNIQUE, -- SHA-256 of the at_ token
+CREATE TABLE IF NOT EXISTS invites (
+  id               TEXT PRIMARY KEY,     -- i_ + 8 base32
+  hash             TEXT NOT NULL UNIQUE, -- SHA-256 of the inv_ value
   label            TEXT NOT NULL DEFAULT '',
   access           TEXT NOT NULL,        -- the level it gives: read, post or all
   uses_left        INTEGER,              -- NULL: no limit
@@ -91,14 +111,14 @@ CREATE TABLE IF NOT EXISTS tokens (
   created_at       INTEGER NOT NULL,     -- ms
   ended_at         INTEGER,              -- ms, when it ran out of uses
   last_redeemed_at INTEGER,
-  minted_by        TEXT,                 -- visitor who minted it, NULL before this was recorded
+  minted_by        TEXT NOT NULL,        -- the visitor who minted it
   revoked_at       INTEGER               -- ms, ended because its minter may no longer invite
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS grants (
   id           TEXT PRIMARY KEY,         -- g_ + 8 base32
   visitor      TEXT NOT NULL,
   access       TEXT NOT NULL,            -- read, post, all or owner
-  source       TEXT NOT NULL,            -- 'create', 'owner-token', 'direct' or a token id
+  source       TEXT NOT NULL,            -- 'create', 'direct' or an invite id
   until        INTEGER,                  -- ms, NULL: until revoked
   created_at   INTEGER NOT NULL,         -- ms
   last_used_at INTEGER

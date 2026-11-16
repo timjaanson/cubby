@@ -1,9 +1,12 @@
 package cli
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCLIPaths(t *testing.T) {
-	c := &client{sc: &serverCreds{Token: "vt_x", ID: "u_aaaaaaaaaaaaaaaa"}}
+	c := &client{dc: &deviceCreds{Visitor: "u_aaaaaaaaaaaaaaaa"}}
 	good := map[string]string{
 		"poll-cedar-pilot-mango/shared/q":                "/v1/poll-cedar-pilot-mango/shared/q",
 		"/v1/poll-cedar-pilot-mango/shared/q":            "/v1/poll-cedar-pilot-mango/shared/q",
@@ -50,6 +53,21 @@ func TestCLIFlags(t *testing.T) {
 		t.Setenv("CUBBY_SERVER", s)
 		if _, err := newClient(&flags{vals: map[string]string{}, set: map[string]bool{}}); err == nil {
 			t.Errorf("server %q accepted", s)
+		}
+	}
+}
+
+// Every command's help is its own, and token takes --ttl.
+func TestTokenFlags(t *testing.T) {
+	if h := commandFlags["token"].help; !strings.HasPrefix(h, "token [--ttl") {
+		t.Errorf("token help: %q", h)
+	}
+	if v := commandFlags["token"].vals; len(v) != 1 || v[0] != "ttl" {
+		t.Errorf("token flags: %v", v)
+	}
+	for name, c := range commandFlags {
+		if strings.Contains(c.help, "#t=") || strings.Contains(c.help, "vt_") || strings.Contains(c.help, "ot_") {
+			t.Errorf("%s help mentions old credentials", name)
 		}
 	}
 }

@@ -130,11 +130,14 @@ func (s *Store) Cleanup() (rep CleanupReport, err error) {
 		rep.Visitors++
 	}
 
-	// Devices unseen as long as a visitor may be, and links that ended a
-	// day ago. A visitor whose other devices are in use stays.
+	// Devices unseen as long as a visitor may be, with the API keys they
+	// minted, pairing codes that ended a day ago, and API keys a day past
+	// their end. A visitor whose other devices are in use stays.
 	nowMs := NowMs()
 	s.srv.Exec(`DELETE FROM devices WHERE last_seen_at < ?`, nowMs-secs(r.VisitorIdleTTL)*1000)
-	s.srv.Exec(`DELETE FROM links WHERE coalesce(ended_at, expires) < ?`, nowMs-24*3600*1000)
+	s.srv.Exec(`DELETE FROM api_keys WHERE device NOT IN (SELECT id FROM devices)`)
+	s.srv.Exec(`DELETE FROM pairing_codes WHERE coalesce(ended_at, expires) < ?`, nowMs-24*3600*1000)
+	s.pruneAPIKeys()
 
 	// 2. Idle spaces, unless pinned.
 	idle := now - secs(r.SpaceIdleTTL)

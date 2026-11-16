@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -23,8 +24,8 @@ const adminUsage = `cubby admin <command> [--data DIR]
   spaces            list spaces with size, keys and last activity
   export <space>    dump every key, then every series point, as JSON lines
   delete <space>    delete a space and its file
-  owner-token <space>
-                    issue a new owner token, for an owner who lost theirs, and print it
+  owner <space> <visitor>
+                    make a visitor an owner, for a space whose owners lost every device
   stats             totals, visitors and the largest spaces
   cleanup           run the hourly cleanup now
 
@@ -158,20 +159,16 @@ func cmdAdmin(args []string) int {
 			resp.Body.Close()
 			fmt.Println("deleted", name)
 			return nil
-		case "owner-token":
-			name, err := needSpace()
+		case "owner":
+			if len(rest) != 2 {
+				return &cliError{code: 64, msg: "admin owner takes a space and a visitor ID"}
+			}
+			resp, err := call("PUT", "/spaces/"+url.PathEscape(rest[0])+"/owners/"+url.PathEscape(rest[1]))
 			if err != nil {
 				return err
 			}
-			resp, err := call("POST", "/spaces/"+name+"/owner-token")
-			if err != nil {
-				return err
-			}
-			var out struct{ OwnerToken string }
-			if err := decode(resp, &out); err != nil {
-				return err
-			}
-			fmt.Println(out.OwnerToken)
+			resp.Body.Close()
+			fmt.Println(rest[1], "is an owner of", rest[0])
 			return nil
 		case "cleanup":
 			resp, err := call("POST", "/cleanup")

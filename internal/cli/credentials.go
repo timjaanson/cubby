@@ -1,26 +1,32 @@
 package cli
 
 import (
-	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
-	"github.com/BurntSushi/toml"
+	"github.com/timjaanson/cubby/internal/auth"
 )
 
 type cliConfig struct {
 	Server string `toml:"server"`
 }
 
-// serverCreds is the visitor this CLI is on one server. Access and owner
-// tokens are never stored: they're redeemed into grants on this visitor.
-type serverCreds struct {
-	Token string `toml:"token,omitempty"`
-	ID    string `toml:"id,omitempty"`
+// deviceCreds is one device key on one server: the credentials file format,
+// also what `cubby device backup` prints and `cubby login` reads. Invites and
+// API keys are never stored.
+type deviceCreds struct {
+	Server  string          `json:"server"`
+	Visitor string          `json:"visitor,omitempty"`
+	Device  string          `json:"device"`
+	Key     json.RawMessage `json:"key"` // private JWK
 }
 
+// credentials is ~/.config/cubby/credentials.json: one device per server.
 type credentials struct {
-	Servers map[string]*serverCreds `toml:"servers"`
+	Servers map[string]*deviceCreds `json:"servers"`
 }
 
 func configDir() string {
@@ -31,11 +37,15 @@ func configDir() string {
 	return filepath.Join(home, ".config", "cubby")
 }
 
+func credsPath() string { return filepath.Join(configDir(), "credentials.json") }
+
 func loadCreds() *credentials {
-	c := &credentials{Servers: map[string]*serverCreds{}}
-	toml.DecodeFile(filepath.Join(configDir(), "credentials.toml"), c)
+	c := &credentials{}
+	if b, err := os.ReadFile(credsPath()); err == nil {
+		json.Unmarshal(b, c)
+	}
 	if c.Servers == nil {
-		c.Servers = map[string]*serverCreds{}
+		c.Servers = map[string]*deviceCreds{}
 	}
 	return c
 }
@@ -45,14 +55,30 @@ func (c *credentials) save() error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	var buf bytes.Buffer
-	buf.WriteString("# Written by cubby. Visitor tokens are secrets.\n")
-	if err := toml.NewEncoder(&buf).Encode(c); err != nil {
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(dir, ".credentials.toml.tmp")
-	if err := os.WriteFile(tmp, buf.Bytes(), 0o600); err != nil {
+	tmp := filepath.Join(dir, ".credentials.json.tmp")
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(dir, "credentials.toml"))
+	return os.Rename(tmp, credsPath())
+}
+
+// readDeviceCreds reads one credentials object, from a file, stdin or env.
+func readDeviceCreds(b []byte, server string) (*deviceCreds, *auth.Signer, error) {
+	var d deviceCreds
+	if err := json.Unmarshal(b, &d); err != nil || len(d.Key) == 0 {
+		return nil, nil, errors.New(`credentials are JSON: {"server": ..., "device": ..., "key": {private JWK}}`)
+	}
+	if d.Server != "" && server != "" && d.Server != server {
+		return nil, nil, fmt.Errorf("these credentials are for %s, not %s. Use --server %s", d.Server, server, d.Server)
+	}
+	s, err := auth.SignerFromJWK(d.Key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("credentials: %w", err)
+	}
+	d.Device = s.Key.ID
+	return &d, s, nil
 }

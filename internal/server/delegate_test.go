@@ -33,7 +33,7 @@ func TestDelegatedInvites(t *testing.T) {
 	if _, _, b := c.req("GET", sp+"/access", "", bearer(vic)...); !strings.Contains(b, `"canInvite":false`) {
 		t.Fatalf("reader access: %s", b)
 	}
-	if s, _, b := c.req("POST", sp+"/tokens", `{}`, bearer(vic)...); s != 403 || errCode(b) != "owner_only" {
+	if s, _, b := c.req("POST", sp+"/invites", `{}`, bearer(vic)...); s != 403 || errCode(b) != "owner_only" {
 		t.Fatalf("reader mints: %d %s", s, b)
 	}
 
@@ -46,12 +46,12 @@ func TestDelegatedInvites(t *testing.T) {
 	if !strings.Contains(b, `"invitedBy":"`+idOf(anna)+`"`) || !strings.Contains(b, `"invitedBy":"`+idOf(ben)+`"`) {
 		t.Fatalf("chain: %s", b)
 	}
-	_, _, b = c.req("GET", sp+"/tokens", "", o...)
+	_, _, b = c.req("GET", sp+"/invites", "", o...)
 	if !strings.Contains(b, `"by":"`+idOf(anna)+`"`) {
 		t.Fatalf("owner sees minters: %s", b)
 	}
 	// Members can't touch others' invites.
-	if s, _, _ := c.req("DELETE", sp+"/tokens/"+benTokID, "", bearer(ben)...); s != 404 {
+	if s, _, _ := c.req("DELETE", sp+"/invites/"+benTokID, "", bearer(ben)...); s != 404 {
 		t.Fatalf("ben deletes anna's invite: %d", s)
 	}
 
@@ -65,7 +65,7 @@ func TestDelegatedInvites(t *testing.T) {
 	if s, _, b := c.join(own.Space, benInv, ""); s != 404 || errCode(b) != "invite_invalid" {
 		t.Fatalf("anna's invite after removal: %d %s", s, b)
 	}
-	_, _, b = c.req("GET", sp+"/tokens", "", o...)
+	_, _, b = c.req("GET", sp+"/invites", "", o...)
 	if !strings.Contains(b, `"state":"revoked"`) {
 		t.Fatalf("revoked state: %s", b)
 	}
@@ -75,7 +75,7 @@ func TestDelegatedInvites(t *testing.T) {
 	if s, _, b := c.req("PATCH", sp, `{"invite":"owner"}`, o...); s != 200 || !strings.Contains(b, `"invite":"owner"`) {
 		t.Fatalf("settings: %d %s", s, b)
 	}
-	if s, _, b := c.req("POST", sp+"/tokens", `{}`, bearer(cleo)...); s != 403 || errCode(b) != "owner_only" {
+	if s, _, b := c.req("POST", sp+"/invites", `{}`, bearer(cleo)...); s != 403 || errCode(b) != "owner_only" {
 		t.Fatalf("mint with owner only: %d %s", s, b)
 	}
 	if s, _, _ := c.join(own.Space, danInv, ""); s == 200 || s == 201 {
@@ -114,7 +114,7 @@ func TestDelegatedTokenFollowsMinterLevel(t *testing.T) {
 	if s, _, b := c.join(own.Space, gives, ""); s != 404 || errCode(b) != "invite_invalid" {
 		t.Fatalf("invite beyond minter's level still works: %d %s", s, b)
 	}
-	if s, _, b := c.join(own.Space, keeps, ""); s != 201 || !strings.Contains(b, `"access":"post"`) {
+	if s, _, b := c.join(own.Space, keeps, ""); s != 200 || !strings.Contains(b, `"access":"post"`) {
 		t.Fatalf("invite within minter's level: %d %s", s, b)
 	}
 }

@@ -11,41 +11,44 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/timjaanson/cubby/internal/config"
 	"github.com/timjaanson/cubby/internal/names"
 )
 
-var clientValueFlags = []string{"server", "token"}
+var clientValueFlags = []string{"server"}
 
 var commandFlags = map[string]struct {
 	vals, bools []string
 	help        string
 }{
-	"limits":      {nil, nil, "limits [space]\n  Print effective server limits, or the space limits and your usage, as JSON."},
-	"time":        {nil, nil, "time\n  Print estimated server clock offset and shortest round trip in milliseconds."},
-	"get":         {nil, []string{"json"}, "get <path> [--json]\n  Print the raw value. Exit 1 if it doesn't exist."},
-	"set":         {[]string{"if-version", "ttl", "if-before"}, []string{"create"}, "set <path> [value|-] [--if-version N] [--create] [--ttl 30s] [--if-before MS]\n  Write from the argument, or from stdin when it's missing or -. Prints the new version."},
-	"del":         {[]string{"if-version", "if-before"}, []string{"f", "force"}, "del <path> [--if-version N] [--if-before MS] [-f]\n  Delete. With -f a missing key isn't an error."},
-	"ls":          {[]string{"limit"}, []string{"json", "desc"}, "ls <path or pattern> [--limit N] [--desc] [--json]\n  One line per item: key<TAB>value, or author<TAB>key<TAB>value under by/*/ (the sender\n  under inbox/*/, the recipient under to/*/)."},
-	"watch":       {[]string{"from", "state", "exec"}, []string{"json", "once", "raw"}, "watch <path or pattern> [--from N|now] [--state FILE] [--exec CMD] [--once] [--raw] [--json]\n  Print current state, then changes. --exec runs CMD per change with the value on stdin\n  and KV_KEY, KV_VERSION, KV_DELETED, KV_BY (or KV_FROM and KV_TO) set. --state FILE resumes after restarts."},
-	"add":         {[]string{"time", "if-before"}, nil, "add <path> [value|-] [--time MS] [--if-before MS]\n  Add a point to a series, from the argument or stdin. Prints the point's time.\nadd <prefix*> name=value ... [--time MS] [--if-before MS]\n  Add one point to each series prefix+name, all at one time. A value is JSON if it parses,\n  otherwise a string. Without name=value arguments, reads one JSON object from stdin."},
-	"series":      {[]string{"since", "limit"}, []string{"json"}, "series <path> [--since MS|24h|90m|7d] [--limit N] [--json]\n  Print a series' points oldest first, as t<TAB>value. Without --since, the newest 1000."},
-	"pulse":       {nil, nil, "pulse <path> [value|-]\n  Send a pulse: a value that isn't stored, delivered to whoever listens right now and\n  then gone. Nothing to read back later. For signals between running things."},
-	"pulses":      {[]string{"exec"}, []string{"json"}, "pulses <path or pattern> [--exec CMD] [--json]\n  Print pulses as they arrive, from now on: key<TAB>value, or author<TAB>key<TAB>value under\n  by/*/. --exec runs CMD per pulse with the value on stdin and KV_KEY, KV_BY,\n  KV_TIME (and KV_FROM and KV_TO under to/ and inbox/) set."},
-	"update":      {[]string{"exec"}, nil, "update <path> [--exec CMD]\n  Read, pipe through CMD (or open $EDITOR), write back with ifVersion, retry on conflict.\n  Example: cubby update space/shared/count --exec 'jq \"(. // 0) + 1\"'"},
-	"new":         {[]string{"label", "anyone", "invite"}, nil, "new [label | name] [--anyone none|read|post|all] [--invite read|post|all|owner]\n  Create a space you own. Print its name, then its owner token: keep that one, it's\n  shown once and gets you back in from another machine. Spaces are private unless\n  --anyone gives everyone a level:\n    read      anyone reads, invited people write (status pages, sensor readings)\n    post      anyone reads, writes their own by/ keys and sends to/ (polls, RSVPs)\n    all       anyone with the name reads and writes\n  --invite is the lowest member level that may invite others, post unless given.\n  With nothing, the name is four random words; a label gets the words added\n  (new poll -> poll-cedar-pilot-mango-frost); a full name of 16+ characters is used\n  as is and fails if taken."},
-	"name":        {nil, nil, "name [label]\n  Print a new space name: four random words, after the label if given. No server needed."},
-	"whoami":      {nil, []string{"show-token"}, "whoami [--show-token]\n  Print your visitor ID, or with --show-token your visitor token, for curl:\n  curl -H \"Authorization: Bearer $(cubby whoami --show-token)\" ..."},
-	"url":         {nil, nil, "url <path>\n  Print the full URL for a path."},
-	"join":        {nil, nil, "join <space> <token or link>\n  Redeem an invite (at_...) or an owner token (ot_...) for this CLI's visitor. A link\n  like https://example.com/page/#t=at_... works too. Prints your level now."},
-	"access":      {nil, nil, "access <space>\n  Your level in a space: banned, none, read, post, all or owner."},
-	"settings":    {[]string{"anyone", "invite"}, nil, "settings <space> [--anyone none|read|post|all] [--invite read|post|all|owner]\n  Print a space's settings, or change them (owners). --anyone is the level every visitor\n  has without an invite. --invite is the lowest member level that may invite others."},
-	"drop":        {nil, []string{"yes"}, "drop <space> [--yes]\n  Delete a space and everything in it (owners). Asks for the name again unless --yes."},
-	"owner-token": {nil, nil, "owner-token <space>\n  Rotate the space's owner token and print the new one (owners). Owners who joined\n  with the old one lose ownership; you keep yours."},
-	"token":       {[]string{"access", "uses", "until", "grant-for", "label", "link"}, nil, "token new <space> [--access read|post|all] [--uses N|unlimited] [--until T|never] [--grant-for D]\n          [--label L] [--link URL]\n  Mint an invite. Members at the space's invite level (post unless changed) and owners\n  can. Defaults: 10 uses, 7 days, and access all, or the inviter's own level if lower.\n  Nobody gives more than they have. --until takes 12h, 30d, 2027-01-31 or an RFC 3339\n  time. --link prints URL#t=TOKEN to send.\ntoken ls <space>\n  Your invites, or every invite for an owner. One line per invite: ID, state, uses left,\n  until, members, label, access.\ntoken set <space> <id> [--uses N|unlimited] [--until T|never]\n  Change how often and how long it can still be redeemed. --uses 0 stops new ones.\ntoken rm <space> <id>\n  Revoke an invite and every grant redeemed from it."},
-	"member":      {[]string{"until"}, nil, "member ls <space>\n  The space's members, highest level first: ID, access, since. Owners also see until\n  or -, and banned visitors.\nmember set <space> <id> <level> [--until T]\n  Give a visitor exactly one level (owners): read, post, all or owner, replacing what\n  they had, or banned to keep them out and close their live connections. --until\n  takes 12h, 30d, 2027-01-31 or an RFC 3339 time.\nmember rm <space> <id|me>\n  Remove a member's grants and any ban (owners), or leave a space yourself with me."},
-	"device":      {[]string{"ttl", "link", "label"}, []string{"no-wait", "others", "yes", "y"}, "device link [--ttl 10m] [--link URL] [--no-wait]\n  Make a one-use code that turns another device into this visitor: same ID, every grant,\n  every space. Prints the code (K7M2X-9Q4PA), with --link also URL#link=CODE for a page,\n  then waits until it's used. Valid 10 minutes unless --ttl says otherwise (30s to 1h).\ndevice accept <code or link> [--label L] [--yes]\n  Become the visitor that made the code. This CLI's current visitor is deleted with its\n  data if no other device uses it, so it asks first unless --yes. Prints the new ID.\ndevice ls\n  This visitor's devices: ID (* for this one), created, last seen, label.\ndevice name <label> [device-id]\n  Label this device, or another of yours.\ndevice rm <device-id>\ndevice rm --others\n  Sign a device out, or every device but this one. Their tokens stop working."},
+	"limits":   {nil, nil, "limits [space]\n  Print effective server limits, or the space limits and your usage, as JSON."},
+	"time":     {nil, nil, "time\n  Print estimated server clock offset and shortest round trip in milliseconds."},
+	"get":      {nil, []string{"json"}, "get <path> [--json]\n  Print the raw value. Exit 1 if it doesn't exist."},
+	"set":      {[]string{"if-version", "ttl", "if-before"}, []string{"create"}, "set <path> [value|-] [--if-version N] [--create] [--ttl 30s] [--if-before MS]\n  Write from the argument, or from stdin when it's missing or -. Prints the new version."},
+	"del":      {[]string{"if-version", "if-before"}, []string{"f", "force"}, "del <path> [--if-version N] [--if-before MS] [-f]\n  Delete. With -f a missing key isn't an error."},
+	"ls":       {[]string{"limit"}, []string{"json", "desc"}, "ls <path or pattern> [--limit N] [--desc] [--json]\n  One line per item: key<TAB>value, or author<TAB>key<TAB>value under by/*/ (the sender\n  under inbox/*/, the recipient under to/*/)."},
+	"watch":    {[]string{"from", "state", "exec"}, []string{"json", "once", "raw"}, "watch <path or pattern> [--from N|now] [--state FILE] [--exec CMD] [--once] [--raw] [--json]\n  Print current state, then changes. --exec runs CMD per change with the value on stdin\n  and KV_KEY, KV_VERSION, KV_DELETED, KV_BY (or KV_FROM and KV_TO) set. --state FILE resumes after restarts."},
+	"add":      {[]string{"time", "if-before"}, nil, "add <path> [value|-] [--time MS] [--if-before MS]\n  Add a point to a series, from the argument or stdin. Prints the point's time.\nadd <prefix*> name=value ... [--time MS] [--if-before MS]\n  Add one point to each series prefix+name, all at one time. A value is JSON if it parses,\n  otherwise a string. Without name=value arguments, reads one JSON object from stdin."},
+	"series":   {[]string{"since", "limit"}, []string{"json"}, "series <path> [--since MS|24h|90m|7d] [--limit N] [--json]\n  Print a series' points oldest first, as t<TAB>value. Without --since, the newest 1000."},
+	"pulse":    {nil, nil, "pulse <path> [value|-]\n  Send a pulse: a value that isn't stored, delivered to whoever listens right now and\n  then gone. Nothing to read back later. For signals between running things."},
+	"pulses":   {[]string{"exec"}, []string{"json"}, "pulses <path or pattern> [--exec CMD] [--json]\n  Print pulses as they arrive, from now on: key<TAB>value, or author<TAB>key<TAB>value under\n  by/*/. --exec runs CMD per pulse with the value on stdin and KV_KEY, KV_BY,\n  KV_TIME (and KV_FROM and KV_TO under to/ and inbox/) set."},
+	"update":   {[]string{"exec"}, nil, "update <path> [--exec CMD]\n  Read, pipe through CMD (or open $EDITOR), write back with ifVersion, retry on conflict.\n  Example: cubby update space/shared/count --exec 'jq \"(. // 0) + 1\"'"},
+	"new":      {[]string{"label", "anyone", "invite"}, nil, "new [label | name] [--anyone none|read|post|all] [--invite read|post|all|owner]\n  Create a space you own and print its name. Spaces are private unless --anyone gives\n  everyone a level:\n    read      anyone reads, invited people write (status pages, sensor readings)\n    post      anyone reads, writes their own by/ keys and sends to/ (polls, RSVPs)\n    all       anyone with the name reads and writes\n  --invite is the lowest member level that may invite others, post unless given.\n  With nothing, the name is four random words; a label gets the words added\n  (new poll -> poll-cedar-pilot-mango-frost); a full name of 16+ characters is used\n  as is and fails if taken. Keep a backup key (cubby device backup) to get back in\n  from another machine."},
+	"name":     {nil, nil, "name [label]\n  Print a new space name: four random words, after the label if given. No server needed."},
+	"whoami":   {nil, nil, "whoami\n  Print your visitor ID. cubby device ls shows this device (*) among yours."},
+	"invite":   {[]string{"access", "uses", "until", "grant-for", "label", "link"}, nil, "invite new <space> [--access read|post|all] [--uses N|unlimited] [--until T|never] [--grant-for D]\n           [--label L] [--link URL]\n  Mint an invite. Members at the space's invite level (post unless changed) and owners\n  can. Defaults: 10 uses, 7 days, and access all, or the inviter's own level if lower.\n  Nobody gives more than they have. --until takes 12h, 30d, 2027-01-31 or an RFC 3339\n  time. --link prints URL#invite=INVITE to send.\ninvite ls <space>\n  Your invites, or every invite for an owner. One line per invite: ID, state, uses left,\n  until, members, label, access.\ninvite set <space> <id> [--uses N|unlimited] [--until T|never]\n  Change how often and how long it can still be redeemed. --uses 0 stops new ones.\ninvite rm <space> <id>\n  Revoke an invite and every grant redeemed from it."},
+	"api-key":  {[]string{"access", "until", "label"}, nil, "api-key new <space> [--access read|post|all] [--until 30d|T|never] [--label L]\n  Mint an API key: a static secret for tools that can't sign tokens, like webhooks. It\n  reads and writes in one space only, at most at your level (post unless given), and\n  lasts 30 days unless --until says otherwise. never makes it permanent, the weakest\n  option. Printed once. Send it as Authorization: Bearer cubby_... or ?token=cubby_...\napi-key ls\n  Your API keys: ID, space, access, until, last used, label.\napi-key rm <id>\n  Revoke an API key."},
+	"login":    {nil, nil, "login <file | ->\n  Use a credentials file (from cubby device backup, or written by hand) as this CLI's\n  device on its server. - reads it from stdin. Prints the visitor ID."},
+	"url":      {nil, nil, "url <path>\n  Print the full URL for a path."},
+	"join":     {nil, nil, "join <space> <invite or link>\n  Redeem an invite (inv_...) for your visitor. A link like\n  https://example.com/page/#invite=inv_... works too. Prints your level now."},
+	"access":   {nil, nil, "access <space>\n  Your level in a space: banned, none, read, post, all or owner."},
+	"settings": {[]string{"anyone", "invite"}, nil, "settings <space> [--anyone none|read|post|all] [--invite read|post|all|owner]\n  Print a space's settings, or change them (owners). --anyone is the level every visitor\n  has without an invite. --invite is the lowest member level that may invite others."},
+	"drop":     {nil, []string{"yes"}, "drop <space> [--yes]\n  Delete a space and everything in it (owners). Asks for the name again unless --yes."},
+	"token":    {[]string{"ttl"}, nil, "token [--ttl 1h]\n  Print a token for this device, signed here and valid for --ttl (at most 1h, the\n  default). For curl: -H \"Authorization: Bearer $(cubby token)\"."},
+	"member":   {[]string{"until"}, nil, "member ls <space>\n  The space's members, highest level first: ID, access, since. Owners also see until\n  or -, and banned visitors.\nmember set <space> <id> <level> [--until T]\n  Give a visitor exactly one level (owners): read, post, all or owner, replacing what\n  they had, or banned to keep them out and close their live connections. --until\n  takes 12h, 30d, 2027-01-31 or an RFC 3339 time.\nmember rm <space> <id|me>\n  Remove a member's grants and any ban (owners), or leave a space yourself with me."},
+	"device":   {[]string{"ttl", "link", "label"}, []string{"no-wait", "others", "yes", "y"}, "device pair [--ttl 10m] [--link URL] [--no-wait]\n  Make a one-use code that adds another device to your visitor: same ID, every grant,\n  every space. Prints the code (K7M2X-9Q4PA), with --link also URL#pair=CODE for a page,\n  then waits until it's used. Valid 10 minutes unless --ttl says otherwise (30s to 1h).\ndevice accept <code or link> [--label L] [--yes]\n  Join the visitor that made the code. This CLI's current visitor is deleted with its\n  data if no other device uses it, so it asks first unless --yes. Prints the new ID.\ndevice backup [--label L]\n  Print a new backup key: credentials for one more device of yours, to keep in a\n  password manager. cubby login FILE restores it on any machine.\ndevice ls\n  Your devices: ID (* for this one), created, last seen, label.\ndevice name <label> [device-id]\n  Label this device, or another of yours.\ndevice rm <device-id>\ndevice rm --others\n  Sign a device out, or every device but this one. Their keys stop working."},
 }
 
 func cmdHelp(cmd string) int {
@@ -72,7 +75,7 @@ func cmdHelp(cmd string) int {
 		return usageErr(fmt.Errorf("unknown command %q", cmd))
 	}
 	fmt.Println(d.help)
-	fmt.Println("\nCommon flags: --server URL or port (CUBBY_SERVER), --token T (CUBBY_TOKEN, a visitor token)")
+	fmt.Println("\nCommon flags: --server URL or port (CUBBY_SERVER). Env: CUBBY_CREDENTIALS (a credentials\nfile's content, for CI), CUBBY_API_KEY (use an API key instead of a device).")
 	return 0
 }
 
@@ -157,18 +160,17 @@ func (c *client) run(cmd string, f *flags) error {
 	case "new":
 		return c.newSpace(f)
 	case "whoami":
-		if f.bool("show-token") {
-			t, err := c.ensureToken()
-			if err == nil {
-				fmt.Println(t)
-			}
-			return err
-		}
 		id, err := c.visitorID()
 		if err == nil {
 			fmt.Println(id)
 		}
 		return err
+	case "token":
+		return c.printToken(f)
+	case "login":
+		return c.login(f)
+	case "api-key":
+		return c.apiKeyCmd(f)
 	case "join":
 		return c.join(f)
 	case "access":
@@ -177,10 +179,8 @@ func (c *client) run(cmd string, f *flags) error {
 		return c.settings(f)
 	case "drop":
 		return c.drop(f)
-	case "owner-token":
-		return c.ownerToken(f)
-	case "token":
-		return c.tokenCmd(f)
+	case "invite":
+		return c.inviteCmd(f)
 	case "member":
 		return c.memberCmd(f)
 	case "device":
@@ -491,12 +491,33 @@ func (c *client) newSpace(f *flags) error {
 	if err := settingsFlags(f, body); err != nil {
 		return err
 	}
-	var out struct{ Space, OwnerToken, ID, Token string }
+	var out struct{ Space string }
 	if err := c.call("POST", "/v1/spaces", body, 201, &out); err != nil {
 		return err
 	}
-	c.adopt(out.Token, out.ID)
 	fmt.Println(out.Space)
-	fmt.Println(out.OwnerToken)
+	return nil
+}
+
+// printToken prints a token for curl, signed by this device.
+func (c *client) printToken(f *flags) error {
+	if len(f.args) != 0 {
+		return usageCli("token takes no arguments")
+	}
+	ttl := time.Hour
+	if f.has("ttl") {
+		d, err := time.ParseDuration(f.str("ttl"))
+		if err != nil || d <= 0 || d > time.Hour {
+			return usageCli("--ttl is a duration up to 1h, like 10m")
+		}
+		ttl = d
+	}
+	if c.apiKey != "" {
+		return usageCli("CUBBY_API_KEY is set: send the API key itself, there's no token to make")
+	}
+	if err := c.ensureDevice(); err != nil {
+		return err
+	}
+	fmt.Println(c.signer.TokenAt(c.origin(), time.Now().Add(c.skew), ttl, false))
 	return nil
 }

@@ -1,7 +1,7 @@
 import jsQR from "jsqr"
 const { qrMatrix } = await import(process.env.MOD)
 let ok = 0
-const texts = ["hi", "https://example.com/list/#list=family-cedar-pilot-mango-frost&t=at_" + "A".repeat(43)]
+const texts = ["hi", "https://example.com/list/#list=family-cedar-pilot-mango-frost&invite=inv_" + "A".repeat(43)]
 for (const n of [1, 10, 17, 30, 60, 100, 150, 200, 250, 300, 400, 600, 900, 1500, 2000])
   texts.push(Array.from({ length: n }, (_, i) => "abcXYZ-_.~0123456789:/#&=?é"[(i * 7) % 27]).join(""))
 for (const t of texts) {

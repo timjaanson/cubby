@@ -15,28 +15,6 @@ import (
 	"github.com/timjaanson/cubby/internal/store"
 )
 
-func (s *Server) anon(c *reqCtx) error {
-	tok, id, err := s.newVisitor(c)
-	if err != nil {
-		return err
-	}
-	c.json(201, map[string]any{"token": tok, "id": id})
-	return nil
-}
-
-// newVisitor creates a visitor, within the per-IP limit that covers /anon,
-// /spaces and join.
-func (s *Server) newVisitor(c *reqCtx) (token, id string, err error) {
-	if err := s.rate(s.lim.visitorsPerIP, c.ip, 1, "rate_limited"); err != nil {
-		return "", "", err
-	}
-	token, id, err = s.store.NewVisitor()
-	if err == nil {
-		c.visitor = id
-	}
-	return token, id, err
-}
-
 func (s *Server) spaceRate(c *reqCtx, visitor string) error {
 	if err := s.rate(s.lim.spacesPerVisitor, visitor, 1, "space_limit"); err != nil {
 		return err

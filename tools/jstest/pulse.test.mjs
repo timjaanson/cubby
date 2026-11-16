@@ -9,11 +9,11 @@ const until = async (f, m, ms = 4000) => {
   assert(false, "timeout: " + m)
 }
 
-const { space } = await createSpace({ server: S, tokenKey: "p-owner", anyone: "all" })
+const { space } = await createSpace({ server: S, keyName: "p-owner", anyone: "all" })
 for (const [sendLive, listenLive] of [[false, false], [true, true], [false, true], [true, false]]) {
   const tag = `send ${sendLive ? "live" : "http"}, listen ${listenLive ? "live" : "http"}`
-  const a = kv(space, { server: S, tokenKey: "p-sender-" + tag, live: sendLive }) // own pulse budget per round
-  const b = kv(space, { server: S, tokenKey: "p-guest", live: listenLive })
+  const a = kv(space, { server: S, keyName: "p-sender-" + tag, live: sendLive }) // own pulse budget per round
+  const b = kv(space, { server: S, keyName: "p-guest", live: listenLive })
   await b.id()
   const got = [], mine = []
   let missed = 0
@@ -43,10 +43,10 @@ for (const [sendLive, listenLive] of [[false, false], [true, true], [false, true
 
 // Never stored; others' areas are theirs; text works.
 {
-  const a = kv(space, { server: S, tokenKey: "p-owner", live: true })
+  const a = kv(space, { server: S, keyName: "p-owner", live: true })
   await a.shared.pulse("ping", "hello")
   assert(await a.shared.get("ping") === null, "pulse not stored")
-  const other = await kv(space, { server: S, tokenKey: "p-guest" }).id()
+  const other = await kv(space, { server: S, keyName: "p-guest" }).id()
   let err = await a.by(other).pulse("cursor", 1).catch(e => e)
   assert(err?.code === "not_yours", "not yours " + err?.code)
   err = await a.shared.pulse("pulse", 1).catch(e => e)
@@ -57,8 +57,8 @@ for (const [sendLive, listenLive] of [[false, false], [true, true], [false, true
   const warns = []
   const warn = console.warn
   console.warn = (...a) => { const m = a.join(" "); if (m.startsWith("cubby: pulses")) warns.push(m) }
-  const a = kv(space, { server: S, tokenKey: "p-throttle" })
-  const b = kv(space, { server: S, tokenKey: "p-guest" })
+  const a = kv(space, { server: S, keyName: "p-throttle" })
+  const b = kv(space, { server: S, keyName: "p-guest" })
   const got = []
   const stop = b.by.onPulse("tilt", p => got.push(p.value))
   await sleep(150)
@@ -78,7 +78,7 @@ for (const [sendLive, listenLive] of [[false, false], [true, true], [false, true
   await sleep(300)
   assert(warns.length === 1, "no second warning within the window")
   // pulseRate on kv() and maxRate per call.
-  const fast = kv(space, { server: S, tokenKey: "p-throttle2", pulseRate: 1000 })
+  const fast = kv(space, { server: S, keyName: "p-throttle2", pulseRate: 1000 })
   const rf = await Promise.all(Array.from({ length: 5 }, async (_, i) => { await sleep(i * 3); return fast.mine.pulse("x", i) }))
   assert(rf.filter(Boolean).length >= 4, "pulseRate raises the limit " + rf)
   const r0 = await Promise.all(Array.from({ length: 10 }, (_, i) => a.mine.pulse("raw", i, { maxRate: 0 })))

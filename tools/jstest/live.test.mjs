@@ -1,7 +1,7 @@
 // kv.js with { live: true } against a real server: the same answers as HTTP,
 // requests and watches over the socket, recovery after a drop, fallback.
 const S = process.env.S
-const { kv, createSpace, KvError } = await import(process.env.MOD)
+const { kv, createSpace, devices, KvError } = await import(process.env.MOD)
 const assert = (c, m) => { if (!c) { console.error("FAIL:", m); process.exit(1) } }
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const until = async (f, m, ms = 3000) => {
@@ -21,9 +21,9 @@ class TrackedWS extends WebSocket {
   constructor(url) { super(url); sockets.push(this) }
 }
 
-const { space } = await createSpace({ server: S, tokenKey: "owner" })
-const http = kv(space, { server: S, tokenKey: "owner" })
-const db = kv(space, { server: S, tokenKey: "owner", live: true, fetch: countingFetch, WebSocket: TrackedWS })
+const { space } = await createSpace({ server: S, keyName: "owner" })
+const http = kv(space, { server: S, keyName: "owner" })
+const db = kv(space, { server: S, keyName: "owner", live: true, fetch: countingFetch, WebSocket: TrackedWS })
 assert(http.live.status === "http" && db.live.status === "closed", "initial status " + db.live.status)
 const seen = []
 db.live.onStatus = s => seen.push(s)
@@ -67,7 +67,7 @@ assert(dataFetches === before, `data requests used HTTP while open: ${dataFetche
 
 // A stranger gets the same no_space over the socket.
 {
-  const stranger = kv(space, { server: S, tokenKey: "stranger", live: true })
+  const stranger = kv(space, { server: S, keyName: "stranger", live: true })
   await stranger.shared.get("note").catch(() => {}) // over HTTP, opens the socket
   await until(() => stranger.live.status === "open", "stranger socket")
   const err = await stranger.shared.get("note").catch(e => e)
@@ -121,8 +121,8 @@ assert(dataFetches === before, `data requests used HTTP while open: ${dataFetche
 // Anonymous reads, then the first write creates a visitor and authenticates
 // the same socket.
 {
-  const { space: pub } = await createSpace({ server: S, tokenKey: "owner", anyone: "all" })
-  const guest = kv(pub, { server: S, tokenKey: "guest-" + Date.now(), live: true })
+  const { space: pub } = await createSpace({ server: S, keyName: "owner", anyone: "all" })
+  const guest = kv(pub, { server: S, keyName: "guest-" + Date.now(), live: true })
   const got = []
   const stop = guest.shared.watch("*", c => got.push(c))
   await until(() => guest.live.status === "open", "guest socket")
@@ -132,24 +132,28 @@ assert(dataFetches === before, `data requests used HTTP while open: ${dataFetche
   stop()
 }
 
-// A stored token the server doesn't know: renewed, then the write goes through.
+// A device signed out elsewhere: its key comes back as a new visitor on the
+// same socket, and the write goes through.
 {
-  const mem = new Map()
-  globalThis.localStorage = { getItem: k => mem.get(k) ?? null, setItem: (k, v) => mem.set(k, v), removeItem: k => mem.delete(k) }
-  const { space: pub } = await createSpace({ server: S, tokenKey: "owner", anyone: "all" })
-  mem.set("stale", JSON.stringify({ token: "vt_" + "x".repeat(43), id: "u_aaaaaaaaaaaaaaaa" }))
-  const d = kv(pub, { server: S, tokenKey: "stale", live: true })
-  await d.shared.get("a")
+  const { space: pub } = await createSpace({ server: S, keyName: "owner", anyone: "all" })
+  const d = kv(pub, { server: S, keyName: "stale", live: true })
+  await d.shared.set("a", 0)
+  const before = await d.id()
   await until(() => d.live.status === "open", "stale socket")
+  const code = await devices({ server: S, keyName: "stale" }).pair()
+  const other = devices({ server: S, keyName: "stale-2" })
+  await other.accept(code.code)
+  await other.remove((await other.list()).find(x => !x.current).id)
   await d.shared.set("a", 1)
-  assert(JSON.parse(mem.get("stale")).token !== "vt_" + "x".repeat(43), "token renewed over socket")
-  delete globalThis.localStorage
+  const after = await d.id()
+  assert(after.startsWith("u_") && after !== before, "new visitor over socket " + before + " " + after)
+  assert((await d.shared.getEntry("a")).by === after, "write by the new visitor")
 }
 
 // No WebSocket possible: falls back to HTTP for good, everything still works.
 {
   class Broken { constructor() { setTimeout(() => this.onclose?.(), 5) } close() {} }
-  const d = kv(space, { server: S, tokenKey: "owner", live: true, WebSocket: Broken })
+  const d = kv(space, { server: S, keyName: "owner", live: true, WebSocket: Broken })
   await d.shared.get("note")
   await sleep(50)
   await d.shared.get("note")
@@ -169,7 +173,7 @@ assert(dataFetches === before, `data requests used HTTP while open: ${dataFetche
   globalThis.document = doc
   let opened = 0
   class Silent { constructor() { this.readyState = 0; opened++; setTimeout(() => { this.readyState = 1; this.onopen?.() }, 5) } send() {} close() { this.readyState = 3 } }
-  const d = kv(space, { server: S, tokenKey: "owner", live: true, WebSocket: Silent })
+  const d = kv(space, { server: S, keyName: "owner", live: true, WebSocket: Silent })
   const states = []
   d.live.onStatus = st => states.push(st)
   await d.shared.get("note")

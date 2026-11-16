@@ -1,11 +1,11 @@
 const S = process.env.S
-const { kv, createSpace, inviteLink, KvError } = await import(process.env.MOD)
+const { kv, createSpace, devices, inviteLink, KvError } = await import(process.env.MOD)
 const assert = (c, m) => { if (!c) { console.error("FAIL:", m); process.exit(1) } }
-const opt = k => ({ server: S, tokenKey: k })
+const opt = k => ({ server: S, keyName: k })
 
 // Owner creates a private space without a stored identity.
-const { space, ownerToken } = await createSpace({ label: "family", ...opt("owner") })
-assert(space.startsWith("family-") && ownerToken.startsWith("ot_"), "createSpace")
+const { space } = await createSpace({ label: "family", ...opt("owner") })
+assert(space.startsWith("family-"), "createSpace")
 const owner = kv(space, opt("owner"))
 let me = await owner.open({ invite: null })
 assert(me.access === "owner" && me.settings.anyone === "none" && me.settings.invite === "post", "owner open " + JSON.stringify(me))
@@ -21,9 +21,9 @@ assert(err instanceof KvError && err.code === "no_space", "stranger get " + err?
 
 // Share, join through open().
 const inv = await owner.share({ label: "Anna", uses: 1, base: "https://example.com/list/#list=" + space })
-assert(inv.link.startsWith("https://example.com/list/#list=" + space + "&t=at_") && inv.uses === 1, "share " + inv.link)
+assert(inv.link.startsWith("https://example.com/list/#list=" + space + "&invite=inv_") && inv.uses === 1, "share " + inv.link)
 const anna = kv(space, opt("anna"))
-me = await anna.open({ invite: inv.token })
+me = await anna.open({ invite: inv.invite })
 assert(me.access === "all" && me.joined && me.can("write", "shared") && me.can("write", "mine"), "anna open " + JSON.stringify(me))
 await anna.shared.set("item.2", { text: "bread" })
 const { items } = await anna.shared.list("item.*")
@@ -38,7 +38,7 @@ await new Promise((res, rej) => {
 })
 
 // The used-up invite fails cleanly.
-me = await stranger.open({ invite: inv.token })
+me = await stranger.open({ invite: inv.invite })
 assert(!me.can("read") && me.inviteFailed, "used invite")
 
 // Members can't do owner things, but they can invite, within their own level.
@@ -46,10 +46,10 @@ err = await anna.owner.settings({ anyone: "read" }).catch(e => e)
 assert(err.code === "owner_only", "member owner call " + err.code)
 assert((await anna.access()).canInvite === true && me.canInvite === false, "member canInvite, stranger not")
 const fromAnna = await anna.share({ label: "ben", uses: 1, base: "https://page.test/board" })
-assert(fromAnna.link.includes("#t=at_") && fromAnna.access === "all", "member share " + JSON.stringify(fromAnna))
-assert((await anna.tokens.list()).length === 1, "member sees own tokens")
+assert(fromAnna.link.includes("#invite=inv_") && fromAnna.access === "all", "member share " + JSON.stringify(fromAnna))
+assert((await anna.invites.list()).length === 1, "member sees own tokens")
 const ben = kv(space, opt("ben"))
-me = await ben.open({ invite: fromAnna.token })
+me = await ben.open({ invite: fromAnna.invite })
 assert(me.can("read") && me.joined, "ben joins through anna")
 
 // Owner lists members, with the invite chain, and removes Anna.
@@ -78,43 +78,49 @@ assert((await stranger.open({ invite: null })).access === "read", "stranger leve
 // Leaving makes you a stranger again.
 assert(await ben.leave() === true && (await ben.access()).access === "read", "leave")
 
-// Owner token on a second device.
+// A backup key brings the owner back on a new device; the backup stays.
+const backup = await devices(opt("owner")).backup()
+assert(JSON.parse(backup).key.d && JSON.parse(backup).server === S, "backup " + backup)
+const restored = await devices(opt("laptop")).restore(backup)
 const laptop = kv(space, opt("laptop"))
-me = await laptop.open({ invite: ownerToken })
-assert(me.access === "owner", "owner token join")
-const fresh = await laptop.owner.rotateOwnerToken()
-assert(fresh.startsWith("ot_") && fresh !== ownerToken, "rotate")
+me = await laptop.open({ invite: null })
+assert(me.access === "owner" && restored.id === me.id, "restored owner " + JSON.stringify(me))
+assert((await devices(opt("owner")).list()).length === 3, "owner, backup and laptop are devices")
 
 // Unknown option is refused locally.
 err = await owner.share({ use: 1 }).catch(e => e)
 assert(err.code === "invalid_option", "typo option")
 
-// Fixed visitor token option.
-const fixed = kv(space, { server: S, token: (await (await fetch(S + "/v1/anon", { method: "POST" })).json()).token })
-assert((await fixed.id()).startsWith("u_"), "fixed id")
-assert((await fixed.shared.get("item.1")).text === "milk", "fixed read")
+// An API key: one space, at most its level.
+const made = await devices(opt("owner")).apiKeys.create(space, { label: "hook", access: "read" })
+assert(made.key.startsWith("cubby_") && made.until > Date.now(), "api key " + JSON.stringify(made))
+const hook = kv(space, { server: S, apiKey: made.key })
+assert((await hook.shared.get("item.1")).text === "milk", "api key read")
+err = await hook.shared.set("y", 1).catch(e => e)
+assert(err.code === "no_access", "api key level " + err.code)
+assert((await devices(opt("owner")).apiKeys.list()).some(k => k.label === "hook"), "api key listed")
 
-// A stale visitor token in storage (unknown to the server) doesn't block
-// createSpace or join: the client drops it and the server makes a new visitor.
+// Credentials from a backup key, as a Node script uses them.
+const script = kv(space, { server: S, credentials: JSON.parse(backup) })
+assert(await script.id() === restored.id && (await script.shared.get("item.1")).text === "milk", "credentials")
+
+// A device that was signed out: its key comes back as a new visitor, which
+// doesn't see the old space, and createSpace still works.
 {
-  const mem = new Map()
-  globalThis.localStorage = { getItem: k => mem.get(k) ?? null, setItem: (k, v) => mem.set(k, v), removeItem: k => mem.delete(k) }
-  const key = "cubby:" + S
-  mem.set(key, JSON.stringify({ token: "vt_" + "x".repeat(43), id: "u_aaaaaaaaaaaaaaaa" }))
-  const { space: s2 } = await createSpace({ server: S })
-  assert(JSON.parse(mem.get(key)).token !== "vt_" + "x".repeat(43), "stale token replaced")
-  const d2 = kv(s2, { server: S })
-  assert((await d2.open({ invite: null })).access === "owner", "owner after stale token")
-  const t2 = await d2.share({ base: "https://example.com/" })
-  mem.set(key, JSON.stringify({ token: "vt_" + "y".repeat(43), id: "u_bbbbbbbbbbbbbbbb" }))
-  assert((await d2.open({ invite: t2.token })).joined, "join after stale token")
-  mem.set(key, JSON.stringify({ token: "kv_" + "z".repeat(43), id: "u_cccccccccccccccc" }))
-  await createSpace({ server: S })
-  assert(JSON.parse(mem.get(key)).token.startsWith("vt_"), "old kv_ token dropped")
-  delete globalThis.localStorage
+  const temp = devices(opt("temp"))
+  const { space: s2 } = await createSpace(opt("temp"))
+  const before = temp.id
+  const code = await temp.pair()
+  const other = devices(opt("temp2"))
+  await other.accept(code.code)
+  const gone = (await other.list()).find(d => !d.current).id
+  await other.remove(gone)
+  me = await kv(s2, opt("temp")).open({ invite: null })
+  assert(me.access === "none" && temp.id !== before, "signed-out device " + JSON.stringify(me))
+  const { space: s3 } = await createSpace(opt("temp"))
+  assert((await kv(s3, opt("temp")).open({ invite: null })).access === "owner", "new visitor creates spaces")
+  assert(temp.id && temp.id !== before, "new visitor id")
 }
-
-
 
 // TTL, write metadata, limits, and deadlines through the public client API.
 {
@@ -158,8 +164,7 @@ assert((await fixed.shared.get("item.1")).text === "milk", "fixed read")
 // A 429 is exposed once, without silently retrying the write.
 {
   let requests = 0
-  const db = kv(space, { server: S, token: "vt_fixed", fetch: async url => {
-    if (String(url).includes("/whoami")) return new Response(JSON.stringify({ id: "u_aaaaaaaaaaaaaaaa" }))
+  const db = kv(space, { server: S, apiKey: "cubby_fixed", fetch: async url => {
     requests++
     return new Response(JSON.stringify({ error: "rate_limited", message: "Wait", retryAfter: 7 }), { status: 429, headers: { RateLimit: '\"visitor\";r=0;t=15' } })
   } })

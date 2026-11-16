@@ -400,11 +400,11 @@ func TestSeriesPostDevice(t *testing.T) {
 	c := newTest(t)
 	own := c.create(`{"label":"room","anyone":"read"}`, "")
 	o := []string{"Authorization", "Bearer " + own.Token}
-	_, _, b := c.req("POST", "/v1/"+own.Space+"/tokens", `{"access":"post","uses":1}`, o...)
-	tk := decode[struct{ Token string }](t, b)
-	_, _, b = c.req("POST", "/v1/"+own.Space+"/join", `{"token":"`+tk.Token+`"}`)
-	dev := decode[struct{ Token, ID string }](t, b)
-	d := []string{"Authorization", "Bearer " + dev.Token}
+	_, _, b := c.req("POST", "/v1/"+own.Space+"/invites", `{"access":"post","uses":1}`, o...)
+	tk := decode[struct{ Invite string }](t, b)
+	devTok, devID := c.anon()
+	c.join(own.Space, tk.Invite, devTok)
+	d := []string{"Authorization", "Bearer " + devTok}
 	sp := "/v1/" + own.Space
 	if st, _, b := c.req("POST", sp+"/by/me/env.*/series", `{"temp":1}`, d...); st != 200 {
 		t.Fatalf("device write: %d %s", st, b)
@@ -413,7 +413,7 @@ func TestSeriesPostDevice(t *testing.T) {
 		t.Fatalf("common keys: %d %s", st, b)
 	}
 	// Anyone reads it, without knowing the device's ID.
-	if st, _, b := c.req("GET", sp+"/by/*/env.temp", ""); st != 200 || !strings.Contains(b, `"by":"`+dev.ID+`"`) {
+	if st, _, b := c.req("GET", sp+"/by/*/env.temp", ""); st != 200 || !strings.Contains(b, `"by":"`+devID+`"`) {
 		t.Fatalf("read across: %d %s", st, b)
 	}
 }

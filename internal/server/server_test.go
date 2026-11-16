@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/timjaanson/cubby/internal/auth"
 	"github.com/timjaanson/cubby/internal/config"
 	"github.com/timjaanson/cubby/internal/names"
 	"github.com/timjaanson/cubby/internal/store"
@@ -61,14 +62,28 @@ func (c *tc) req(method, path, body string, hdr ...string) (int, http.Header, st
 	return resp.StatusCode, resp.Header, string(b)
 }
 
+// anon registers a new device key as a new visitor and returns a token it
+// signed, and the visitor's ID.
 func (c *tc) anon() (token, id string) {
-	_, _, b := c.req("POST", "/v1/anon", "")
-	var out struct{ Token, ID string }
-	json.Unmarshal([]byte(b), &out)
-	if out.Token == "" {
-		c.t.Fatalf("no token: %s", b)
+	c.t.Helper()
+	tok, id, _ := c.visitor()
+	return tok, id
+}
+
+// visitor is anon with the signer, for tests that sign more tokens.
+func (c *tc) visitor() (token, id string, s *auth.Signer) {
+	c.t.Helper()
+	s, err := auth.NewSigner()
+	if err != nil {
+		c.t.Fatal(err)
 	}
-	return out.Token, out.ID
+	st, _, b := c.req("POST", "/v1/visitors", "", "Authorization", "Bearer "+s.Token(c.url, 5*time.Minute, true))
+	var out struct{ ID string }
+	json.Unmarshal([]byte(b), &out)
+	if st != 201 || out.ID == "" {
+		c.t.Fatalf("register: %d %s", st, b)
+	}
+	return s.Token(c.url, time.Hour, false), out.ID, s
 }
 
 // open creates a space under name with anyone "all", owned by the visitor
@@ -79,25 +94,22 @@ func (c *tc) open(name, tok string) string {
 }
 
 type created struct {
-	Space, OwnerToken, ID, Token string
+	Space, ID, Token string
 }
 
 // create posts body to /v1/spaces as tok, or as a new visitor.
 func (c *tc) create(body, tok string) created {
 	c.t.Helper()
-	var hdr []string
-	if tok != "" {
-		hdr = []string{"Authorization", "Bearer " + tok}
+	if tok == "" {
+		tok, _ = c.anon()
 	}
-	s, _, b := c.req("POST", "/v1/spaces", body, hdr...)
+	s, _, b := c.req("POST", "/v1/spaces", body, "Authorization", "Bearer "+tok)
 	var out created
 	json.Unmarshal([]byte(b), &out)
 	if s != 201 {
 		c.t.Fatalf("create %s: %d %s", body, s, b)
 	}
-	if out.Token == "" {
-		out.Token = tok
-	}
+	out.Token = tok
 	return out
 }
 
@@ -256,10 +268,10 @@ func TestAreas(t *testing.T) {
 	if s, _, _ := c.req("GET", sp+"/to/me/draft", ""); s != 401 {
 		t.Fatalf("me/ without token: %d", s)
 	}
-	if s, _, body := c.req("GET", sp+"/to/me/draft", "", "Authorization", "Bearer vt_nope"); s != 401 || errCode(body) != "invalid_token" {
+	if s, _, body := c.req("GET", sp+"/to/me/draft", "", "Authorization", "Bearer nope"); s != 401 || errCode(body) != "bad_token" {
 		t.Fatalf("bad token: %d %s", s, body)
 	}
-	if _, _, body := c.req("GET", "/v1/whoami", "", a...); !strings.Contains(body, idA) {
+	if _, _, body := c.req("GET", "/v1/me", "", a...); !strings.Contains(body, idA) {
 		t.Fatalf("whoami: %s", body)
 	}
 	// Moderation delete, last, since it changes B's vote.
@@ -480,7 +492,7 @@ func TestCreateSpace(t *testing.T) {
 	tok, _ := c.anon()
 	a := []string{"Authorization", "Bearer " + tok}
 
-	if st, _, body := c.req("POST", "/v1/spaces", `{"name":"throws-amber-otter-tundra"}`, a...); st != 201 || !strings.Contains(body, `"space":"throws-amber-otter-tundra"`) || !strings.Contains(body, `"ownerToken":"ot_`) {
+	if st, _, body := c.req("POST", "/v1/spaces", `{"name":"throws-amber-otter-tundra"}`, a...); st != 201 || !strings.Contains(body, `"space":"throws-amber-otter-tundra"`) || strings.Contains(body, "ownerToken") {
 		t.Fatalf("create by name: %d %s", st, body)
 	}
 	if st, _, body := c.req("POST", "/v1/spaces", `{"name":"throws-amber-otter-tundra"}`, a...); st != 409 || errCode(body) != "space_exists" {
@@ -516,14 +528,14 @@ func TestCreateSpace(t *testing.T) {
 		t.Fatalf("empty body: %d %s", st, body)
 	}
 
-	// Without a token, the creator is a new visitor and gets its token.
-	st, _, body = c.req("POST", "/v1/spaces", `{"label":"poll","anyone":"post"}`)
-	json.Unmarshal([]byte(body), &out)
-	if st != 201 || !strings.HasPrefix(out.Space, "poll-") || !strings.HasPrefix(out.Token, "vt_") || out.Settings.Anyone != "post" {
+	// Creating a space takes a signed-in device.
+	if st, _, body = c.req("POST", "/v1/spaces", `{"label":"poll","anyone":"post"}`); st != 401 || errCode(body) != "missing_token" {
 		t.Fatalf("create without a token: %d %s", st, body)
 	}
-	// That token works, and its visitor owns the space.
-	if _, _, body := c.req("GET", "/v1/"+out.Space+"/access", "", "Authorization", "Bearer "+out.Token); !strings.Contains(body, `"access":"owner"`) {
+	// The creator owns the space.
+	st, _, body = c.req("POST", "/v1/spaces", `{"label":"poll","anyone":"post"}`, a...)
+	json.Unmarshal([]byte(body), &out)
+	if _, _, body := c.req("GET", "/v1/"+out.Space+"/access", "", a...); st != 201 || !strings.Contains(body, `"access":"owner"`) {
 		t.Fatalf("creator isn't owner: %s", body)
 	}
 }

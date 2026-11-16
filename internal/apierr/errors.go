@@ -19,10 +19,12 @@ type Error struct {
 func (e *Error) Error() string { return e.Code + ": " + e.Message }
 
 var (
-	NotFound     = &Error{Status: 404, Code: "not_found", Message: "No such key."}
-	ServerFull   = &Error{Status: 507, Code: "server_full", Message: "The server is full."}
-	MissingToken = &Error{Status: 401, Code: "missing_token", Message: "This request needs a visitor token. Get one with POST /v1/anon and send it as Authorization: Bearer <token>."}
-	InvalidToken = &Error{Status: 401, Code: "invalid_token", Message: "The visitor token is unknown or expired. Get a new one with POST /v1/anon; it starts with no grants."}
+	NotFound         = &Error{Status: 404, Code: "not_found", Message: "No such key."}
+	ServerFull       = &Error{Status: 507, Code: "server_full", Message: "The server is full."}
+	MissingToken     = &Error{Status: 401, Code: "missing_token", Message: "This request needs a token: a JWT signed by a registered device key, sent as Authorization: Bearer <token>. Register a key with POST /v1/visitors."}
+	UnknownKey       = &Error{Status: 401, Code: "unknown_key", Message: "No device has this key: it was never registered, or was signed out. Register it with POST /v1/visitors, or add it to a visitor with POST /v1/pair."}
+	InvalidAPIKey    = &Error{Status: 401, Code: "invalid_api_key", Message: "This API key is unknown, expired or revoked."}
+	APIKeyNotAllowed = &Error{Status: 403, Code: "api_key_not_allowed", Message: "An API key reads and writes in its space only. This needs a token signed by a device key."}
 
 	// NoSpace is the answer for a space that doesn't exist and for a private
 	// space the request can't read. They must stay identical, so the
@@ -34,6 +36,23 @@ var (
 		Message: "This invite is unknown, expired, used up or revoked, or the space doesn't exist. Ask the space's owner for a new one."}
 	OwnerOnly = &Error{Status: 403, Code: "owner_only", Message: "Only an owner of this space can do this."}
 )
+
+// TokenError is a token that was refused: code says why, as the auth
+// package decided.
+// A token refused for its times carries serverTime, so a client with a
+// wrong clock sees it at once.
+func TokenError(code, msg string) *Error {
+	e := &Error{Status: 401, Code: code, Message: msg}
+	if code == "token_expired" || code == "token_not_yet_valid" {
+		e.Extra = map[string]any{"serverTime": time.Now().UnixMilli()}
+	}
+	return e
+}
+
+// APIKeySpace is an API key used on a space it isn't for.
+func APIKeySpace(space string) *Error {
+	return &Error{Status: 403, Code: "api_key_space", Message: "This API key is for the space " + space + " only."}
+}
 
 // NoAccess is a write that takes a higher level than the visitor has. need
 // is the level it takes: post for by/ and to/, all for shared/.

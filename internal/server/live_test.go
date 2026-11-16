@@ -149,7 +149,7 @@ func TestLiveRouteHTTPErrors(t *testing.T) {
 	if s, _, b := c.req("GET", sp+"?token="+own.Token, "", up...); s != 400 || !strings.Contains(b, "auth") {
 		t.Fatalf("token in URL: %d %s", s, b)
 	}
-	if s, _, b := c.req("GET", sp, "", append(up, bearer("vt_"+strings.Repeat("x", 43))...)...); s != 401 || errCode(b) != "invalid_token" {
+	if s, _, b := c.req("GET", sp, "", append(up, bearer("nope")...)...); s != 401 || errCode(b) != "bad_token" {
 		t.Fatalf("bad header token: %d %s", s, b)
 	}
 	if s, _, b := c.req("POST", sp, ""); s != 405 {
@@ -251,7 +251,7 @@ func TestLiveAccessPerMessage(t *testing.T) {
 	w.send(`{"id":"w","method":"GET","path":"shared/*/watch","query":{"version":0}}`)
 	watchBody(t, w.reply(`"w"`))
 	_, id := func() (string, string) { // stranger's ID
-		_, _, b := c.req("GET", "/v1/whoami", "", bearer(stranger)...)
+		_, _, b := c.req("GET", "/v1/me", "", bearer(stranger)...)
 		var o struct{ ID string }
 		json.Unmarshal([]byte(b), &o)
 		return "", o.ID
@@ -344,14 +344,14 @@ func TestLiveAuth(t *testing.T) {
 		t.Fatalf("shared watch after switch: %v", ch)
 	}
 
-	// A bad token: reads go on without a visitor, writes say invalid_token.
-	if f := w.call("5", `{"id":5,"op":"auth","token":"vt_`+strings.Repeat("x", 43)+`"}`); f.code() != "invalid_token" {
+	// A bad token: reads and writes both say why.
+	if f := w.call("5", `{"id":5,"op":"auth","token":"nope"}`); f.code() != "bad_token" {
 		t.Fatalf("bad auth: %s", f.Body)
 	}
-	if f := w.call("6", `{"id":6,"method":"GET","path":"shared/y"}`); f.Status != 200 {
+	if f := w.call("6", `{"id":6,"method":"GET","path":"shared/y"}`); f.code() != "bad_token" {
 		t.Fatalf("read after bad auth: %d %s", f.Status, f.Body)
 	}
-	if f := w.call("7", `{"id":7,"method":"PUT","path":"shared/y","body":2}`); f.code() != "invalid_token" {
+	if f := w.call("7", `{"id":7,"method":"PUT","path":"shared/y","body":2}`); f.code() != "bad_token" {
 		t.Fatalf("write after bad auth: %s", f.Body)
 	}
 	// Anonymous: auth with no token, writes need one.
