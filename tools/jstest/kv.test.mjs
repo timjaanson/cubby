@@ -109,17 +109,17 @@ assert(await script.id() === restored.id && (await script.shared.get("item.1")).
 {
   const temp = devices(opt("temp"))
   const { space: s2 } = await createSpace(opt("temp"))
-  const before = temp.id
+  const before = (await temp.id())
   const code = await temp.pair()
   const other = devices(opt("temp2"))
   await other.accept(code.code)
   const gone = (await other.list()).find(d => !d.current).id
   await other.remove(gone)
   me = await kv(s2, opt("temp")).open({ invite: null })
-  assert(me.access === "none" && temp.id !== before, "signed-out device " + JSON.stringify(me))
+  assert(me.access === "none" && (await temp.id()) !== before, "signed-out device " + JSON.stringify(me))
   const { space: s3 } = await createSpace(opt("temp"))
   assert((await kv(s3, opt("temp")).open({ invite: null })).access === "owner", "new visitor creates spaces")
-  assert(temp.id && temp.id !== before, "new visitor id")
+  assert((await temp.id()) && (await temp.id()) !== before, "new visitor id")
 }
 
 // TTL, write metadata, limits, and deadlines through the public client API.

@@ -7,8 +7,9 @@ const opt = (k, extra = {}) => ({ server: S, keyName: k, ...extra })
 // The phone owns a private space.
 const { space } = await createSpace({ label: "notes", ...opt("phone") })
 const phone = devices(opt("phone"))
-const phoneId = phone.id
+const phoneId = (await phone.id())
 assert(/^u_/.test(phoneId), "phone id " + phoneId)
+assert(await devices(opt("nobody-yet")).id() === null, "id() does not register")
 
 const link = await phone.pair({ base: "https://example.com/page/?q=1#s=" + space + "&invite=inv_x" })
 assert(/^[0-9A-Z]{10}$/.test(link.code) && link.display === link.code.slice(0, 5) + "-" + link.code.slice(5), "code " + JSON.stringify(link))
@@ -22,13 +23,13 @@ const { space: other } = await createSpace({ label: "scratch", anyone: "all", ..
 const scratch = kv(other, opt("laptop", { live: true }))
 await scratch.shared.set("x", 1)
 const laptop = devices(opt("laptop"))
-const before = laptop.id
+const before = (await laptop.id())
 assert(before && before !== phoneId, "laptop has its own id")
 assert(await laptop.accept() === null, "nothing to accept")
 
 const r = await laptop.accept(link.display.toLowerCase())
 assert(r.id === phoneId && r.previous === before && r.deleted === true, "accept " + JSON.stringify(r))
-assert(laptop.id === phoneId, "laptop is the phone's visitor now")
+assert((await laptop.id()) === phoneId, "laptop is the phone's visitor now")
 const { device } = await done
 assert(device.id === r.device && device.label === "Node.js", "done " + JSON.stringify(device))
 
@@ -68,7 +69,7 @@ assert(e4 instanceof KvError && e4.code === "last_device", "last device " + e4?.
 
 // The phone was signed out: its key comes back as a new visitor, alone.
 const fresh = await phone.list()
-assert(fresh.length === 1 && fresh[0].current && phone.id && phone.id !== phoneId, "phone after sign out " + JSON.stringify(fresh) + " " + phone.id)
+assert(fresh.length === 1 && fresh[0].current && (await phone.id()) && (await phone.id()) !== phoneId, "phone after sign out " + JSON.stringify(fresh) + " " + (await phone.id()))
 
 scratch.close?.()
 console.log("devices ok")

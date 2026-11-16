@@ -1342,8 +1342,8 @@ export function devices(o = {}) {
   }
 
   return {
-    // This device's visitor ID, null before it has one.
-    get id() { return ident.visitorId() },
+    // This device's visitor ID, null before it has one. Doesn't register.
+    async id() { await ident.peek(); return ident.visitorId() },
     // The code in #pair=..., without using it. null if there's none.
     pending(param = "pair") { return hashParams().get(param) },
     // A one-use code for another device, alive ttl seconds (30 to 3600,
