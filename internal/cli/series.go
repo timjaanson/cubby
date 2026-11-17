@@ -98,17 +98,21 @@ func (c *client) add(f *flags) error {
 	return nil
 }
 
-// parseSince takes milliseconds, or a duration back from now like 90m, 24h or 7d.
-func parseSince(s string, now time.Time) (int64, error) {
+// parseTime takes milliseconds, or a duration back from now like 90m, 24h
+// or 7d, for --since and --until.
+func parseTime(flag, s string, now time.Time) (int64, error) {
 	if n, err := strconv.ParseInt(s, 10, 64); err == nil && n >= 0 {
 		return n, nil
 	}
 	d, err := config.ParseDuration(s)
 	if err != nil || d <= 0 {
-		return 0, usageCli("--since takes a time in milliseconds, or a duration like 90m, 24h or 7d")
+		return 0, usageCli("--" + flag + " takes a time in milliseconds, or a duration like 90m, 24h or 7d")
 	}
 	return now.Add(-d).UnixMilli(), nil
 }
+
+// seriesPage is the most points one series request returns.
+const seriesPage = 10000
 
 func (c *client) series(f *flags) error {
 	p, err := c.onePath(f, "series")
@@ -124,26 +128,43 @@ func (c *client) series(f *flags) error {
 			return usageCli("--limit takes a positive number")
 		}
 	}
-	var since *int64
-	if f.has("since") {
-		n, err := parseSince(f.str("since"), time.Now())
-		if err != nil {
-			return err
+	now := time.Now()
+	var since, until *int64
+	for _, b := range []struct {
+		flag string
+		to   **int64
+	}{{"since", &since}, {"until", &until}} {
+		if f.has(b.flag) {
+			n, err := parseTime(b.flag, f.str(b.flag), now)
+			if err != nil {
+				return err
+			}
+			*b.to = &n
 		}
-		since = &n
-	} else if limit > 1000 {
-		return usageCli("without --since, series prints at most the newest 1000 points. Use --since for more")
+	}
+	desc := f.bool("desc")
+	// Oldest first without --since is one window of the newest points.
+	window := !desc && since == nil
+	if window && limit > seriesPage {
+		return usageCli("without --since, series prints at most the newest 10000 points. Use --since, or --desc to page back")
 	}
 	printed := 0
 	for {
 		q := url.Values{}
-		page := 1000
-		if limit > 0 {
-			page = min(1000, limit-printed)
+		switch {
+		case limit > 0:
+			q.Set("limit", strconv.Itoa(min(seriesPage, limit-printed)))
+		case !window:
+			q.Set("limit", strconv.Itoa(seriesPage))
 		}
-		q.Set("limit", strconv.Itoa(page))
 		if since != nil {
 			q.Set("since", strconv.FormatInt(*since, 10))
+		}
+		if until != nil {
+			q.Set("until", strconv.FormatInt(*until, 10))
+		}
+		if desc {
+			q.Set("order", "desc")
 		}
 		resp, b, err := c.do("GET", p.url()+"/series?"+q.Encode(), nil, reqOpts{needToken: p.needsToken()})
 		if err != nil {
@@ -154,8 +175,9 @@ func (c *client) series(f *flags) error {
 		}
 		var out struct {
 			Points []struct {
-				T     int64           `json:"t"`
-				Value json.RawMessage `json:"value"`
+				T       int64           `json:"t"`
+				Value   json.RawMessage `json:"value"`
+				Expires int64           `json:"expires,omitempty"`
 			}
 			Next *int64
 		}
@@ -174,6 +196,10 @@ func (c *client) series(f *flags) error {
 		if out.Next == nil || (limit > 0 && printed >= limit) {
 			return nil
 		}
-		since = out.Next
+		if desc {
+			until = out.Next
+		} else {
+			since = out.Next
+		}
 	}
 }

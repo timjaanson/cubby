@@ -57,8 +57,8 @@ Examples that mint tokens with jose, PyJWT and openssl are in `tools/interop/`.
 | `PATCH /v1/{space}` | owners: `{"anyone", "invite"}` |
 | `DELETE /v1/{space}` | owners: delete the space |
 | `POST /v1/{space}/join` | `{"invite": "inv_..."}` → `{"space", "id", "access", "until", "settings"}` |
-| `POST /v1/{space}/invites` | `{"label", "access", "uses", "until", "grantFor"}` → `{"id", "invite": "inv_...", ...}`. Defaults: all (or your level if lower), 10 uses, 7 days |
-| `GET /v1/{space}/invites`, `PATCH`/`DELETE /invites/{id}` | yours, or all for owners; `PATCH {"uses", "until"}`; delete revokes it and its grants |
+| `POST /v1/{space}/invites` | `{"label", "access", "uses", "until", "grantFor"}` → `{"id", "invite": "inv_...", ...}`. Defaults: all (or your level if lower), 10 uses, 7 days. `"access": "owner"`: owners only (403 otherwise), `uses` 1, `until` within 7 days, else 400 `invalid_parameter` |
+| `GET /v1/{space}/invites`, `PATCH`/`DELETE /invites/{id}` | yours, or all for owners; `PATCH {"uses", "until"}` (an owner invite keeps `uses` 0 or 1 and `until` within 7 days); delete revokes it and its grants |
 | `GET /v1/{space}/members` | `{"items": [{"id", "access", "since", ...}]}`, owners also see `until`, `invitedBy`, bans |
 | `PUT /v1/{space}/members/{id}` | owners: `{"access": "read"|"post"|"all"|"owner"|"banned", "until"}` |
 | `DELETE /v1/{space}/members/{id or me}` | owners remove; `me` leaves |
@@ -83,13 +83,14 @@ Areas: `shared/{key}`, `by/{id|me}/{key}`, `to/{id|me|owners}/{key}` (send), `in
 | `GET .../{pattern}/watch?version=N` | long poll, below |
 | `POST .../{key}/series` body = value | add a point: `{"version", "t"}`. Query: `t` (ms, a late reading; the same `t` replaces that point), `ttl` (seconds after `t`), `ifBefore` |
 | `POST .../{prefix*}/series` body = object | a point in `prefix + name` for each member, up to 100, at one time |
-| `GET .../{key}/series?since=ms&limit=N` | `{"key", "points": [{"t", "value", "expires"?}], "version", "next"}` |
+| `GET .../{key}/series` | `{"key", "points": [{"t", "value", "expires"?}], "version", "next"}`. Query: `since`, `until` (ms, exclusive), `order=desc`, `limit` (≤10000, default 1000) |
 | `POST .../{key}/pulse` body = value | 202 `{"t"}`, not stored |
 | `GET .../{pattern}/pulse?after=SEQ` | long poll: `{"pulses": [{"key", "by", "value", "t"}], "seq", "missed"}` |
 
 - A value is UTF-8, not empty, at most 512 KB (points and pulses 4 KB). Valid JSON is stored and returned as `application/json`, anything else as `text/plain`, byte for byte. In lists and watches, text values are JSON strings.
 - Versions grow per space. Pass the `version` of a key's own entry as `ifVersion`.
 - A series keeps its newest `max_series_points` (1,000,000 by default). A point with `ttl` is removed at `t + ttl`; one whose `t + ttl` has already passed is refused (400, `parameter: "ttl"`). When the newest point goes, the key's value becomes the next newest under a new version; when the last goes, the key is removed and watchers see `"expired": true`.
+- Series reads are oldest first. Without `since` (and without `order=desc`) they return the newest `limit` points, oldest first, and `next` is null. With `order=desc` points come newest first. A page stops at `limit` or 4 MB of values; then `next` is the `t` to pass as `since` for the following page, or as `until` with `order=desc`.
 - Unknown or repeated query parameters and unknown JSON fields are 400 `invalid_parameter`, so a typo never turns a conditional write into a plain one. `_` is ignored for cache busting.
 
 ### Watching

@@ -189,6 +189,15 @@ func TestLiveRequestsMatchHTTP(t *testing.T) {
 	if f = w.call("7", `{"id":7,"method":"GET","path":"shared/temp/series"}`); f.Status != 200 || !strings.Contains(string(f.Body), "21.5") {
 		t.Fatalf("series read: %d %s", f.Status, f.Body)
 	}
+	w.call(`"7b"`, `{"id":"7b","method":"POST","path":"shared/temp/series","body":22.5}`)
+	f = w.call(`"7c"`, `{"id":"7c","method":"GET","path":"shared/temp/series","query":{"order":"desc","limit":1}}`)
+	if r := decode[seriesResp](t, string(f.Body)); f.Status != 200 || len(r.Points) != 1 || string(r.Points[0].Value) != "22.5" || r.Next == nil {
+		t.Fatalf("series desc: %d %s", f.Status, f.Body)
+	}
+	f = w.call(`"7d"`, `{"id":"7d","method":"GET","path":"shared/temp/series","query":{"order":"desc","until":`+string(mustNext(t, f.Body))+`}}`)
+	if r := decode[seriesResp](t, string(f.Body)); len(r.Points) != 1 || string(r.Points[0].Value) != "21.5" || r.Next != nil {
+		t.Fatalf("series desc until: %d %s", f.Status, f.Body)
+	}
 	if f = w.call("8", `{"id":8,"method":"DELETE","path":"shared/t","query":{"ifVersion":"1"}}`); f.Status != 412 {
 		t.Fatalf("conditional delete: %d %s", f.Status, f.Body)
 	}

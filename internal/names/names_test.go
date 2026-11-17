@@ -165,3 +165,14 @@ func TestPairingCodes(t *testing.T) {
 		t.Fatal(d)
 	}
 }
+
+func TestSlug(t *testing.T) {
+	for in, want := range map[string]string{
+		"Home environment": "home-environment", "  a--b__c ": "a-b-c", "Ünïcode café": "n-code-caf", "!!!": "",
+		strings.Repeat("ab-", 20): strings.Trim(strings.Repeat("ab-", 20)[:MaxLabel], "-"),
+	} {
+		if got := Slug(in); got != want || (got != "" && !ValidLabel(got)) {
+			t.Errorf("Slug(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -32,6 +32,18 @@ async page => {
   if (await page.locator('cubby-share textarea.key').count()) throw Error('backup key shown after dismissal')
   await page.getByRole('button', { name: 'Create group link', exact: true }).click()
   await page.getByRole('button', { name: 'Copy', exact: true }).waitFor()
+  // An owner link: under More options, armed by a first click, one use.
+  await page.locator('cubby-share summary').click()
+  const ownerBtn = page.getByRole('button', { name: 'Owner link (one person, 7 days)', exact: true })
+  await ownerBtn.click()
+  await page.getByRole('button', { name: /^Click again: whoever opens this link first/ }).click()
+  await page.waitForFunction(() => /one person/.test(document.querySelector('cubby-share').shadowRoot.textContent))
+  const ownerInv = await page.evaluate(async () => {
+    const link = document.querySelector('cubby-share').shadowRoot.querySelector('input.link').value
+    const list = await window.testDB.invites.list()
+    return { link, owner: list.filter(i => i.access === 'owner').map(i => i.usesLeft) }
+  })
+  if (!ownerInv.link.includes('#invite=inv_') || ownerInv.owner.join() !== '1') throw Error('owner link ' + JSON.stringify(ownerInv))
   await page.getByRole('button', { name: 'Close', exact: true }).click()
   // The backup restores the owner under another key name, as on a new device.
   const restored = await page.evaluate(async ([base, backup]) => {
@@ -73,6 +85,7 @@ async page => {
     const heads = [...root.querySelectorAll('h3')].map(h => h.textContent)
     return { heads, link: root.querySelector('input.link')?.value || '' }
   })
+  if (await page.getByRole('button', { name: 'Owner link (one person, 7 days)' }).count()) throw Error('member sees the owner link')
   if (memberPanel.heads.includes('People') || memberPanel.heads.includes('Who can see this') || !memberPanel.link.includes('#invite=inv_')) throw Error('member panel ' + JSON.stringify(memberPanel))
   // The key survives a reload: same visitor from IndexedDB.
   const before = await page.evaluate(async base => (await import(base + '/kv.js')).devices({ server: base }).list().then(l => l.length), base)
@@ -81,5 +94,5 @@ async page => {
   const id2 = await page.evaluate(async ([base, space]) => { const { kv } = await import(base + '/kv.js'); return (await kv(space, { server: base }).access()).id }, [base, space2])
   if (!id1 || id1 !== id2 || before < 1) throw Error('identity after reload ' + id1 + ' ' + id2)
   if (errors.length) throw Error(errors.join('\n'))
-  return { backupFirst: 'passed', dismissal: 'passed', restore: 'passed', clock: 'passed', memberPanel: 'passed', reload: 'passed' }
+  return { backupFirst: 'passed', dismissal: 'passed', ownerLink: 'passed', restore: 'passed', clock: 'passed', memberPanel: 'passed', reload: 'passed' }
 }

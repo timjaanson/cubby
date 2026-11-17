@@ -288,6 +288,9 @@ type InviteChange struct {
 	Uses     *int64 // nil: no limit
 	SetUntil bool
 	Until    *int64 // nil: no end
+	// Check, if set, sees the invite's level before anything changes and
+	// can refuse the change.
+	Check func(access.Level) error
 }
 
 var inviteNotFound = &apierr.Error{Status: 404, Code: "not_found", Message: "No such invite in this space."}
@@ -299,6 +302,16 @@ func (s *Store) UpdateInvite(space, id, by string, ch InviteChange) (info Invite
 		var exists int
 		if tx.QueryRow(`SELECT 1 FROM invites WHERE id = ? AND (? = '' OR minted_by = ?)`, id, by, by).Scan(&exists) != nil {
 			return inviteNotFound
+		}
+		if ch.Check != nil {
+			var lv string
+			if err := tx.QueryRow(`SELECT access FROM invites WHERE id = ?`, id).Scan(&lv); err != nil {
+				return err
+			}
+			level, _ := access.ParseLevel(lv)
+			if err := ch.Check(level); err != nil {
+				return err
+			}
 		}
 		if ch.SetUses {
 			var ended any

@@ -391,11 +391,24 @@ class CubbyShare extends Base {
         await make({ uses: null, until: null })
       },
     }, "Link with no limits")
+    // Owners can hand ownership to one person: one use, 7 days.
+    let ownerArmed = false
+    const ownerLink = mine !== "owner" ? null : h("button", {
+      onclick: async e => {
+        if (!ownerArmed) {
+          ownerArmed = true
+          e.target.textContent = "Click again: whoever opens this link first becomes an owner, with all your rights"
+          return
+        }
+        await make({ uses: 1, access: "owner" })
+      },
+    }, "Owner link (one person, 7 days)")
     more.append(
       h("div", { className: "row" }, "Uses", uses, "Valid for", days, "days",
         h("button", { onclick: () => make({ uses: Number(uses.value) || 1, until: `${Number(days.value) || 7}d` }) }, "Create")),
       h("div", { className: "row" }, forever),
     )
+    if (ownerLink) more.append(h("div", { className: "row" }, ownerLink))
     const make = async o => {
       const label = name.value.trim()
       const inv = await db.share({ label, ...o, base: this.getAttribute("base") || undefined })

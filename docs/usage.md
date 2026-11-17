@@ -83,6 +83,7 @@ const { items } = await db.by.list("vote")              // items have key, value
 ```js
 const { link } = await db.share({ label: "Anna" })          // all, 10 uses, 7 days
 const { link } = await db.share({ access: "post", uses: 1 }) // at most your own level
+const { link } = await db.share({ access: "owner" })         // owners only: one use, at most 7 days
 await db.members()                                           // [{ id, access, since }], owners see more
 await db.owner.members.set(id, "read")                       // read, post, all, owner or banned
 await db.owner.members.set(id, "banned", { until: "1d" })
@@ -100,7 +101,7 @@ The server also serves a ready-made panel with invite links, QR codes, members, 
 <cubby-share space="poll-orbit-lilac-tango-slate" members></cubby-share>
 ```
 
-After `createSpace()`, call `el.showBackup()` to open it at the backup key step.
+Owners also get an owner link under "More options". After `createSpace()`, call `el.showBackup()` to open it at the backup key step.
 
 ### Devices and backup keys
 
@@ -210,6 +211,7 @@ All or nothing: up to 100 writes in one request and one transaction, each checke
 ```js
 await db.shared.add("env.*", { temp: 21.4, rh: 45 })    // a point each in env.temp and env.rh
 const { points } = await db.shared.series("env.temp", { since: Date.now() - 864e5 })
+const latest = await db.shared.series("events", { order: "desc", limit: 200 })   // newest first
 ```
 
 A key becomes a series with its first point; there's no separate create. Its value is the newest point. Points are up to 4 KB, and a series keeps the newest 1,000,000 (the operator can change that), within the space's byte quota.
@@ -220,6 +222,7 @@ await db.shared.add("m1", { temp: 21.4 }, { t: reading.time, ttl: 1209600 })   /
 
 - `t` gives a reading's own time. A point at an existing `t` replaces it, so resending is safe.
 - `ttl` (seconds) removes the point that long after its `t`. A point without one stays. Each point carries its own; reads show `expires`. When the newest point goes, the key shows the next newest as a new version; when the last goes, the key is gone.
+- Reads are oldest first. `since` and `until` (ms, both exclusive) bound them; without `since` you get the newest `limit` (1,000 by default, up to 10,000). `order: "desc"` returns newest first. When there are more, pass `next` back as `since` (oldest first) or `until` (newest first).
 - A plain key and a series don't mix: delete one to make the other.
 
 ## Errors you'll see
@@ -255,6 +258,7 @@ cubby update homelab-maple-quilt-tundra-cobalt/shared/count --exec 'jq "(. // 0)
 cubby add   'home-cedar-pilot-mango-frost/shared/env.*' temp=21.4 rh=45
 cubby add   home-cedar-pilot-mango-frost/shared/m1 21.4 --ttl 14d
 cubby series home-cedar-pilot-mango-frost/shared/env.temp --since 24h
+cubby series home-cedar-pilot-mango-frost/shared/events --desc --limit 20 --json   # NDJSON, newest first
 cubby batch notes-cedar-pilot-mango-frost writes.json   # a JSON array of writes, as in the HTTP API
 cubby pulse space/shared/doorbell ding;  cubby pulses 'space/shared/*'
 ```
@@ -264,6 +268,7 @@ Signing in, sharing and devices:
 ```sh
 cubby token [--ttl 10m]                          # a JWT for curl, 1 hour by default
 cubby invite new <space> [--access post] [--uses 1] [--until 1h] [--link URL]
+cubby invite new <space> --access owner          # one use, at most 7 days
 cubby join <space> <invite or link>
 cubby access <space> | settings <space> --anyone read | member ls|set|rm | invite ls|set|rm | drop <space>
 cubby device pair                                # prints a code and waits
@@ -296,4 +301,4 @@ curl "$S/v1/$SPACE/shared/msg.*/watch?version=0&token=$T"
 curl -H "Authorization: Bearer cubby_..." -d 21.4 $S/v1/$SPACE/shared/temp/series   # an API key
 ```
 
-Without the CLI, any JWT library can sign: see [api.md](api.md#signing-in). Working examples for jose (JS), PyJWT and plain openssl are in `tools/interop/`.
+Without the CLI, any JWT library can sign: see [api.md](api.md#signing-in). Working examples for jose (JS), PyJWT and plain openssl are in `tools/interop/`. A minimal ESP32 (Arduino) client, with its own key in flash, is in `examples/esp32/`.

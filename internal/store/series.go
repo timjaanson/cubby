@@ -222,10 +222,20 @@ func (s *Store) pointStep(tx *sql.Tx, st *batchState, r WriteReq, t int64, maxPo
 	return WriteResult{Version: st.seq, Created: !live, Changed: true, T: t, Expires: expires, Grown: max(0, spaceDelta)}, nil
 }
 
-// ReadPoints returns points oldest first: with since, the first limit after
-// it and the next since if there are more; without, the newest limit. Both
-// stop early at PageBytes.
-func (s *Store) ReadPoints(space, area, key string, since *int64, limit int) (points []Point, next *int64, version int64, err error) {
+// PointsQuery selects points of one series. Since and Until are exclusive
+// bounds. Ascending without Since returns the newest Limit, oldest first.
+type PointsQuery struct {
+	Since, Until *int64
+	Desc         bool
+	Limit        int
+}
+
+// ReadPoints returns points in t order: ascending with Since, the first
+// Limit after it; descending, the first Limit before Until (or the newest);
+// ascending without Since, the newest Limit, oldest first. When a page stops
+// early, at Limit or at PageBytes, next is the bound for the following page:
+// the next Since ascending, the next Until descending.
+func (s *Store) ReadPoints(space, area, key string, pq PointsQuery) (points []Point, next *int64, version int64, err error) {
 	sp, err := s.Acquire(space)
 	if err != nil {
 		return nil, nil, 0, err
@@ -254,12 +264,25 @@ func (s *Store) ReadPoints(space, area, key string, since *int64, limit int) (po
 		return nil, nil, 0, err
 	}
 
-	var rows *sql.Rows
-	if since != nil {
-		rows, err = sp.db.Query(`SELECT t, value, is_json, expires FROM points WHERE area = ? AND key = ? AND t > ? ORDER BY t LIMIT ?`, area, key, *since, limit+1)
-	} else {
-		rows, err = sp.db.Query(`SELECT t, value, is_json, expires FROM points WHERE area = ? AND key = ? ORDER BY t DESC LIMIT ?`, area, key, limit)
+	where, args := "area = ? AND key = ?", []any{area, key}
+	if pq.Since != nil {
+		where += " AND t > ?"
+		args = append(args, *pq.Since)
 	}
+	if pq.Until != nil {
+		where += " AND t < ?"
+		args = append(args, *pq.Until)
+	}
+	// The newest window reads newest first and is turned around afterwards.
+	window := !pq.Desc && pq.Since == nil
+	ord, fetch := "ASC", pq.Limit+1
+	if pq.Desc || window {
+		ord = "DESC"
+	}
+	if window {
+		fetch = pq.Limit
+	}
+	rows, err := sp.db.Query(`SELECT t, value, is_json, expires FROM points WHERE `+where+` ORDER BY t `+ord+` LIMIT ?`, append(args, fetch)...)
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -280,12 +303,12 @@ func (s *Store) ReadPoints(space, area, key string, since *int64, limit int) (po
 	if err := rows.Err(); err != nil {
 		return nil, nil, 0, err
 	}
-	if since == nil {
+	if window {
 		for i, j := 0, len(points)-1; i < j; i, j = i+1, j-1 {
 			points[i], points[j] = points[j], points[i]
 		}
-	} else if len(points) > limit || cut {
-		points = points[:min(limit, len(points))]
+	} else if len(points) > pq.Limit || cut {
+		points = points[:min(pq.Limit, len(points))]
 		nt := points[len(points)-1].T
 		next = &nt
 	}

@@ -44,7 +44,7 @@ func TestPointExpiry(t *testing.T) {
 	add("m1", t0+1, 3600, "22")
 	add("m1", t0+2, 3600, "333")
 
-	pts, _, _, err := s.ReadPoints(space, "s", "m1", nil, 10)
+	pts, _, _, err := s.ReadPoints(space, "s", "m1", PointsQuery{Limit: 10})
 	if err != nil || len(pts) != 3 || pts[0].Expires != 0 || pts[2].Expires != t0+2+3_600_000 {
 		t.Fatalf("points %+v %v", pts, err)
 	}
@@ -52,7 +52,7 @@ func TestPointExpiry(t *testing.T) {
 
 	// The newest point expires: the key shows the next newest, as a change.
 	expirePointsAt(t, s, space, "m1", t0+2)
-	pts, _, _, _ = s.ReadPoints(space, "s", "m1", nil, 10)
+	pts, _, _, _ = s.ReadPoints(space, "s", "m1", PointsQuery{Limit: 10})
 	after, _ := s.Get(space, "s", "m1")
 	if len(pts) != 2 || string(after.Value) != "22" || after.T != t0+1 || after.Version <= before.Version {
 		t.Fatalf("after newest expired: %d points, key %+v", len(pts), after)
@@ -69,7 +69,7 @@ func TestPointExpiry(t *testing.T) {
 	// A series whose last point expires is gone, and its bytes with it.
 	add("gone", t0, 3600, `"x"`)
 	expirePointsAt(t, s, space, "gone", t0)
-	if _, _, _, err := s.ReadPoints(space, "s", "gone", nil, 10); !isCode(err, "not_found") {
+	if _, _, _, err := s.ReadPoints(space, "s", "gone", PointsQuery{Limit: 10}); !isCode(err, "not_found") {
 		t.Fatalf("expired series: %v", err)
 	}
 	if e, err := s.Get(space, "s", "gone"); e != nil || err != nil {
@@ -130,7 +130,7 @@ func TestSpaceMigrationV5(t *testing.T) {
 	if _, err := s.Write(context.Background(), WriteReq{Space: space, Area: "s", Key: "m5", Writer: id, Value: []byte("2"), Point: true, T: NowMs(), TTL: 60}); err != nil {
 		t.Fatal(err)
 	}
-	pts, _, _, err := s.ReadPoints(space, "s", "m5", nil, 10)
+	pts, _, _, err := s.ReadPoints(space, "s", "m5", PointsQuery{Limit: 10})
 	if err != nil || len(pts) != 2 || pts[0].Expires != 0 || pts[1].Expires == 0 {
 		t.Fatalf("after migration: %+v %v", pts, err)
 	}

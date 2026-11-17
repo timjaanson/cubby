@@ -343,11 +343,21 @@ func (s *Server) patchSettings(c *reqCtx, space string, cur access.Settings) err
 	return nil
 }
 
-// Defaults for a new invite: 10 uses, 7 days.
+// Defaults for a new invite: 10 uses, 7 days. An owner invite is always
+// one use, for at most 7 days.
 const (
 	defaultInviteUses = 10
 	defaultInviteTTL  = 7 * 24 * time.Hour
+	maxOwnerInviteTTL = 7 * 24 * time.Hour
 )
+
+func ownerInviteUses() error {
+	return apierr.BadParam("uses", "An owner invite is for one visitor: uses is 1.")
+}
+
+func ownerInviteUntil() error {
+	return apierr.BadParam("until", "An owner invite lasts at most 7 days: until is a time within 7 days.")
+}
 
 func (s *Server) mintInvite(c *reqCtx, space string, rights *access.Rights) error {
 	var in struct {
@@ -367,7 +377,7 @@ func (s *Server) mintInvite(c *reqCtx, space string, rights *access.Rights) erro
 	level := min(access.All, rights.Member)
 	if in.Access != nil {
 		var err error
-		if level, err = access.ParseIn(in.Access, "access", access.Read, access.Post, access.All); err != nil {
+		if level, err = access.ParseIn(in.Access, "access", access.Read, access.Post, access.All, access.Owner); err != nil {
 			return apierr.BadParam("access", err.Error())
 		}
 		if !rights.CanGive(level) {
@@ -378,14 +388,24 @@ func (s *Server) mintInvite(c *reqCtx, space string, rights *access.Rights) erro
 	now := time.Now()
 	spec := store.InviteSpec{By: c.visitor, Label: in.Label, Access: level}
 
+	owner := level == access.Owner
 	uses := int64(defaultInviteUses)
+	if owner {
+		uses = 1
+	}
 	spec.Uses = &uses
 	switch {
 	case isNull(in.Uses):
+		if owner {
+			return ownerInviteUses()
+		}
 		spec.Uses = nil
 	case in.Uses != nil:
 		if json.Unmarshal(in.Uses, &uses) != nil || uses < 1 {
 			return apierr.BadParam("uses", "uses is how many visitors can redeem the invite, 1 or more, or null for no limit.")
+		}
+		if owner && uses != 1 {
+			return ownerInviteUses()
 		}
 	}
 
@@ -393,11 +413,17 @@ func (s *Server) mintInvite(c *reqCtx, space string, rights *access.Rights) erro
 	spec.Until = &until
 	switch {
 	case isNull(in.Until):
+		if owner {
+			return ownerInviteUntil()
+		}
 		spec.Until = nil
 	case in.Until != nil:
 		var err error
 		if until, err = access.ParseTime(in.Until, now); err != nil {
 			return apierr.BadParam("until", "until: "+err.Error()+".")
+		}
+		if owner && until > now.Add(maxOwnerInviteTTL).UnixMilli() {
+			return ownerInviteUntil()
 		}
 	}
 
@@ -453,6 +479,19 @@ func (s *Server) patchInvite(c *reqCtx, space, id, by string) error {
 			}
 			ch.Until = &ms
 		}
+	}
+	// An owner invite stays one use within 7 days; uses 0 stops it.
+	ch.Check = func(l access.Level) error {
+		if l != access.Owner {
+			return nil
+		}
+		if ch.SetUses && (ch.Uses == nil || *ch.Uses > 1) {
+			return ownerInviteUses()
+		}
+		if ch.SetUntil && (ch.Until == nil || *ch.Until > time.Now().Add(maxOwnerInviteTTL).UnixMilli()) {
+			return ownerInviteUntil()
+		}
+		return nil
 	}
 	info, err := s.store.UpdateInvite(space, id, by, ch)
 	if err != nil {

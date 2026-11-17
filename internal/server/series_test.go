@@ -18,6 +18,16 @@ type seriesResp struct {
 	Next    *int64
 }
 
+// mustNext returns a series response's next, as JSON.
+func mustNext(t *testing.T, body []byte) json.RawMessage {
+	t.Helper()
+	r := decode[seriesResp](t, string(body))
+	if r.Next == nil {
+		t.Fatalf("no next in %s", body)
+	}
+	return json.RawMessage(itoa(*r.Next))
+}
+
 func decode[T any](t *testing.T, b string) T {
 	t.Helper()
 	var v T
@@ -100,6 +110,30 @@ func TestSeriesBasics(t *testing.T) {
 	r = decode[seriesResp](t, b)
 	if len(r.Points) != 1 || r.Next != nil || string(r.Points[0].Value) != want[3] {
 		t.Fatalf("page 2: %s", b)
+	}
+
+	// order=desc pages back with next as until; until is exclusive.
+	_, _, b = c.req("GET", S+"/temp/series?order=desc&limit=3", "")
+	r = decode[seriesResp](t, b)
+	if len(r.Points) != 3 || string(r.Points[0].Value) != want[3] || r.Next == nil || *r.Next != r.Points[2].T {
+		t.Fatalf("desc page 1: %s", b)
+	}
+	_, _, b = c.req("GET", S+"/temp/series?order=desc&limit=3&until="+itoa(*r.Next), "")
+	r = decode[seriesResp](t, b)
+	if len(r.Points) != 1 || r.Next != nil || string(r.Points[0].Value) != want[0] {
+		t.Fatalf("desc page 2: %s", b)
+	}
+	_, _, b = c.req("GET", S+"/temp/series?order=asc&since=0&until="+itoa(r.Points[0].T+1), "")
+	if r = decode[seriesResp](t, b); len(r.Points) != 1 || string(r.Points[0].Value) != want[0] {
+		t.Fatalf("since and until: %s", b)
+	}
+	if st, _, b := c.req("GET", S+"/temp/series?limit=10000", ""); st != 200 {
+		t.Fatalf("limit 10000: %d %s", st, b)
+	}
+	for _, q := range []string{"limit=10001", "limit=0", "order=newest", "until=soon", "until=-1"} {
+		if st, _, b := c.req("GET", S+"/temp/series?"+q, ""); st != 400 || errCode(b) != "invalid_parameter" {
+			t.Fatalf("%s: %d %s", q, st, b)
+		}
 	}
 
 	// List and watch carry t for both plain and series keys.

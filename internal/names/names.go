@@ -109,14 +109,21 @@ func RandomWords() string {
 // random words. Invalid label characters are dropped so it can also make a
 // suggestion from a bad name.
 func NewSpaceName(label string) string {
-	label = cleanLabel(label)
-	if len(label) > MaxLabel {
-		label = strings.Trim(label[:MaxLabel], "-")
-	}
+	label = Slug(label)
 	if label == "" {
 		return RandomWords()
 	}
 	return label + "-" + RandomWords()
+}
+
+// Slug makes a label from any text: lowercase, each run of other characters
+// one hyphen, trimmed, at most MaxLabel. "" if nothing is left.
+func Slug(s string) string {
+	l := cleanLabel(s)
+	if len(l) > MaxLabel {
+		l = strings.Trim(l[:MaxLabel], "-")
+	}
+	return l
 }
 
 func cleanLabel(s string) string {

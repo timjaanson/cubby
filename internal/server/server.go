@@ -410,7 +410,7 @@ func (s *Server) route(c *reqCtx) error {
 			if t.Pattern {
 				return &apierr.Error{Status: 400, Code: "invalid_key", Message: "Series are read one key at a time. To see the newest point of each, GET the pattern without /series."}
 			}
-			if err := checkParams(c.r, "since", "limit"); err != nil {
+			if err := checkParams(c.r, "since", "until", "order", "limit"); err != nil {
 				return err
 			}
 			h = s.seriesRead

@@ -581,11 +581,12 @@ export function kv(space, opts = {}) {
         if (!res.ok) throw await fail(res)
         return res.json()
       },
-      // One request. Points come oldest first; pass next back as since for more.
-      // null if the key doesn't exist.
+      // One request. Points come oldest first: pass next back as since for
+      // more. With order: "desc" they come newest first: pass next back as
+      // until. until is exclusive, like since. null if the key doesn't exist.
       async series(key, o = {}) {
         checkKey(key)
-        const res = await request("GET", (await pathOf(key)) + "/series", { auth: needsAuth, query: { since: o.since, limit: o.limit } })
+        const res = await request("GET", (await pathOf(key)) + "/series", { auth: needsAuth, query: { since: o.since, until: o.until, order: o.order, limit: o.limit } })
         if (await missingKey(res)) return null
         if (!res.ok) throw await fail(res)
         return res.json()

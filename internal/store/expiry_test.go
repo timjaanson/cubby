@@ -192,7 +192,7 @@ func TestExpiredReadsAndLeaseBeforeSweep(t *testing.T) {
 					t.Fatalf("expired snapshot %+v %v", items, err)
 				}
 			case "series":
-				_, _, _, err := s.ReadPoints(space, "s", "gone", nil, 100)
+				_, _, _, err := s.ReadPoints(space, "s", "gone", PointsQuery{Limit: 100})
 				if !isCode(err, "not_found") {
 					t.Fatalf("expired series %v", err)
 				}

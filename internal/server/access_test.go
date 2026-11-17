@@ -200,7 +200,7 @@ func TestInvites(t *testing.T) {
 	if s, _, b := c.req("POST", sp+"/invites", `{"use":1}`, bearer(own.Token)...); s != 400 || !strings.Contains(b, `"parameter":"use"`) {
 		t.Fatalf("typo: %d %s", s, b)
 	}
-	for _, bad := range []string{`{"access":"editor"}`, `{"access":"owner"}`, `{"access":"banned"}`, `{"allow":"member"}`} {
+	for _, bad := range []string{`{"access":"editor"}`, `{"access":"owner","uses":2}`, `{"access":"banned"}`, `{"allow":"member"}`} {
 		if s, _, b := c.req("POST", sp+"/invites", bad, bearer(own.Token)...); s != 400 {
 			t.Fatalf("bad access %s: %d %s", bad, s, b)
 		}

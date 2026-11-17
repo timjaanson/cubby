@@ -3,8 +3,10 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,15 +26,17 @@ var defaultServer = "http://localhost:" + strconv.Itoa(config.DefaultPort)
 
 type client struct {
 	server string
-	creds  *credentials
-	dc     *deviceCreds // this CLI's device on server, nil until made
-	signer *auth.Signer // its key
-	apiKey string       // from CUBBY_API_KEY: used instead of a device, never saved
-	envKey bool         // the device came from CUBBY_CREDENTIALS: never saved
-	tok    string       // the current token, minted from signer
-	tokExp time.Time
-	skew   time.Duration // server time minus ours, learned from a refused token
-	http   *http.Client
+	// defaulted: nothing named a server, so it is the built-in localhost one.
+	defaulted bool
+	creds     *credentials
+	dc        *deviceCreds // this CLI's device on server, nil until made
+	signer    *auth.Signer // its key
+	apiKey    string       // from CUBBY_API_KEY: used instead of a device, never saved
+	envKey    bool         // the device came from CUBBY_CREDENTIALS: never saved
+	tok       string       // the current token, minted from signer
+	tokExp    time.Time
+	skew      time.Duration // server time minus ours, learned from a refused token
+	http      *http.Client
 }
 
 func newClient(f *flags) (*client, error) {
@@ -42,7 +46,8 @@ func newClient(f *flags) (*client, error) {
 	if u, err := url.Parse(server); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
 		return nil, &cliError{code: 64, msg: fmt.Sprintf("server %q isn't a URL like https://kv.example.com", server)}
 	}
-	c := &client{server: server, creds: loadCreds(), apiKey: os.Getenv("CUBBY_API_KEY"), http: &http.Client{Timeout: 70 * time.Second}}
+	c := &client{server: server, creds: loadCreds(), apiKey: os.Getenv("CUBBY_API_KEY"), http: &http.Client{Timeout: 70 * time.Second},
+		defaulted: firstNonEmpty(f.str("server"), os.Getenv("CUBBY_SERVER"), cfg.Server) == ""}
 	if env := os.Getenv("CUBBY_CREDENTIALS"); env != "" {
 		d, s, err := readDeviceCreds([]byte(env), server)
 		if err != nil {
@@ -200,6 +205,12 @@ func (c *client) raw(method, path string, body []byte, hdr http.Header) (*http.R
 	req.Header.Set("User-Agent", "cubby/"+version.Version)
 	resp, err := c.http.Do(req)
 	if err != nil {
+		var op *net.OpError
+		if c.defaulted && errors.As(err, &op) && op.Op == "dial" {
+			return nil, nil, &cliError{code: 6, err: "network_error", msg: fmt.Sprintf(
+				"can't connect to %s, the built-in default. Name your server with --server, CUBBY_SERVER or server = \"...\" in %s",
+				c.server, filepath.Join(configDir(), "config.toml"))}
+		}
 		return nil, nil, &cliError{code: 6, err: "network_error", msg: err.Error()}
 	}
 	defer resp.Body.Close()

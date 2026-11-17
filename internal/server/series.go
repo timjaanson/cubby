@@ -28,6 +28,9 @@ func jsonValue(v []byte, isJSON bool) json.RawMessage {
 
 const maxBatchMembers = 100
 
+// maxSeriesLimit is the most points one series read returns.
+const maxSeriesLimit = 10000
+
 // seriesAdd handles POST {key}/series and POST {prefix}*/series. Inside a
 // batch it only collects the point.
 func (s *Server) seriesAdd(c *reqCtx, t store.Target) error {
@@ -193,23 +196,36 @@ func (s *Server) seriesRead(c *reqCtx, t store.Target) error {
 		return err
 	}
 	q := c.r.URL.Query()
-	limit := 1000
+	pq := store.PointsQuery{Limit: 1000}
 	if q.Has("limit") {
 		n, ok := parseUint(q.Get("limit"))
-		if !ok || n < 1 || n > 1000 {
-			return apierr.BadParam("limit", "limit is 1 to 1000.")
+		if !ok || n < 1 || n > maxSeriesLimit {
+			return apierr.BadParam("limit", "limit is 1 to 10000.")
 		}
-		limit = int(n)
+		pq.Limit = int(n)
 	}
-	var since *int64
+	switch q.Get("order") {
+	case "", "asc":
+	case "desc":
+		pq.Desc = true
+	default:
+		return apierr.BadParam("order", "order is asc or desc.")
+	}
 	if q.Has("since") {
 		n, ok := parseUint(q.Get("since"))
 		if !ok {
-			return apierr.BadParam("since", "since is a time in milliseconds. Points after it are returned, oldest first.")
+			return apierr.BadParam("since", "since is a time in milliseconds. Points after it are returned.")
 		}
-		since = &n
+		pq.Since = &n
 	}
-	points, next, version, err := s.store.ReadPoints(t.Space, t.Area, t.Key, since, limit)
+	if q.Has("until") {
+		n, ok := parseUint(q.Get("until"))
+		if !ok {
+			return apierr.BadParam("until", "until is a time in milliseconds. Points before it are returned.")
+		}
+		pq.Until = &n
+	}
+	points, next, version, err := s.store.ReadPoints(t.Space, t.Area, t.Key, pq)
 	if err != nil {
 		return err
 	}
