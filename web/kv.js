@@ -57,7 +57,7 @@
 // anyone who loads the page could use it. Invite links are for sending to people.
 //
 // Several keys at once, all or nothing: db.batch([{ set: "shared/title", value },
-// { delete: "shared/old" }]). Every space you belong to, on any of your
+// { delete: "shared/old" }, { add: "shared/temp", value: 21.4, t, ttl }]). Every space you belong to, on any of your
 // devices: spaces().
 //
 // Docs: docs/usage.md in the cubby repository. Exports: kv, createSpace,
@@ -566,6 +566,8 @@ export function kv(space, opts = {}) {
       // add("temp", 21.4) adds one point; value can be any JSON value, an
       // object is one point. add("env.*", { temp: 21.4, rh: 45 }) adds one
       // point to env.temp and one to env.rh. The target decides, never the value.
+      // Options: t (ms, for a late reading; the same t replaces that point),
+      // ttl (seconds after t the point is removed), ifBefore.
       async add(target, value, o = {}) {
         checkKey(target, true)
         checkWrite()
@@ -575,7 +577,7 @@ export function kv(space, opts = {}) {
         }
         const body = JSON.stringify(value)
         if (body === undefined) throw new KvError(0, "invalid_value", "That value can't be stored as JSON.")
-        const res = await request("POST", (await pathOf(target)) + "/series", { body, auth: true, query: { t: o.t, ifBefore: o.ifBefore } })
+        const res = await request("POST", (await pathOf(target)) + "/series", { body, auth: true, query: { t: o.t, ttl: o.ttl, ifBefore: o.ifBefore } })
         if (!res.ok) throw await fail(res)
         return res.json()
       },
@@ -1076,16 +1078,24 @@ export function kv(space, opts = {}) {
     // nothing is written and its error is thrown with details.index.
     async batch(ops) {
       if (!Array.isArray(ops) || ops.length === 0) {
-        throw new KvError(0, "bad_batch", "batch takes an array of 1 to 100 writes: { set: path, value } or { delete: path }.")
+        throw new KvError(0, "bad_batch", "batch takes an array of 1 to 100 writes: { set: path, value }, { delete: path } or { add: seriesPath, value }.")
       }
       const body = ops.map((o, index) => {
-        const { set, delete: del, value, ifVersion, ttl, ifBefore, ...rest } = o || {}
+        const { set, delete: del, add, value, ifVersion, ttl, ifBefore, t, ...rest } = o || {}
         const bad = msg => new KvError(0, "bad_batch", msg, { index })
-        if (Object.keys(rest).length) throw bad(`Unknown field ${Object.keys(rest)[0]}. A write has set or delete, value, ifVersion, ttl, ifBefore.`)
-        if ((set === undefined) === (del === undefined)) throw bad("A write has either set (with value) or delete.")
+        if (Object.keys(rest).length) throw bad(`Unknown field ${Object.keys(rest)[0]}. A write has set, delete or add, value, ifVersion, ttl, ifBefore, t.`)
+        if ([set, del, add].filter(x => x !== undefined).length !== 1) throw bad("A write has one of set (with value), delete, or add (a series point, with value).")
         const query = {}
-        if (ifVersion !== undefined) query.ifVersion = ifVersion
         if (ifBefore !== undefined) query.ifBefore = ifBefore
+        if (add !== undefined) {
+          if (ifVersion !== undefined) throw bad("A point has no ifVersion.")
+          if (t !== undefined) query.t = t
+          if (ttl !== undefined) query.ttl = ttl
+          if (JSON.stringify(value) === undefined) throw new KvError(0, "invalid_value", "That value can't be stored as JSON.", { index })
+          return { method: "POST", path: add + "/series", query, body: value }
+        }
+        if (t !== undefined) throw bad("Only a point (add) takes t.")
+        if (ifVersion !== undefined) query.ifVersion = ifVersion
         if (del !== undefined) {
           if (value !== undefined || ttl !== undefined) throw bad("A delete has no value or ttl.")
           return { method: "DELETE", path: del, query }

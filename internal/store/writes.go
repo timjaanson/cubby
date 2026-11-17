@@ -16,7 +16,9 @@ type WriteReq struct {
 	Writer           string
 	IfVersion        *int64
 	IfBefore         *int64
-	TTL              int64 // seconds, zero makes permanent
+	TTL              int64 // seconds, zero makes permanent; for a point, counted from T
+	Point            bool  // add a series point instead of setting the key
+	T                int64 // a point's time in ms; 0 for the server's clock
 }
 
 type WriteResult struct {
@@ -131,10 +133,24 @@ func (s *Store) WriteBatch(ctx context.Context, reqs []WriteReq) (out []WriteRes
 	s.mu.Unlock()
 	st := &batchState{seq: m.seq, bytes: m.bytes, keys: m.keys, vTotal: vTotal, usage: map[string]int64{},
 		maxBytes: maxBytes, maxKeys: maxKeys, serverTotal: total}
+	pointT, err := serverPointTime(tx, reqs, nowMS)
+	if err != nil {
+		return nil, err
+	}
+	_, maxPoints := s.cfg.SeriesLimitsFor(space)
 
 	out = make([]WriteResult, len(reqs))
 	for i, r := range reqs {
-		res, err := s.writeStep(tx, st, r, nowMS)
+		var res WriteResult
+		if r.Point {
+			t := r.T
+			if t == 0 {
+				t = pointT
+			}
+			res, err = s.pointStep(tx, st, r, t, maxPoints, nowMS)
+		} else {
+			res, err = s.writeStep(tx, st, r, nowMS)
+		}
 		if err != nil {
 			return fail(i, err)
 		}
@@ -144,7 +160,7 @@ func (s *Store) WriteBatch(ctx context.Context, reqs []WriteReq) (out []WriteRes
 		return out, nil
 	}
 	meta := map[string]any{}
-	if st.changed {
+	if st.changed || st.spaceDelta != 0 {
 		meta["seq"], meta["bytes"], meta["keys"] = st.seq, st.bytes, st.keys
 	}
 	if st.active {

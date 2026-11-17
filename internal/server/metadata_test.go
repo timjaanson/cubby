@@ -85,7 +85,7 @@ func TestDeadlinesAndTTLValidation(t *testing.T) {
 		code                 string
 	}{
 		{"PUT", "?ttl=4", "x", 400, "invalid_parameter"}, {"PUT", "?ttl=7776001", "x", 400, "invalid_parameter"}, {"PUT", "?ttl=5&ttl=6", "x", 400, "invalid_parameter"}, {"PUT", "?ttl=1.5", "x", 400, "invalid_parameter"}, {"DELETE", "?ttl=30", "", 400, "invalid_parameter"},
-		{"PUT", "?ifBefore=0", "x", 412, "too_late"}, {"DELETE", "?ifBefore=0", "", 412, "too_late"}, {"POST", "/series?ifBefore=0", "1", 412, "too_late"}, {"POST", "/series?ttl=30", "1", 400, "invalid_parameter"}, {"PUT", "?ifBefore=-1", "x", 400, "invalid_parameter"}, {"PUT", "?ifBefore=1&ifBefore=2", "x", 400, "invalid_parameter"},
+		{"PUT", "?ifBefore=0", "x", 412, "too_late"}, {"DELETE", "?ifBefore=0", "", 412, "too_late"}, {"POST", "/series?ifBefore=0", "1", 412, "too_late"}, {"POST", "/series?ttl=4", "1", 400, "invalid_parameter"}, {"PUT", "?ifBefore=-1", "x", 400, "invalid_parameter"}, {"PUT", "?ifBefore=1&ifBefore=2", "x", 400, "invalid_parameter"},
 	} {
 		status, _, b := c.req(test.method, path+test.suffix, test.body, auth...)
 		if status != test.status || errCode(b) != test.code {

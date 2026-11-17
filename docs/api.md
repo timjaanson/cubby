@@ -81,14 +81,15 @@ Areas: `shared/{key}`, `by/{id|me}/{key}`, `to/{id|me|owners}/{key}` (send), `in
 | `DELETE .../{key}` | `ifVersion`, `ifBefore` |
 | `GET .../{pattern}` | `{"items": [{"key", "value", "version", "by", "t"?, "expires"?}], "version", "next"}`. Query: `limit` (≤1000), `order=desc`, `after=<next>` |
 | `GET .../{pattern}/watch?version=N` | long poll, below |
-| `POST .../{key}/series` body = value | add a point; `?t=ms` for a late reading |
-| `POST .../{prefix*}/series` body = object | a point in `prefix + name` for each member, up to 100 |
-| `GET .../{key}/series?since=ms&limit=N` | `{"key", "points": [{"t", "value"}], "version", "next"}` |
+| `POST .../{key}/series` body = value | add a point: `{"version", "t"}`. Query: `t` (ms, a late reading; the same `t` replaces that point), `ttl` (seconds after `t`), `ifBefore` |
+| `POST .../{prefix*}/series` body = object | a point in `prefix + name` for each member, up to 100, at one time |
+| `GET .../{key}/series?since=ms&limit=N` | `{"key", "points": [{"t", "value", "expires"?}], "version", "next"}` |
 | `POST .../{key}/pulse` body = value | 202 `{"t"}`, not stored |
 | `GET .../{pattern}/pulse?after=SEQ` | long poll: `{"pulses": [{"key", "by", "value", "t"}], "seq", "missed"}` |
 
 - A value is UTF-8, not empty, at most 512 KB (points and pulses 4 KB). Valid JSON is stored and returned as `application/json`, anything else as `text/plain`, byte for byte. In lists and watches, text values are JSON strings.
 - Versions grow per space. Pass the `version` of a key's own entry as `ifVersion`.
+- A series keeps its newest `max_series_points` (1,000,000 by default). A point with `ttl` is removed at `t + ttl`; one whose `t + ttl` has already passed is refused (400, `parameter: "ttl"`). When the newest point goes, the key's value becomes the next newest under a new version; when the last goes, the key is removed and watchers see `"expired": true`.
 - Unknown or repeated query parameters and unknown JSON fields are 400 `invalid_parameter`, so a typo never turns a conditional write into a plain one. `_` is ignored for cache busting.
 
 ### Watching
@@ -114,12 +115,13 @@ Areas: `shared/{key}`, `by/{id|me}/{key}`, `to/{id|me|owners}/{key}` (send), `in
 ```json
 [{"method": "PUT", "path": "shared/title", "body": "Trip"},
  {"method": "PUT", "path": "by/me/cursor", "query": {"ttl": 60}, "text": "plain text"},
- {"method": "DELETE", "path": "shared/draft", "query": {"ifVersion": 41}}]
+ {"method": "DELETE", "path": "shared/draft", "query": {"ifVersion": 41}},
+ {"method": "POST", "path": "shared/temp/series", "query": {"t": 1794927600000, "ttl": 1209600}, "body": 21.4}]
 ```
-→ `200 {"version": 59, "items": [{"path", "version", "created"?}, ...]}`, in request order.
+→ `200 {"version": 59, "items": [{"path", "version", "created"?, "t"?}, ...]}`, in request order; `t` for points.
 
 - All or nothing. Every write is checked exactly as if it came alone (path, access, parameters, value, quotas), and the first failure answers its usual error plus `"index"`. Nothing is written then.
-- `PUT` and `DELETE` of single keys only, each key once; anything else is 400 `bad_batch` with `index`.
+- `PUT` and `DELETE` of single keys, and `POST {key}/series` points (not `{prefix*}/series`). Each key once, except points to one series that each give a different `t`. Points without `t` share one server time. Anything else is 400 `bad_batch` with `index`.
 - Changed keys take consecutive versions in array order, in one transaction: a watch sees all of them or none, in one answer unless it pages (`more: true`). An identical rewrite keeps its version.
 - Counts as one write for rate limits. The body is at most twice the largest value plus 64 KB.
 - On a live connection: `{"id": 5, "method": "POST", "path": "batch", "body": [...]}`.

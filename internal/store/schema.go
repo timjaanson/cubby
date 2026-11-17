@@ -3,10 +3,11 @@ package store
 // serverVersion is server.db's user_version and spaceVersion a space
 // file's. v0.19 (sign-in with device keys) started both over; older files
 // are refused, not migrated. Server version 2 (v0.19) is migrated to 3
-// (membership times in visitor_spaces).
+// (membership times in visitor_spaces). Space version 5 is migrated to 6
+// (points.expires, for a ttl on series points).
 const (
 	serverVersion = 3
-	spaceVersion  = 5
+	spaceVersion  = 6
 )
 
 const serverSchema = `
@@ -105,8 +106,10 @@ CREATE TABLE IF NOT EXISTS points (
   t       INTEGER NOT NULL,
   value   BLOB NOT NULL,
   is_json INTEGER NOT NULL,
+  expires INTEGER NOT NULL DEFAULT 0, -- ms, 0 for none
   PRIMARY KEY (area, key, t)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS points_by_expiry ON points (expires) WHERE expires > 0;
 CREATE TABLE IF NOT EXISTS invites (
   id               TEXT PRIMARY KEY,     -- i_ + 8 base32
   hash             TEXT NOT NULL UNIQUE, -- SHA-256 of the inv_ value

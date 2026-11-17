@@ -415,7 +415,7 @@ func (s *Server) route(c *reqCtx) error {
 			}
 			h = s.seriesRead
 		case m == http.MethodPost:
-			if err := checkParams(c.r, "t", "ifBefore"); err != nil {
+			if err := checkParams(c.r, "t", "ttl", "ifBefore"); err != nil {
 				return err
 			}
 			h = s.seriesAdd

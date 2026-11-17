@@ -52,6 +52,20 @@ for (const live of [false, true]) {
   ]).catch(e => e)
   assert(err instanceof KvError && err.code === "version_conflict" && err.details.index === 1, "conflict " + err?.code + " " + JSON.stringify(err?.details))
   assert(await db.shared.get("n" + live) === null, "rolled back")
+  // Series points: own times, a ttl, the same series twice.
+  const t0 = Date.now() - 60000
+  const p = await db.batch([
+    { set: "shared/now" + live, value: { temp: 21.4 } },
+    { add: "shared/m1" + live, value: { temp: 21.3 }, t: t0, ttl: 3600 },
+    { add: "shared/m1" + live, value: { temp: 21.4 }, t: t0 + 60000, ttl: 3600 },
+  ])
+  assert(p.items[1].t === t0 && p.items[2].t === t0 + 60000 && p.items[2].version === p.items[1].version + 1, "points in batch " + JSON.stringify(p))
+  const pts = await db.shared.series("m1" + live)
+  assert(pts.points.length === 2 && pts.points[0].expires === t0 + 3600000, "point ttl " + JSON.stringify(pts))
+  await db.shared.add("m5" + live, 1, { ttl: 60 })
+  assert((await db.shared.series("m5" + live)).points[0].expires > Date.now(), "add with ttl")
+  const tOnSet = await db.batch([{ set: "shared/a", value: 1, t: 5 }]).catch(e => e)
+  assert(tOnSet.code === "bad_batch", "t only on points")
   const shape = await db.batch([{ set: "shared/a", value: 1, colour: 2 }]).catch(e => e)
   assert(shape.code === "bad_batch" && shape.details.index === 0, "local shape check")
   await sleep(300)

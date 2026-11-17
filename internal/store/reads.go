@@ -334,6 +334,7 @@ type Point struct {
 	T         int64
 	Value     []byte
 	IsJSON    bool
+	Expires   int64 // ms, 0 for none
 }
 
 // export returns every live entry with its area and writer, then every
@@ -370,14 +371,14 @@ func (s *Store) Export(space string, fn func(Entry) error, pfn func(Point) error
 		return err
 	}
 	rows.Close()
-	prows, err := sp.db.Query(`SELECT area, key, t, value, is_json FROM points ORDER BY area, key, t`)
+	prows, err := sp.db.Query(`SELECT area, key, t, value, is_json, expires FROM points ORDER BY area, key, t`)
 	if err != nil {
 		return err
 	}
 	defer prows.Close()
 	for prows.Next() {
 		var p Point
-		if err := prows.Scan(&p.Area, &p.Key, &p.T, &p.Value, &p.IsJSON); err != nil {
+		if err := prows.Scan(&p.Area, &p.Key, &p.T, &p.Value, &p.IsJSON, &p.Expires); err != nil {
 			return err
 		}
 		if err := pfn(p); err != nil {

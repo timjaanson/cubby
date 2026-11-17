@@ -100,7 +100,11 @@ func (s *Server) AdminHandler() http.Handler {
 			}
 			return enc.Encode(line)
 		}, func(p store.Point) error {
-			return enc.Encode(map[string]any{"area": adminArea(p.Area), "key": p.Key, "t": p.T, "value": jsonValue(p.Value, p.IsJSON)})
+			line := map[string]any{"area": adminArea(p.Area), "key": p.Key, "t": p.T, "value": jsonValue(p.Value, p.IsJSON)}
+			if p.Expires > 0 {
+				line["expires"] = p.Expires
+			}
+			return enc.Encode(line)
 		})
 		if err != nil {
 			log.Printf("admin export %s: %v", name, err)

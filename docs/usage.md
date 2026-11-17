@@ -199,10 +199,11 @@ await db.batch([
   { set: "shared/title", value: "Trip" },
   { set: "by/me/cursor", value: { x: 3 }, ttl: 60 },
   { delete: "shared/draft", ifVersion: 41 },
-])   // { version, items: [{ path, version, created }] }
+  { add: "shared/temp", value: 21.4, t: 1794927600000, ttl: 1209600 },
+])   // { version, items: [{ path, version, created, t? }] }
 ```
 
-All or nothing: up to 100 writes in one request and one transaction, each checked as if sent alone. If one fails, nothing is written and the error has `details.index`. Changed keys take consecutive versions in order, and a watcher gets them in the same answer. Paths are as in the HTTP API (`shared/k`, `by/me/k`, `to/{id}/k`). Only sets and deletes; one write per key. A batch counts as one write for rate limits.
+All or nothing: up to 100 writes in one request and one transaction, each checked as if sent alone. If one fails, nothing is written and the error has `details.index`. Changed keys take consecutive versions in order, and a watcher gets them in the same answer. Paths are as in the HTTP API (`shared/k`, `by/me/k`, `to/{id}/k`). Sets, deletes and series points (`add`). One write per key, except points to one series that each give their own `t`. A batch counts as one write for rate limits, which makes it the way to send a device's readings or a backlog of points.
 
 ## Series
 
@@ -211,7 +212,15 @@ await db.shared.add("env.*", { temp: 21.4, rh: 45 })    // a point each in env.t
 const { points } = await db.shared.series("env.temp", { since: Date.now() - 864e5 })
 ```
 
-A key becomes a series with its first point. Its value is the newest point; it keeps the newest 20,000 points of up to 4 KB each.
+A key becomes a series with its first point; there's no separate create. Its value is the newest point. Points are up to 4 KB, and a series keeps the newest 1,000,000 (the operator can change that), within the space's byte quota.
+
+```js
+await db.shared.add("m1", { temp: 21.4 }, { t: reading.time, ttl: 1209600 })   // kept 14 days
+```
+
+- `t` gives a reading's own time. A point at an existing `t` replaces it, so resending is safe.
+- `ttl` (seconds) removes the point that long after its `t`. A point without one stays. Each point carries its own; reads show `expires`. When the newest point goes, the key shows the next newest as a new version; when the last goes, the key is gone.
+- A plain key and a series don't mix: delete one to make the other.
 
 ## Errors you'll see
 
@@ -244,6 +253,7 @@ cubby ls    'poll-orbit-lilac-tango-slate/by/*/vote'                  # author<T
 cubby watch notes-cedar-pilot-mango-frost/shared/hello
 cubby update homelab-maple-quilt-tundra-cobalt/shared/count --exec 'jq "(. // 0) + 1"'
 cubby add   'home-cedar-pilot-mango-frost/shared/env.*' temp=21.4 rh=45
+cubby add   home-cedar-pilot-mango-frost/shared/m1 21.4 --ttl 14d
 cubby series home-cedar-pilot-mango-frost/shared/env.temp --since 24h
 cubby batch notes-cedar-pilot-mango-frost writes.json   # a JSON array of writes, as in the HTTP API
 cubby pulse space/shared/doorbell ding;  cubby pulses 'space/shared/*'

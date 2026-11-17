@@ -94,7 +94,7 @@ func (c *Config) TOML(def *Config, dataDirNote string) string {
 		w.line(`# max_bytes = "1GB"`)
 		w.line(`# max_value_size = "2MB"     # capped at 4MB`)
 		w.line("# max_keys = 500000")
-		w.line("# max_series_points = 200000")
+		w.line("# max_series_points = 5000000")
 	}
 	pinned := make([]string, 0, len(c.Spaces))
 	for name := range c.Spaces {

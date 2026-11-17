@@ -23,6 +23,7 @@ type PointsReq struct {
 	Space, Area string
 	Points      []PointIn // one per key, in request order
 	T           int64     // 0: the server's clock
+	TTL         int64     // seconds after T; 0 for no expiry
 	Writer      string
 	IfBefore    *int64
 }
@@ -35,46 +36,66 @@ type pointsResult struct {
 	Grown   int64 // bytes the space grew by, zero when it shrank
 }
 
+// AddPoints adds one point to each key, all at one time: a batch of points.
 func (s *Store) AddPoints(ctx context.Context, r PointsReq) (res pointsResult, err error) {
-	vTotal, err := s.VisitorTotal(r.Writer)
+	reqs := make([]WriteReq, len(r.Points))
+	for i, p := range r.Points {
+		reqs[i] = WriteReq{Space: r.Space, Area: r.Area, Key: p.Key, Value: p.Value, IsJSON: p.IsJSON,
+			Writer: r.Writer, IfBefore: r.IfBefore, Point: true, T: r.T, TTL: r.TTL}
+	}
+	out, err := s.WriteBatch(ctx, reqs)
+	var be *BatchError
+	if errors.As(err, &be) {
+		err = be.Err
+	}
 	if err != nil {
 		return res, err
 	}
-	sp, err := s.Acquire(r.Space)
-	if err != nil {
-		return res, err
+	for _, o := range out {
+		res.Version = max(res.Version, o.Version)
+		res.T = o.T
+		res.Created = res.Created || o.Created
+		res.Changed = res.Changed || o.Changed
+		res.Grown += o.Grown
 	}
-	if sp == nil {
-		return res, apierr.NoSpace
-	}
-	defer s.Release(sp)
+	return res, nil
+}
 
-	_, maxBytes, maxKeys := s.cfg.LimitsFor(r.Space)
-	_, maxPoints := s.cfg.SeriesLimitsFor(r.Space)
-	now := nowS()
+// serverPointTime is the time for the points of a batch that don't carry
+// one: the server's clock, but after the newest point of each of their
+// series, so points the server times never collide.
+func serverPointTime(tx *sql.Tx, reqs []WriteReq, nowMS int64) (int64, error) {
+	t := nowMS
+	for _, r := range reqs {
+		if !r.Point || r.T != 0 {
+			continue
+		}
+		var newest sql.NullInt64
+		err := tx.QueryRow(`SELECT t FROM kv WHERE area = ? AND key = ? AND series = 1 AND value IS NOT NULL`, r.Area, r.Key).Scan(&newest)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, err
+		}
+		if newest.Valid {
+			t = max(t, newest.Int64+1)
+		}
+	}
+	return t, nil
+}
 
-	sp.wmu.Lock()
-	defer sp.wmu.Unlock()
-	removed, err := s.expireLocked(sp)
-	if err != nil {
-		return res, err
-	}
-	vTotal -= removed[r.Writer]
-	if err := CheckBefore(r.IfBefore, NowMs()); err != nil {
-		return res, err
-	}
-	tx, err := sp.db.BeginTx(ctx, nil)
-	if err != nil {
-		return res, err
-	}
-	defer tx.Rollback()
-
-	m, err := readMeta(tx)
-	if err != nil {
-		return res, err
+// pointStep adds one point at time t inside a batch's transaction. A point
+// at an existing time replaces it. The series keeps its newest maxPoints;
+// its kv row holds the newest point and counts towards the writer like a
+// plain key, while the points count towards the space only.
+func (s *Store) pointStep(tx *sql.Tx, st *batchState, r WriteReq, t int64, maxPoints int, nowMS int64) (res WriteResult, err error) {
+	expires := int64(0)
+	if r.TTL > 0 {
+		expires = t + r.TTL*1000
+		if expires <= nowMS {
+			return res, apierr.BadParam("ttl", "This point expired before it arrived: t + ttl is in the past.")
+		}
 	}
 
-	type oldRow struct {
+	var old struct {
 		value   []byte
 		version int64
 		writer  string
@@ -83,180 +104,122 @@ func (s *Store) AddPoints(ctx context.Context, r PointsReq) (res pointsResult, e
 		t, n    int64
 		row     bool
 	}
-	olds := make([]oldRow, len(r.Points))
-	for i, p := range r.Points {
-		var o oldRow
-		var t sql.NullInt64
-		err := tx.QueryRow(`SELECT value, version, writer, size, series, t, n FROM kv WHERE area = ? AND key = ?`, r.Area, p.Key).
-			Scan(&o.value, &o.version, &o.writer, &o.size, &o.series, &t, &o.n)
-		switch {
-		case err == nil:
-			o.row, o.t = true, t.Int64
-		case !errors.Is(err, sql.ErrNoRows):
-			return res, err
-		}
-		if o.row && o.value != nil && !o.series {
-			return res, apierr.NotSeries(p.Key)
-		}
-		olds[i] = o
+	var ot sql.NullInt64
+	err = tx.QueryRow(`SELECT value, version, writer, size, series, t, n FROM kv WHERE area = ? AND key = ?`, r.Area, r.Key).
+		Scan(&old.value, &old.version, &old.writer, &old.size, &old.series, &ot, &old.n)
+	switch {
+	case err == nil:
+		old.row, old.t = true, ot.Int64
+	case !errors.Is(err, sql.ErrNoRows):
+		return res, err
+	}
+	live := old.row && old.value != nil
+	if live && !old.series {
+		return res, apierr.NotSeries(r.Key)
+	}
+	n := int64(0)
+	if live {
+		n = old.n
 	}
 
-	// One time for every point in the request. Without ?t= the server's
-	// clock, but always after each series' newest point, so points the
-	// server times never collide.
-	t := r.T
-	if t == 0 {
-		t = NowMs()
-		for _, o := range olds {
-			if o.row && o.value != nil {
-				t = max(t, o.t+1)
-			}
-		}
+	var replaced int64
+	err = tx.QueryRow(`SELECT length(key) + length(value) FROM points WHERE area = ? AND key = ? AND t = ?`, r.Area, r.Key, t).Scan(&replaced)
+	switch {
+	case err == nil:
+	case errors.Is(err, sql.ErrNoRows):
+		n++
+	default:
+		return res, err
 	}
-
-	seq := m.seq
-	var spaceDelta, visitorDelta int64
-	keysDelta := 0
-	type usageMove struct {
-		writer string
-		delta  int64
+	if _, err := tx.Exec(`INSERT INTO points (area, key, t, value, is_json, expires) VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT (area, key, t) DO UPDATE SET value = excluded.value, is_json = excluded.is_json, expires = excluded.expires`,
+		r.Area, r.Key, t, r.Value, r.IsJSON, expires); err != nil {
+		return res, err
 	}
-	var moves []usageMove
+	spaceDelta := int64(len(r.Key)+len(r.Value)) - replaced
 
-	for i, p := range r.Points {
-		o := olds[i]
-		live := o.row && o.value != nil
-		n := int64(0)
-		if live {
-			n = o.n
-		}
-
-		// A point at an existing time replaces it.
-		var replaced int64
-		err := tx.QueryRow(`SELECT length(key) + length(value) FROM points WHERE area = ? AND key = ? AND t = ?`, r.Area, p.Key, t).Scan(&replaced)
-		switch {
-		case err == nil:
-		case errors.Is(err, sql.ErrNoRows):
-			n++
-		default:
+	// Keep the newest maxPoints.
+	if extra := n - int64(maxPoints); extra > 0 {
+		var dropped int64
+		if err := tx.QueryRow(`SELECT coalesce(sum(length(key) + length(value)), 0) FROM
+			(SELECT key, value FROM points WHERE area = ? AND key = ? ORDER BY t LIMIT ?)`, r.Area, r.Key, extra).Scan(&dropped); err != nil {
 			return res, err
 		}
-		if _, err := tx.Exec(`INSERT INTO points (area, key, t, value, is_json) VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT (area, key, t) DO UPDATE SET value = excluded.value, is_json = excluded.is_json`,
-			r.Area, p.Key, t, p.Value, p.IsJSON); err != nil {
+		if _, err := tx.Exec(`DELETE FROM points WHERE area = ? AND key = ? AND t IN
+			(SELECT t FROM points WHERE area = ? AND key = ? ORDER BY t LIMIT ?)`, r.Area, r.Key, r.Area, r.Key, extra); err != nil {
 			return res, err
 		}
-		spaceDelta += int64(len(p.Key)+len(p.Value)) - replaced
+		spaceDelta -= dropped
+		n -= extra
+	}
 
-		// Keep the newest maxPoints.
-		if extra := n - int64(maxPoints); extra > 0 {
-			var dropped int64
-			if err := tx.QueryRow(`SELECT coalesce(sum(length(key) + length(value)), 0) FROM
-				(SELECT key, value FROM points WHERE area = ? AND key = ? ORDER BY t LIMIT ?)`, r.Area, p.Key, extra).Scan(&dropped); err != nil {
-				return res, err
-			}
-			if _, err := tx.Exec(`DELETE FROM points WHERE area = ? AND key = ? AND t IN
-				(SELECT t FROM points WHERE area = ? AND key = ? ORDER BY t LIMIT ?)`, r.Area, p.Key, r.Area, p.Key, extra); err != nil {
-				return res, err
-			}
-			spaceDelta -= dropped
-			n -= extra
-		}
-
-		newest := !live || t >= o.t
-		if !newest {
-			// An older point: the key keeps its value and version.
-			if _, err := tx.Exec(`UPDATE kv SET n = ? WHERE area = ? AND key = ?`, n, r.Area, p.Key); err != nil {
-				return res, err
-			}
-			res.Version = max(res.Version, o.version)
-			continue
-		}
-
-		seq++
-		newSize := int64(len(p.Key) + len(p.Value))
-		oldSize := int64(0)
-		if o.row {
-			oldSize = o.size
+	newest := !live || t >= old.t
+	newSize, oldSize := int64(0), int64(0)
+	keysDelta, visitorDelta := 0, int64(0)
+	if newest {
+		newSize = int64(len(r.Key) + len(r.Value))
+		if old.row {
+			oldSize = old.size
 		}
 		spaceDelta += newSize - oldSize
 		if !live {
-			keysDelta++
-			res.Created = true
+			keysDelta = 1
 		}
-		// The series key counts towards the writer like a plain key of its
-		// newest value. The points count towards the space only.
-		if live {
-			moves = append(moves, usageMove{o.writer, -oldSize})
-			if o.writer == r.Writer {
-				visitorDelta -= oldSize
-			}
+		visitorDelta = newSize
+		if live && old.writer == r.Writer {
+			visitorDelta -= oldSize
 		}
-		moves = append(moves, usageMove{r.Writer, newSize})
-		visitorDelta += newSize
-
-		if _, err := tx.Exec(`INSERT INTO kv (area, key, value, is_json, version, writer, size, updated_at, series, t, n)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-			ON CONFLICT (area, key) DO UPDATE SET value = excluded.value, is_json = excluded.is_json,
-			version = excluded.version, writer = excluded.writer, size = excluded.size, updated_at = excluded.updated_at,
-			series = 1, t = excluded.t, n = excluded.n, expires=0, expired=0`,
-			r.Area, p.Key, p.Value, p.IsJSON, seq, r.Writer, newSize, now, t, n); err != nil {
-			return res, err
-		}
-		res.Version = max(res.Version, seq)
-		res.Changed = true
 	}
 
 	// Quotas apply to growth only. Trimming came first, so a full series at
 	// a steady rate doesn't grow.
-	if keysDelta > 0 && m.keys+keysDelta > maxKeys {
-		return res, apierr.Quota("space_quota_exceeded", "The space has as many keys as it may hold.", int64(maxKeys), int64(m.keys))
+	if keysDelta > 0 && st.keys+keysDelta > st.maxKeys {
+		return res, apierr.Quota("space_quota_exceeded", "The space has as many keys as it may hold.", int64(st.maxKeys), int64(st.keys))
 	}
-	if spaceDelta > 0 && m.bytes+spaceDelta > maxBytes {
-		return res, apierr.Quota("space_quota_exceeded", "The space is full.", maxBytes, m.bytes)
+	if spaceDelta > 0 && st.bytes+spaceDelta > st.maxBytes {
+		return res, apierr.Quota("space_quota_exceeded", "The space is full.", st.maxBytes, st.bytes)
 	}
-	if lim := int64(s.cfg.Limits.MaxVisitorBytes); visitorDelta > 0 && vTotal+visitorDelta > lim {
-		return res, apierr.Quota("visitor_quota_exceeded", "You have stored as much as one visitor may.", lim, vTotal)
+	if lim := int64(s.cfg.Limits.MaxVisitorBytes); visitorDelta > 0 && st.vTotal+visitorDelta > lim {
+		return res, apierr.Quota("visitor_quota_exceeded", "You have stored as much as one visitor may.", lim, st.vTotal)
 	}
-	s.mu.Lock()
-	total := s.total
-	s.mu.Unlock()
-	if spaceDelta > 0 && total+spaceDelta > int64(s.cfg.Limits.MaxTotalBytes) {
+	if spaceDelta > 0 && st.serverTotal+st.spaceDelta+spaceDelta > int64(s.cfg.Limits.MaxTotalBytes) {
 		return res, apierr.ServerFull
 	}
+	st.bytes += spaceDelta
+	st.spaceDelta += spaceDelta
+	st.touched, st.active = true, true
 
-	for _, mv := range moves {
-		if _, err := tx.Exec(`INSERT INTO usage (writer, bytes) VALUES (?, max(0, ?)) ON CONFLICT (writer) DO UPDATE SET bytes = max(0, bytes + ?)`,
-			mv.writer, mv.delta, mv.delta); err != nil {
+	if !newest {
+		// An older point: the key keeps its value and version.
+		if _, err := tx.Exec(`UPDATE kv SET n = ? WHERE area = ? AND key = ?`, n, r.Area, r.Key); err != nil {
 			return res, err
 		}
+		return WriteResult{Version: old.version, T: t, Expires: expires, Grown: max(0, spaceDelta)}, nil
 	}
-	for k, v := range map[string]any{"seq": seq, "bytes": m.bytes + spaceDelta, "keys": m.keys + keysDelta, "last_active_at": now} {
-		if err := setMeta(tx, k, v); err != nil {
-			return res, err
-		}
-	}
-	if err := tx.Commit(); err != nil {
+
+	st.seq++
+	if _, err := tx.Exec(`INSERT INTO kv (area, key, value, is_json, version, writer, size, updated_at, series, t, n)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+		ON CONFLICT (area, key) DO UPDATE SET value = excluded.value, is_json = excluded.is_json,
+		version = excluded.version, writer = excluded.writer, size = excluded.size, updated_at = excluded.updated_at,
+		series = 1, t = excluded.t, n = excluded.n, expires=0, expired=0`,
+		r.Area, r.Key, r.Value, r.IsJSON, st.seq, r.Writer, newSize, nowMS/1000, t, n); err != nil {
 		return res, err
 	}
-	sp.metaActive = now
-
-	s.mu.Lock()
-	if st := s.stats[r.Space]; st != nil {
-		st.bytes += spaceDelta
-		st.keys += keysDelta
-		st.lastActive = now
+	if live {
+		if _, err := tx.Exec(`UPDATE usage SET bytes = max(0, bytes - ?) WHERE writer = ?`, oldSize, old.writer); err != nil {
+			return res, err
+		}
+		st.usage[old.writer] -= oldSize
 	}
-	s.total += spaceDelta
-	s.mu.Unlock()
-	for _, mv := range moves {
-		s.adjustVisitor(mv.writer, mv.delta)
+	if _, err := tx.Exec(`INSERT INTO usage (writer, bytes) VALUES (?, ?) ON CONFLICT (writer) DO UPDATE SET bytes = bytes + excluded.bytes`, r.Writer, newSize); err != nil {
+		return res, err
 	}
-	s.noteVisitorSpace(r.Writer, r.Space)
-	s.noteRecipient(r.Area, r.Space)
-	res.T = t
-	res.Grown = max(0, spaceDelta)
-	return res, nil
+	st.usage[r.Writer] += newSize
+	st.keys += keysDelta
+	st.vTotal += visitorDelta
+	st.changed = true
+	return WriteResult{Version: st.seq, Created: !live, Changed: true, T: t, Expires: expires, Grown: max(0, spaceDelta)}, nil
 }
 
 // ReadPoints returns points oldest first: with since, the first limit after
@@ -293,9 +256,9 @@ func (s *Store) ReadPoints(space, area, key string, since *int64, limit int) (po
 
 	var rows *sql.Rows
 	if since != nil {
-		rows, err = sp.db.Query(`SELECT t, value, is_json FROM points WHERE area = ? AND key = ? AND t > ? ORDER BY t LIMIT ?`, area, key, *since, limit+1)
+		rows, err = sp.db.Query(`SELECT t, value, is_json, expires FROM points WHERE area = ? AND key = ? AND t > ? ORDER BY t LIMIT ?`, area, key, *since, limit+1)
 	} else {
-		rows, err = sp.db.Query(`SELECT t, value, is_json FROM points WHERE area = ? AND key = ? ORDER BY t DESC LIMIT ?`, area, key, limit)
+		rows, err = sp.db.Query(`SELECT t, value, is_json, expires FROM points WHERE area = ? AND key = ? ORDER BY t DESC LIMIT ?`, area, key, limit)
 	}
 	if err != nil {
 		return nil, nil, 0, err
@@ -308,7 +271,7 @@ func (s *Store) ReadPoints(space, area, key string, since *int64, limit int) (po
 			break
 		}
 		p := Point{Area: area, Key: key}
-		if err := rows.Scan(&p.T, &p.Value, &p.IsJSON); err != nil {
+		if err := rows.Scan(&p.T, &p.Value, &p.IsJSON, &p.Expires); err != nil {
 			return nil, nil, 0, err
 		}
 		points = append(points, p)

@@ -13,8 +13,9 @@ import (
 )
 
 type pointJSON struct {
-	T     int64           `json:"t"`
-	Value json.RawMessage `json:"value"`
+	T       int64           `json:"t"`
+	Value   json.RawMessage `json:"value"`
+	Expires int64           `json:"expires,omitempty"`
 }
 
 func jsonValue(v []byte, isJSON bool) json.RawMessage {
@@ -27,11 +28,18 @@ func jsonValue(v []byte, isJSON bool) json.RawMessage {
 
 const maxBatchMembers = 100
 
-// seriesAdd handles POST {key}/series and POST {prefix}*/series.
+// seriesAdd handles POST {key}/series and POST {prefix}*/series. Inside a
+// batch it only collects the point.
 func (s *Server) seriesAdd(c *reqCtx, t store.Target) error {
 	id := c.visitor // route checked access
-	s.writeBudget(c)
+	if c.collect == nil {
+		s.writeBudget(c)
+	}
 	before, err := parseIfBefore(c.r)
+	if err != nil {
+		return err
+	}
+	ttl, err := s.parseTTL(c.r)
 	if err != nil {
 		return err
 	}
@@ -81,13 +89,21 @@ func (s *Server) seriesAdd(c *reqCtx, t store.Target) error {
 		return &apierr.Error{Status: 400, Code: "json_too_deep", Message: "JSON may be nested at most 64 levels."}
 	}
 
-	req := store.PointsReq{IfBefore: before, Space: t.Space, Area: t.Area, T: at, Writer: id}
+	req := store.PointsReq{IfBefore: before, Space: t.Space, Area: t.Area, T: at, TTL: ttl, Writer: id}
 	if t.Pattern {
 		if req.Points, err = parseBatch(body, isJSON, t.Key, maxPoint, tooLarge); err != nil {
 			return err
 		}
 	} else {
 		req.Points = []store.PointIn{{Key: t.Key, Value: body, IsJSON: isJSON}}
+	}
+	if c.collect != nil {
+		if t.Pattern {
+			return badBatch("In a batch, each write adds one point to one key: POST {key}/series, not {prefix}*/series.")
+		}
+		*c.collect = append(*c.collect, store.WriteReq{Space: t.Space, Area: t.Area, Key: t.Key, Value: body, IsJSON: isJSON,
+			Writer: id, IfBefore: before, Point: true, T: at, TTL: ttl})
+		return nil
 	}
 
 	if err := s.rate(s.lim.writesPerVisitor, id, 1, "rate_limited"); err != nil {
@@ -199,7 +215,7 @@ func (s *Server) seriesRead(c *reqCtx, t store.Target) error {
 	}
 	out := make([]pointJSON, 0, len(points))
 	for _, p := range points {
-		out = append(out, pointJSON{T: p.T, Value: jsonValue(p.Value, p.IsJSON)})
+		out = append(out, pointJSON{T: p.T, Value: jsonValue(p.Value, p.IsJSON), Expires: p.Expires})
 	}
 	var nx any
 	if next != nil {

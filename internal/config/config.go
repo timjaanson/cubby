@@ -129,7 +129,7 @@ func Default() *Config {
 	c.Retention.TombstoneTTL = Duration(7 * 24 * time.Hour)
 	c.Limits.MaxValueSize = 512 << 10
 	c.Limits.MaxPointSize = 4 << 10
-	c.Limits.MaxSeriesPoints = 20000
+	c.Limits.MaxSeriesPoints = 1_000_000
 	c.Limits.MaxVisitorBytes = 25 << 20
 	c.Limits.MaxSpaceBytes = 100 << 20
 	c.Limits.MaxSpaceKeys = 100000

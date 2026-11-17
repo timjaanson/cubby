@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/timjaanson/cubby/internal/apierr"
 	"github.com/timjaanson/cubby/internal/store"
@@ -43,8 +44,8 @@ func atIndex(err error, i int) error {
 	return &cp
 }
 
-// batch handles POST /v1/{space}/batch: up to 100 PUTs and DELETEs, all
-// or nothing. Each write goes through route as if it came alone, so it is
+// batch handles POST /v1/{space}/batch: up to 100 PUTs, DELETEs and series
+// points (POST {key}/series), all or nothing. Each write goes through route as if it came alone, so it is
 // checked exactly like a single request, then the store writes them in one
 // transaction.
 func (s *Server) batch(c *reqCtx, space string) error {
@@ -66,7 +67,7 @@ func (s *Server) batch(c *reqCtx, space string) error {
 	if int64(len(raw)) > limit {
 		return &apierr.Error{Status: 413, Code: "value_too_large", Message: "The batch is too large.", Extra: map[string]any{"limit": limit}}
 	}
-	notArray := badBatch("A batch is a JSON array of 1 to " + strconv.Itoa(maxBatchWrites) + " writes, each {\"method\": \"PUT\" or \"DELETE\", \"path\", \"query\", \"body\" or \"text\"}.")
+	notArray := badBatch("A batch is a JSON array of 1 to " + strconv.Itoa(maxBatchWrites) + " writes, each {\"method\": \"PUT\", \"DELETE\" or \"POST\" (to {key}/series), \"path\", \"query\", \"body\" or \"text\"}.")
 	if t := bytes.TrimSpace(raw); len(t) == 0 || t[0] != '[' {
 		return notArray
 	}
@@ -80,7 +81,8 @@ func (s *Server) batch(c *reqCtx, space string) error {
 
 	reqs := make([]store.WriteReq, 0, len(items))
 	paths := make([]string, len(items))
-	seen := map[string]int{}
+	seen := map[string]int{}             // first write of each key
+	times := map[string]map[int64]bool{} // point times per key
 	for i, item := range items {
 		dec := json.NewDecoder(bytes.NewReader(item))
 		dec.DisallowUnknownFields()
@@ -88,8 +90,12 @@ func (s *Server) batch(c *reqCtx, space string) error {
 		if err := dec.Decode(&in); err != nil {
 			return atIndex(badBatch("Each write is {\"method\", \"path\", \"query\", \"body\" or \"text\"}. "+err.Error()), i)
 		}
-		if in.Method != http.MethodPut && in.Method != http.MethodDelete {
-			return atIndex(badBatch("A batch holds PUT and DELETE only."), i)
+		point := in.Method == http.MethodPost
+		if !point && in.Method != http.MethodPut && in.Method != http.MethodDelete {
+			return atIndex(badBatch("A batch holds PUT, DELETE, and POST of a series point."), i)
+		}
+		if point && !strings.HasSuffix(in.Path, "/series") {
+			return atIndex(badBatch("In a batch, POST only adds a series point: the path ends in /series."), i)
 		}
 		if in.Path == "batch" {
 			return atIndex(badBatch("A batch can't hold a batch."), i)
@@ -104,15 +110,22 @@ func (s *Server) batch(c *reqCtx, space string) error {
 		if err := s.route(sub); err != nil {
 			return atIndex(err, i)
 		}
-		if len(reqs) != before+1 {
-			return atIndex(badBatch("A batch holds PUT and DELETE of single keys."), i)
+		if len(reqs) != before+1 || reqs[before].Point != point {
+			return atIndex(badBatch("A batch holds PUT and DELETE of single keys, and points added to single series."), i)
 		}
 		w := reqs[before]
 		k := w.Area + "\x00" + w.Key
 		if j, dup := seen[k]; dup {
-			return atIndex(badBatch("This key is already written by write "+strconv.Itoa(j)+". A batch writes each key once."), i)
+			// Points may share a key when each names its own time.
+			p := reqs[j]
+			if !w.Point || !p.Point || w.T == 0 || p.T == 0 || times[k][w.T] {
+				return atIndex(badBatch("This key is already written by write "+strconv.Itoa(j)+". A batch writes each key once, except for points that each give a different t."), i)
+			}
+		} else {
+			seen[k] = i
+			times[k] = map[int64]bool{}
 		}
-		seen[k] = i
+		times[k][w.T] = true
 		paths[i] = in.Path
 	}
 
@@ -143,12 +156,16 @@ func (s *Server) batch(c *reqCtx, space string) error {
 		Path    string `json:"path"`
 		Version int64  `json:"version"`
 		Created bool   `json:"created,omitempty"`
+		T       int64  `json:"t,omitempty"`
 	}
 	out := make([]itemOut, len(res))
 	var grown, version int64
 	changed := false
 	for i, r := range res {
 		out[i] = itemOut{Path: paths[i], Version: r.Version, Created: r.Created && reqs[i].Value != nil}
+		if reqs[i].Point {
+			out[i].T = r.T
+		}
 		grown += r.Grown
 		version = max(version, r.Version)
 		changed = changed || r.Changed
