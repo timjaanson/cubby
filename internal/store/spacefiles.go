@@ -312,6 +312,9 @@ func (s *Store) Rescan() error {
 			return err
 		}
 		m, err := readMeta(db)
+		if err == nil {
+			err = s.indexMembers(name, db)
+		}
 		db.Close()
 		if err != nil {
 			log.Printf("ignoring spaces/%s: %v", e.Name(), err)

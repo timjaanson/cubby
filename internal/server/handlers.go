@@ -105,46 +105,64 @@ func jsonDepth(b []byte) int {
 	return max
 }
 
-// write runs after route checked access; the visitor is known.
-func (s *Server) write(c *reqCtx, t store.Target) error {
-	id := c.visitor
-	s.writeBudget(c)
+// writeReq reads a PUT or DELETE into what the store writes.
+func (s *Server) writeReq(c *reqCtx, t store.Target) (store.WriteReq, error) {
 	ifv, err := parseIfVersion(c.r)
 	if err != nil {
-		return err
+		return store.WriteReq{}, err
 	}
 	before, err := parseIfBefore(c.r)
 	if err != nil {
-		return err
+		return store.WriteReq{}, err
 	}
 	ttl, err := s.parseTTL(c.r)
 	if err != nil {
-		return err
+		return store.WriteReq{}, err
 	}
-	req := store.WriteReq{IfBefore: before, TTL: ttl, Space: t.Space, Area: t.Area, Key: t.Key, Writer: id, IfVersion: ifv}
+	req := store.WriteReq{IfBefore: before, TTL: ttl, Space: t.Space, Area: t.Area, Key: t.Key, Writer: c.visitor, IfVersion: ifv}
 
 	if c.r.Method == http.MethodPut {
 		maxValue, _, _ := s.cfg.LimitsFor(t.Space)
 		body, err := io.ReadAll(io.LimitReader(c.r.Body, maxValue+1))
 		if err != nil {
-			return &apierr.Error{Status: 400, Code: "invalid_encoding", Message: "Could not read the body."}
+			return req, &apierr.Error{Status: 400, Code: "invalid_encoding", Message: "Could not read the body."}
 		}
 		if int64(len(body)) > maxValue {
-			return &apierr.Error{Status: 413, Code: "value_too_large", Message: "The value is too large.", Extra: map[string]any{"limit": maxValue}}
+			return req, &apierr.Error{Status: 413, Code: "value_too_large", Message: "The value is too large.", Extra: map[string]any{"limit": maxValue}}
 		}
 		if len(body) == 0 {
-			return &apierr.Error{Status: 400, Code: "empty_value", Message: "Empty values aren't stored. To remove a key, use DELETE."}
+			return req, &apierr.Error{Status: 400, Code: "empty_value", Message: "Empty values aren't stored. To remove a key, use DELETE."}
 		}
 		if !utf8.Valid(body) {
-			return &apierr.Error{Status: 400, Code: "invalid_encoding", Message: "Values must be UTF-8 text."}
+			return req, &apierr.Error{Status: 400, Code: "invalid_encoding", Message: "Values must be UTF-8 text."}
 		}
 		if json.Valid(body) {
 			if jsonDepth(body) > 64 {
-				return &apierr.Error{Status: 400, Code: "json_too_deep", Message: "JSON may be nested at most 64 levels."}
+				return req, &apierr.Error{Status: 400, Code: "json_too_deep", Message: "JSON may be nested at most 64 levels."}
 			}
 			req.IsJSON = true
 		}
 		req.Value = body
+	}
+	return req, nil
+}
+
+// write runs after route checked access; the visitor is known. Inside a
+// batch it only collects the write.
+func (s *Server) write(c *reqCtx, t store.Target) error {
+	if c.collect != nil {
+		req, err := s.writeReq(c, t)
+		if err != nil {
+			return err
+		}
+		*c.collect = append(*c.collect, req)
+		return nil
+	}
+	id := c.visitor
+	s.writeBudget(c)
+	req, err := s.writeReq(c, t)
+	if err != nil {
+		return err
 	}
 
 	if err := s.rate(s.lim.writesPerVisitor, id, 1, "rate_limited"); err != nil {

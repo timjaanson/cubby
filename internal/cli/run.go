@@ -17,9 +17,11 @@ Server:
 
 Client (talks to --server or $CUBBY_SERVER, default http://localhost:28229; a bare port means localhost):
   cubby new [label] [--anyone L]  create a space you own; private unless --anyone read|post|all
+  cubby spaces                    list the spaces you belong to, newest change first
   cubby get <path>                print a value
   cubby set <path> [value|-]      write a value from the argument or stdin
   cubby del <path>                delete a value
+  cubby batch <space> [file|-]    write several keys from a JSON array, all or nothing
   cubby ls <path>                 list a key or pattern, one tab-separated line per item
   cubby watch <path>              print changes as they happen
   cubby update <path>             read, change with --exec or $EDITOR, write back safely

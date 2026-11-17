@@ -37,6 +37,9 @@ type reqCtx struct {
 	liveID      json.RawMessage
 	liveStarted bool // a watch took over the reply
 	will        willMode
+
+	// Set for one write of a batch: write checks it and adds it here.
+	collect *[]store.WriteReq
 }
 
 // willMode is how a pulse request serves a last will.

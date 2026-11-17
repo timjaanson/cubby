@@ -36,6 +36,8 @@ var commandFlags = map[string]struct {
 	"pulses":   {[]string{"exec"}, []string{"json"}, "pulses <path or pattern> [--exec CMD] [--json]\n  Print pulses as they arrive, from now on: key<TAB>value, or author<TAB>key<TAB>value under\n  by/*/. --exec runs CMD per pulse with the value on stdin and KV_KEY, KV_BY,\n  KV_TIME (and KV_FROM and KV_TO under to/ and inbox/) set."},
 	"update":   {[]string{"exec"}, nil, "update <path> [--exec CMD]\n  Read, pipe through CMD (or open $EDITOR), write back with ifVersion, retry on conflict.\n  Example: cubby update space/shared/count --exec 'jq \"(. // 0) + 1\"'"},
 	"new":      {[]string{"label", "anyone", "invite"}, nil, "new [label | name] [--anyone none|read|post|all] [--invite read|post|all|owner]\n  Create a space you own and print its name. Spaces are private unless --anyone gives\n  everyone a level:\n    read      anyone reads, invited people write (status pages, sensor readings)\n    post      anyone reads, writes their own by/ keys and sends to/ (polls, RSVPs)\n    all       anyone with the name reads and writes\n  --invite is the lowest member level that may invite others, post unless given.\n  With nothing, the name is four random words; a label gets the words added\n  (new poll -> poll-cedar-pilot-mango-frost); a full name of 16+ characters is used\n  as is and fails if taken. Keep a backup key (cubby device backup) to get back in\n  from another machine."},
+	"spaces":   {nil, []string{"json"}, "spaces [--json]\n  Every space you belong to (owner or invited), newest membership change first: name,\n  access, changed, members. The same on every paired device. --json prints each item\n  with since, until, via, lastActive, bytes, keys and settings too."},
+	"batch":    {nil, nil, "batch <space> [file|-]\n  Write several keys all or nothing: a JSON array of up to 100 writes like\n  [{\"method\": \"PUT\", \"path\": \"shared/title\", \"body\": \"Trip\"},\n   {\"method\": \"DELETE\", \"path\": \"by/me/draft\", \"query\": {\"ifVersion\": 7}}]\n  from the file or stdin. text instead of body stores a string as text. Prints\n  path<TAB>version per write. If one fails, nothing is written and the error names it."},
 	"name":     {nil, nil, "name [label]\n  Print a new space name: four random words, after the label if given. No server needed."},
 	"whoami":   {nil, nil, "whoami\n  Print your visitor ID. cubby device ls shows this device (*) among yours."},
 	"invite":   {[]string{"access", "uses", "until", "grant-for", "label", "link"}, nil, "invite new <space> [--access read|post|all] [--uses N|unlimited] [--until T|never] [--grant-for D]\n           [--label L] [--link URL]\n  Mint an invite. Members at the space's invite level (post unless changed) and owners\n  can. Defaults: 10 uses, 7 days, and access all, or the inviter's own level if lower.\n  Nobody gives more than they have. --until takes 12h, 30d, 2027-01-31 or an RFC 3339\n  time. --link prints URL#invite=INVITE to send.\ninvite ls <space>\n  Your invites, or every invite for an owner. One line per invite: ID, state, uses left,\n  until, members, label, access.\ninvite set <space> <id> [--uses N|unlimited] [--until T|never]\n  Change how often and how long it can still be redeemed. --uses 0 stops new ones.\ninvite rm <space> <id>\n  Revoke an invite and every grant redeemed from it."},
@@ -159,6 +161,10 @@ func (c *client) run(cmd string, f *flags) error {
 		return c.series(f)
 	case "new":
 		return c.newSpace(f)
+	case "spaces":
+		return c.spaces(f)
+	case "batch":
+		return c.batch(f)
 	case "whoami":
 		id, err := c.visitorID()
 		if err == nil {

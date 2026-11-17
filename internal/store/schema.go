@@ -2,9 +2,10 @@ package store
 
 // serverVersion is server.db's user_version and spaceVersion a space
 // file's. v0.19 (sign-in with device keys) started both over; older files
-// are refused, not migrated.
+// are refused, not migrated. Server version 2 (v0.19) is migrated to 3
+// (membership times in visitor_spaces).
 const (
-	serverVersion = 2
+	serverVersion = 3
 	spaceVersion  = 5
 )
 
@@ -55,12 +56,18 @@ CREATE TABLE IF NOT EXISTS api_keys (
 CREATE INDEX IF NOT EXISTS api_keys_by_visitor ON api_keys (visitor);
 CREATE INDEX IF NOT EXISTS api_keys_by_device ON api_keys (device);
 CREATE INDEX IF NOT EXISTS api_keys_by_space ON api_keys (space);
+-- Spaces where a visitor has data, was sent something, or holds a grant.
+-- since and changed are set when a grant is made (NULL: no grant known);
+-- a listing that finds the grant gone sets them back to NULL.
 CREATE TABLE IF NOT EXISTS visitor_spaces (
   visitor TEXT NOT NULL,
   space   TEXT NOT NULL,
+  since   INTEGER,                         -- ms, the first grant
+  changed INTEGER,                         -- ms, the newest grant
   PRIMARY KEY (visitor, space)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS visitor_spaces_by_space ON visitor_spaces (space);
+CREATE INDEX IF NOT EXISTS visitor_spaces_by_changed ON visitor_spaces (visitor, changed DESC, space) WHERE changed IS NOT NULL;
 CREATE TABLE IF NOT EXISTS graveyard (
   name TEXT PRIMARY KEY,
   seq  INTEGER NOT NULL

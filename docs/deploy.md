@@ -92,7 +92,7 @@ WantedBy=multi-user.target
 ## Data
 
 ```
-server.db             visitors, devices and their public keys, pairing codes, API keys
+server.db             visitors, devices and their public keys, pairing codes, API keys, who belongs where
 spaces/{name}.db      one SQLite file per space: keys, settings, invites, members
 admin.sock            how cubby admin reaches the running server
 ```

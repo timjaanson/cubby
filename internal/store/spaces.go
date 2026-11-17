@@ -37,7 +37,7 @@ func (s *Store) CreateSpace(name, label string, settings access.Settings, owner 
 		}
 		s.Release(sp)
 		if created {
-			s.noteVisitorSpace(owner, name)
+			s.noteMember(owner, name, NowMs(), true)
 			return name, nil
 		}
 		if fixed {

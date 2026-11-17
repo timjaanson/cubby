@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -498,5 +499,45 @@ func (s *Server) setMember(c *reqCtx, space, user string) error {
 		s.closeBanned(space, user, u)
 	}
 	c.json(200, mem)
+	return nil
+}
+
+// listSpaces handles GET /v1/spaces: the spaces the visitor belongs to,
+// the most recently changed membership first.
+func (s *Server) listSpaces(c *reqCtx) error {
+	visitor, err := c.needVisitor()
+	if err != nil {
+		return err
+	}
+	q := c.r.URL.Query()
+	limit := 100
+	if q.Has("limit") {
+		n, ok := parseUint(q.Get("limit"))
+		if !ok || n < 1 || n > 100 {
+			return apierr.BadParam("limit", "limit is 1 to 100.")
+		}
+		limit = int(n)
+	}
+	var after *store.SpacesCursor
+	if q.Has("after") {
+		t, sp, ok := strings.Cut(q.Get("after"), ":")
+		n, okN := parseUint(t)
+		if !ok || !okN || !names.ValidSpace(sp) {
+			return apierr.BadParam("after", "after is the next value of the previous page.")
+		}
+		after = &store.SpacesCursor{Changed: n, Space: sp}
+	}
+	if err := s.rate(s.lim.readsPerIP, c.ip, 1, "rate_limited"); err != nil {
+		return err
+	}
+	items, next, err := s.store.ListSpaces(visitor, after, limit)
+	if err != nil {
+		return err
+	}
+	var nx any
+	if next != nil {
+		nx = strconv.FormatInt(next.Changed, 10) + ":" + next.Space
+	}
+	c.json(200, map[string]any{"items": items, "next": nx})
 	return nil
 }

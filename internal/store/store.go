@@ -91,11 +91,23 @@ func Open(cfg *config.Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := checkServerVersion(srv, filepath.Join(dir, "server.db")); err != nil {
+	migrate, err := checkServerVersion(srv, filepath.Join(dir, "server.db"))
+	if err != nil {
 		srv.Close()
 		return nil, err
 	}
-	if _, err := srv.Exec(serverSchema + fmt.Sprintf("PRAGMA user_version = %d;", serverVersion)); err != nil {
+	if migrate {
+		// v0.19 → v0.20: membership times, filled from the space files below.
+		if _, err := srv.Exec(`ALTER TABLE visitor_spaces ADD COLUMN since INTEGER; ALTER TABLE visitor_spaces ADD COLUMN changed INTEGER;`); err != nil {
+			srv.Close()
+			return nil, fmt.Errorf("migrate %s: %w", filepath.Join(dir, "server.db"), err)
+		}
+	}
+	setVersion := fmt.Sprintf("PRAGMA user_version = %d;", serverVersion)
+	if migrate {
+		setVersion = ""
+	}
+	if _, err := srv.Exec(serverSchema + setVersion); err != nil {
 		srv.Close()
 		return nil, fmt.Errorf("open %s: %w", filepath.Join(dir, "server.db"), err)
 	}
@@ -107,6 +119,13 @@ func Open(cfg *config.Config) (*Store, error) {
 	if err := s.Rescan(); err != nil {
 		srv.Close()
 		return nil, err
+	}
+	if migrate {
+		// Rescan filled since and changed from the space files.
+		if _, err := srv.Exec(fmt.Sprintf("PRAGMA user_version = %d;", serverVersion)); err != nil {
+			srv.Close()
+			return nil, err
+		}
 	}
 	return s, nil
 }

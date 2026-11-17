@@ -167,11 +167,17 @@ func (s *Server) route(c *reqCtx) error {
 			}
 			return s.pair(c)
 		case "spaces":
-			if m != http.MethodPost {
-				return methodErr("POST")
+			if m != http.MethodPost && m != http.MethodGet && m != http.MethodHead {
+				return methodErr("GET, HEAD, POST")
 			}
 			if c.apiKey != nil {
 				return apierr.APIKeyNotAllowed
+			}
+			if m != http.MethodPost {
+				if err := checkParams(c.r, "limit", "after"); err != nil {
+					return err
+				}
+				return s.listSpaces(c)
 			}
 			if err := checkParams(c.r); err != nil {
 				return err
@@ -210,7 +216,7 @@ func (s *Server) route(c *reqCtx) error {
 			if len(seg) < 4 || seg[2] == "owners" && len(seg) < 5 {
 				return noRoute
 			}
-		case "access", "join", "live":
+		case "access", "join", "live", "batch":
 			if len(seg) != 2 {
 				return noRoute
 			}
@@ -285,6 +291,12 @@ func (s *Server) route(c *reqCtx) error {
 
 	if len(seg) == 1 || seg[1] == "access" || seg[1] == "invites" || seg[1] == "members" {
 		return s.spaceRoute(c, space, rights, seg[1:])
+	}
+	if seg[1] == "batch" {
+		if c.collect != nil {
+			return badBatch("A batch can't hold a batch.")
+		}
+		return s.batch(c, space)
 	}
 	t := store.Target{Space: space}
 	op := access.Op{}

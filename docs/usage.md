@@ -73,8 +73,9 @@ const { items } = await db.by.list("vote")              // items have key, value
 ```
 
 - `createSpace({ label, anyone, invite })` makes a space this visitor owns and returns `{ space }`.
+- `spaces({ limit, after })` lists the spaces this visitor belongs to (owns or was invited to), newest membership change first, the same on every paired device. Returns `{ items, next }`; pass `next` as `after` for the next page. Each item has `space`, `access`, `via` (`created`, `invite`, `added`), `since`, `changed`, `until`, `members`, `lastActive`, `bytes`, `keys`, `settings`. Open spaces you only wrote to aren't listed. Space names are random words, so keep a title inside the space (`shared/title`) if the page needs one.
 - `openRoom("board", { live: true })` is the shortcut for a page that is a room shared by its link: it finds `#s=...` or the last room, or creates one. `room.db`, `room.me`, `await room.link()` (a reusable invite link), `room.forget()`.
-- Exports: `kv`, `createSpace`, `openRoom`, `devices`, `takeInvite`, `inviteLink`, `newName`, `validSpace`, `KvError`. Errors are `KvError` with `code`, `status`, `details`, `retryAfter` and `retryable`.
+- Exports: `kv`, `createSpace`, `spaces`, `openRoom`, `devices`, `takeInvite`, `inviteLink`, `newName`, `validSpace`, `KvError`. Errors are `KvError` with `code`, `status`, `details`, `retryAfter` and `retryable`.
 - Without IndexedDB (Node, a private window in some browsers) the key lives in memory: a new visitor per run. In Node pass `credentials` (a backup key, below) for a fixed identity.
 
 ### Sharing
@@ -191,6 +192,18 @@ Expiry produces a delete with `expired: true`. Renewing with the same value does
 
 Defaults: 120 writes per visitor per minute (burst 30), 50 open watches per IP, 1200 reads per IP per minute, 25 MB per visitor, 100 MB and 100,000 keys per space. `db.writeBudget` holds the last write's rate-limit snapshot. On 429 wait `err.retryAfter` seconds; kv.js never retries writes by itself.
 
+## Several keys at once
+
+```js
+await db.batch([
+  { set: "shared/title", value: "Trip" },
+  { set: "by/me/cursor", value: { x: 3 }, ttl: 60 },
+  { delete: "shared/draft", ifVersion: 41 },
+])   // { version, items: [{ path, version, created }] }
+```
+
+All or nothing: up to 100 writes in one request and one transaction, each checked as if sent alone. If one fails, nothing is written and the error has `details.index`. Changed keys take consecutive versions in order, and a watcher gets them in the same answer. Paths are as in the HTTP API (`shared/k`, `by/me/k`, `to/{id}/k`). Only sets and deletes; one write per key. A batch counts as one write for rate limits.
+
 ## Series
 
 ```js
@@ -212,6 +225,7 @@ A key becomes a series with its first point. Its value is the newest point; it k
 | `banned` | an owner banned you here; `until` says how long | `db.open()` returns `access: "banned"` |
 | `no_visitor` | `db.to(id)` with an ID nobody has | |
 | `version_conflict` | `ifVersion` didn't match | read again; `update()` does this for you |
+| `bad_batch` | a batch that isn't 1 to 100 sets and deletes of distinct keys | `details.index` names the write |
 
 kv.js handles token errors itself: a wrong clock is corrected from the server's time, and a signed-out key registers again as a new visitor.
 
@@ -222,6 +236,7 @@ The same binary. Paths mirror the URL after `/v1/`; quote paths with `*`.
 ```sh
 export CUBBY_SERVER=https://cubby.example.com   # or --server; a bare port means localhost
 cubby new notes [--anyone read]                  # prints the new space name
+cubby spaces                                     # the spaces you belong to: name, access, changed, members
 cubby get   notes-cedar-pilot-mango-frost/shared/hello
 cubby set   notes-cedar-pilot-mango-frost/shared/hello "new text"     # or the value on stdin
 cubby set   poll-orbit-lilac-tango-slate/by/me/vote tacos
@@ -230,6 +245,7 @@ cubby watch notes-cedar-pilot-mango-frost/shared/hello
 cubby update homelab-maple-quilt-tundra-cobalt/shared/count --exec 'jq "(. // 0) + 1"'
 cubby add   'home-cedar-pilot-mango-frost/shared/env.*' temp=21.4 rh=45
 cubby series home-cedar-pilot-mango-frost/shared/env.temp --since 24h
+cubby batch notes-cedar-pilot-mango-frost writes.json   # a JSON array of writes, as in the HTTP API
 cubby pulse space/shared/doorbell ding;  cubby pulses 'space/shared/*'
 ```
 

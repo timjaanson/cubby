@@ -19,7 +19,7 @@ type WriteReq struct {
 	TTL              int64 // seconds, zero makes permanent
 }
 
-type writeResult struct {
+type WriteResult struct {
 	Version    int64
 	Created    bool // a new key, for 201
 	Changed    bool // false for an identical rewrite
@@ -27,53 +27,175 @@ type writeResult struct {
 	Grown      int64 // bytes the space grew by, zero when it shrank
 }
 
-func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err error) {
-	del := r.Value == nil
+// BatchError is a write in a batch that failed; the whole batch was
+// rolled back.
+type BatchError struct {
+	Index int
+	Err   error
+}
+
+func (e *BatchError) Error() string { return e.Err.Error() }
+func (e *BatchError) Unwrap() error { return e.Err }
+
+// Write is a batch of one.
+func (s *Store) Write(ctx context.Context, r WriteReq) (WriteResult, error) {
+	res, err := s.WriteBatch(ctx, []WriteReq{r})
+	var be *BatchError
+	if errors.As(err, &be) {
+		err = be.Err
+	}
+	if err != nil {
+		return WriteResult{}, err
+	}
+	return res[0], nil
+}
+
+// batchState is what a batch has done so far inside its transaction.
+type batchState struct {
+	seq, bytes  int64
+	keys        int
+	vTotal      int64 // the writer's bytes across spaces, as of this write
+	spaceDelta  int64
+	changed     bool // a version was taken
+	touched     bool // something was written to the file
+	active      bool // last_active_at moves
+	usage       map[string]int64
+	maxBytes    int64
+	maxKeys     int
+	serverTotal int64
+}
+
+// WriteBatch writes to several keys of one space, all by one writer, in one
+// transaction: every write lands or none does. Each changed key takes the
+// next version, in order. A failure is a *BatchError naming the write.
+func (s *Store) WriteBatch(ctx context.Context, reqs []WriteReq) (out []WriteResult, err error) {
+	if len(reqs) == 0 {
+		return nil, nil
+	}
+	space, writer := reqs[0].Space, reqs[0].Writer
+	for _, r := range reqs {
+		if r.Space != space || r.Writer != writer {
+			return nil, errors.New("store: a batch has one space and one writer")
+		}
+	}
+	fail := func(i int, err error) ([]WriteResult, error) { return nil, &BatchError{Index: i, Err: err} }
+
 	// Counted before taking the space, since counting may open other spaces.
 	var vTotal int64
-	if !del {
-		if vTotal, err = s.VisitorTotal(r.Writer); err != nil {
-			return res, err
+	for _, r := range reqs {
+		if r.Value != nil {
+			if vTotal, err = s.VisitorTotal(writer); err != nil {
+				return nil, err
+			}
+			break
 		}
 	}
 
-	sp, err := s.Acquire(r.Space)
+	sp, err := s.Acquire(space)
 	if err != nil {
-		return res, err
+		return nil, err
 	}
 	if sp == nil {
-		return res, apierr.NoSpace
+		return fail(0, apierr.NoSpace)
 	}
 	defer s.Release(sp)
 
-	_, maxBytes, maxKeys := s.cfg.LimitsFor(r.Space)
-	now := nowS()
+	_, maxBytes, maxKeys := s.cfg.LimitsFor(space)
 
 	sp.wmu.Lock()
 	defer sp.wmu.Unlock()
 	removed, err := s.expireLocked(sp)
 	if err != nil {
-		return res, err
+		return nil, err
 	}
-	vTotal -= removed[r.Writer]
+	vTotal -= removed[writer]
 	nowMS := NowMs()
-	now = nowMS / 1000
-	if err := CheckBefore(r.IfBefore, nowMS); err != nil {
-		return res, err
-	}
-	expires := int64(0)
-	if r.TTL > 0 {
-		expires = nowMS + r.TTL*1000
+	now := nowMS / 1000
+	for i, r := range reqs {
+		if err := CheckBefore(r.IfBefore, nowMS); err != nil {
+			return fail(i, err)
+		}
 	}
 	tx, err := sp.db.BeginTx(ctx, nil)
 	if err != nil {
-		return res, err
+		return nil, err
 	}
 	defer tx.Rollback()
 
 	m, err := readMeta(tx)
 	if err != nil {
-		return res, err
+		return nil, err
+	}
+	s.mu.Lock()
+	total := s.total
+	s.mu.Unlock()
+	st := &batchState{seq: m.seq, bytes: m.bytes, keys: m.keys, vTotal: vTotal, usage: map[string]int64{},
+		maxBytes: maxBytes, maxKeys: maxKeys, serverTotal: total}
+
+	out = make([]WriteResult, len(reqs))
+	for i, r := range reqs {
+		res, err := s.writeStep(tx, st, r, nowMS)
+		if err != nil {
+			return fail(i, err)
+		}
+		out[i] = res
+	}
+	if !st.touched {
+		return out, nil
+	}
+	meta := map[string]any{}
+	if st.changed {
+		meta["seq"], meta["bytes"], meta["keys"] = st.seq, st.bytes, st.keys
+	}
+	if st.active {
+		meta["last_active_at"] = now
+	}
+	for k, v := range meta {
+		if err := setMeta(tx, k, v); err != nil {
+			return nil, err
+		}
+	}
+	next, err := nextExpiry(tx)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	s.rememberExpiry(space, next)
+	if st.active {
+		sp.metaActive = now
+	}
+
+	s.mu.Lock()
+	if x := s.stats[space]; x != nil {
+		x.bytes += st.spaceDelta
+		x.keys += st.keys - m.keys
+		if st.active {
+			x.lastActive = now
+		}
+	}
+	s.total += st.spaceDelta
+	s.mu.Unlock()
+	for w, d := range st.usage {
+		s.adjustVisitor(w, d)
+	}
+	for _, r := range reqs {
+		if r.Value != nil {
+			s.noteVisitorSpace(writer, space)
+			s.noteRecipient(r.Area, space)
+		}
+	}
+	return out, nil
+}
+
+// writeStep is one write inside a batch's transaction.
+func (s *Store) writeStep(tx *sql.Tx, st *batchState, r WriteReq, nowMS int64) (res WriteResult, err error) {
+	del := r.Value == nil
+	now := nowMS / 1000
+	expires := int64(0)
+	if r.TTL > 0 {
+		expires = nowMS + r.TTL*1000
 	}
 
 	var old struct {
@@ -120,33 +242,16 @@ func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err err
 	}
 	if live && !del && bytes.Equal(old.value, r.Value) {
 		if expires == old.expires {
-			return writeResult{Version: cur, T: old.t, Expires: expires}, nil
+			return WriteResult{Version: cur, T: old.t, Expires: expires}, nil
 		}
 		if _, err := tx.Exec(`UPDATE kv SET expires=? WHERE area=? AND key=?`, expires, r.Area, r.Key); err != nil {
 			return res, err
 		}
+		st.touched = true
 		if r.TTL > 0 {
-			if err := setMeta(tx, "last_active_at", now); err != nil {
-				return res, err
-			}
+			st.active = true
 		}
-		next, err := nextExpiry(tx)
-		if err != nil {
-			return res, err
-		}
-		if err := tx.Commit(); err != nil {
-			return res, err
-		}
-		s.rememberExpiry(r.Space, next)
-		if r.TTL > 0 {
-			sp.metaActive = now
-			s.mu.Lock()
-			if st := s.stats[r.Space]; st != nil {
-				st.lastActive = now
-			}
-			s.mu.Unlock()
-		}
-		return writeResult{Version: cur, T: old.t, Expires: expires}, nil
+		return WriteResult{Version: cur, T: old.t, Expires: expires}, nil
 	}
 
 	newSize := int64(len(r.Key))
@@ -167,32 +272,32 @@ func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err err
 	}
 
 	// Quotas apply only to growth.
+	visitorDelta := int64(0)
 	if !del {
-		if keysDelta > 0 && m.keys+keysDelta > maxKeys {
-			return res, apierr.Quota("space_quota_exceeded", "The space has as many keys as it may hold.", int64(maxKeys), int64(m.keys))
+		if keysDelta > 0 && st.keys+keysDelta > st.maxKeys {
+			return res, apierr.Quota("space_quota_exceeded", "The space has as many keys as it may hold.", int64(st.maxKeys), int64(st.keys))
 		}
-		if spaceDelta > 0 && m.bytes+spaceDelta > maxBytes {
-			return res, apierr.Quota("space_quota_exceeded", "The space is full.", maxBytes, m.bytes)
+		if spaceDelta > 0 && st.bytes+spaceDelta > st.maxBytes {
+			return res, apierr.Quota("space_quota_exceeded", "The space is full.", st.maxBytes, st.bytes)
 		}
-		visitorDelta := newSize
+		visitorDelta = newSize
 		if live && old.writer == r.Writer {
 			visitorDelta -= oldSize
 		}
-		if lim := int64(s.cfg.Limits.MaxVisitorBytes); visitorDelta > 0 && vTotal+visitorDelta > lim {
-			return res, apierr.Quota("visitor_quota_exceeded", "You have stored as much as one visitor may.", lim, vTotal)
+		if lim := int64(s.cfg.Limits.MaxVisitorBytes); visitorDelta > 0 && st.vTotal+visitorDelta > lim {
+			return res, apierr.Quota("visitor_quota_exceeded", "You have stored as much as one visitor may.", lim, st.vTotal)
 		}
-		s.mu.Lock()
-		total := s.total
-		s.mu.Unlock()
-		if spaceDelta > 0 && total+spaceDelta > int64(s.cfg.Limits.MaxTotalBytes) {
+		if spaceDelta > 0 && st.serverTotal+st.spaceDelta+spaceDelta > int64(s.cfg.Limits.MaxTotalBytes) {
 			return res, apierr.ServerFull
 		}
+	} else if live && old.writer == r.Writer {
+		visitorDelta = -oldSize
 	}
 
-	version := m.seq + 1
+	st.seq++
+	version := st.seq
 	// A tombstone records who deleted the key. Usage is moved by old.writer
 	// below, and tombstones count against the space only.
-	writer := r.Writer
 	var val any
 	if !del {
 		val = r.Value
@@ -202,13 +307,8 @@ func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err err
 		ON CONFLICT (area, key) DO UPDATE SET value = excluded.value, is_json = excluded.is_json,
 		version = excluded.version, writer = excluded.writer, size = excluded.size, updated_at = excluded.updated_at,
 		series = 0, t = excluded.t, n = 0, expires=excluded.expires, expired=0`,
-		r.Area, r.Key, val, r.IsJSON, version, writer, newSize, now, nowMS, expires); err != nil {
+		r.Area, r.Key, val, r.IsJSON, version, r.Writer, newSize, now, nowMS, expires); err != nil {
 		return res, err
-	}
-	for k, v := range map[string]any{"seq": version, "bytes": m.bytes + spaceDelta, "keys": m.keys + keysDelta, "last_active_at": now} {
-		if err := setMeta(tx, k, v); err != nil {
-			return res, err
-		}
 	}
 	// The old writer gives up the old bytes, the new writer takes the new
 	// ones. Tombstones count against the space only.
@@ -216,37 +316,18 @@ func (s *Store) Write(ctx context.Context, r WriteReq) (res writeResult, err err
 		if _, err := tx.Exec(`UPDATE usage SET bytes = max(0, bytes - ?) WHERE writer = ?`, oldSize, old.writer); err != nil {
 			return res, err
 		}
+		st.usage[old.writer] -= oldSize
 	}
 	if !del {
 		if _, err := tx.Exec(`INSERT INTO usage (writer, bytes) VALUES (?, ?) ON CONFLICT (writer) DO UPDATE SET bytes = bytes + excluded.bytes`, r.Writer, newSize); err != nil {
 			return res, err
 		}
+		st.usage[r.Writer] += newSize
 	}
-	next, err := nextExpiry(tx)
-	if err != nil {
-		return res, err
-	}
-	if err := tx.Commit(); err != nil {
-		return res, err
-	}
-	s.rememberExpiry(r.Space, next)
-	sp.metaActive = now
-
-	s.mu.Lock()
-	if st := s.stats[r.Space]; st != nil {
-		st.bytes += spaceDelta
-		st.keys += keysDelta
-		st.lastActive = now
-	}
-	s.total += spaceDelta
-	s.mu.Unlock()
-	if live {
-		s.adjustVisitor(old.writer, -oldSize)
-	}
-	if !del {
-		s.adjustVisitor(r.Writer, newSize)
-		s.noteVisitorSpace(r.Writer, r.Space)
-		s.noteRecipient(r.Area, r.Space)
-	}
-	return writeResult{Version: version, Created: !live, Changed: true, T: nowMS, Expires: expires, Grown: max(0, spaceDelta)}, nil
+	st.bytes += spaceDelta
+	st.keys += keysDelta
+	st.spaceDelta += spaceDelta
+	st.vTotal += visitorDelta
+	st.changed, st.touched, st.active = true, true, true
+	return WriteResult{Version: version, Created: !live, Changed: true, T: nowMS, Expires: expires, Grown: max(0, spaceDelta)}, nil
 }

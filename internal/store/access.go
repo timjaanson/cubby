@@ -362,6 +362,7 @@ type Joined struct {
 // Redeeming again uses nothing.
 func (s *Store) Redeem(space, visitor, token string) (j Joined, err error) {
 	now := NowMs()
+	added, fresh := false, false
 	hash := names.HashSecret(token)
 	err = s.withSpace(space, func(tx *sql.Tx) error {
 		source, level := "", access.None
@@ -419,10 +420,12 @@ func (s *Store) Redeem(space, visitor, token string) (j Joined, err error) {
 				if err := countGrants(tx); err != nil {
 					return err
 				}
+				fresh = !hasGrant(tx, visitor, now)
 				if _, err := tx.Exec(`INSERT INTO grants (id, visitor, access, source, until, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 					names.NewGrantID(), visitor, level.String(), source, gUntil, now); err != nil {
 					return err
 				}
+				added = true
 			}
 		}
 		r, err := rightsTx(tx, visitor, now)
@@ -432,7 +435,9 @@ func (s *Store) Redeem(space, visitor, token string) (j Joined, err error) {
 		j = Joined{Access: r.Member, Until: gUntil}
 		return nil
 	})
-	if err == nil {
+	if err == nil && added {
+		s.noteMember(visitor, space, now, fresh)
+	} else if err == nil {
 		s.noteVisitorSpace(visitor, space)
 	}
 	return j, err
@@ -536,7 +541,9 @@ func (s *Store) SetMember(space, user, by string, level access.Level, until *int
 		return m, errNoVisitor
 	}
 	now := NowMs()
+	fresh := false
 	err = s.withSpace(space, func(tx *sql.Tx) error {
+		fresh = !hasGrant(tx, user, now)
 		if _, err := tx.Exec(`DELETE FROM grants WHERE visitor = ?`, user); err != nil {
 			return err
 		}
@@ -560,7 +567,7 @@ func (s *Store) SetMember(space, user, by string, level access.Level, until *int
 		return revokeUngivable(tx)
 	})
 	if err == nil && level != access.Banned {
-		s.noteVisitorSpace(user, space)
+		s.noteMember(user, space, now, fresh)
 	}
 	return m, err
 }

@@ -627,69 +627,14 @@ func (l *liveConn) request(m liveIn) {
 		}
 		return
 	}
-	var err error
-	method := m.Method
-	switch method {
-	case http.MethodGet, http.MethodPut, http.MethodDelete, http.MethodPost:
-	default:
-		err = badMessage("method is GET, PUT, DELETE or POST.")
-	}
-	area, _, _ := strings.Cut(m.Path, "/")
-	if err == nil && !liveArea(area) {
-		err = badMessage("path starts with shared/, by/, to/ or inbox/, as in /v1/{space}/{path}. Everything else about a space is HTTP only.")
-	}
-	if err == nil && strings.ContainsAny(m.Path, "?#") {
-		err = badMessage("path holds no query string; parameters go in query.")
-	}
-	var body []byte
-	if err == nil {
-		takesBody := method == http.MethodPut || method == http.MethodPost
-		switch {
-		case m.Body != nil && m.Text != nil:
-			err = badMessage("Give body (a JSON value) or text (stored as text), not both.")
-		case !takesBody && (m.Body != nil || m.Text != nil):
-			err = badMessage("Only PUT and POST take a body.")
-		case m.Body != nil:
-			body = m.Body
-		case m.Text != nil:
-			body = []byte(*m.Text)
-		}
-	}
-	q := url.Values{}
-	for k, raw := range m.Query {
-		if err != nil {
-			break
-		}
-		if k == "token" {
-			err = apierr.BadParam("token", "On a live connection the token comes from auth, not from query.")
-			break
-		}
-		var v string
-		switch {
-		case len(raw) > 0 && raw[0] == '"':
-			json.Unmarshal(raw, &v)
-		case len(raw) > 0 && (raw[0] == '-' || (raw[0] >= '0' && raw[0] <= '9') || raw[0] == 't' || raw[0] == 'f'):
-			v = string(raw)
-		default:
-			err = apierr.BadParam(k, "Query values are strings, numbers or booleans.")
-		}
-		q.Set(k, v)
-	}
+	r, err := messageRequest(l.ctx, l.space, m)
 	if err != nil {
 		if l.charge(m.ID) {
 			l.sendErr(m.ID, err)
 		}
 		return
 	}
-
-	target := "/v1/" + l.space + "/" + m.Path
-	r, rerr := http.NewRequestWithContext(l.ctx, method, "http://live"+target+"?"+q.Encode(), bytes.NewReader(body))
-	if rerr != nil {
-		if l.charge(m.ID) {
-			l.sendErr(m.ID, badMessage("path isn't a valid path."))
-		}
-		return
-	}
+	method := m.Method
 	rec := &recorder{h: http.Header{}}
 	l.mu.Lock()
 	visitor, tokErr := l.visitor, l.tokErr
@@ -727,6 +672,57 @@ func (l *liveConn) request(m liveIn) {
 		}
 	}
 	l.send(out)
+}
+
+// messageRequest turns a data message, on a live connection or in a batch,
+// into the HTTP request it stands for.
+func messageRequest(ctx context.Context, space string, m liveIn) (*http.Request, error) {
+	method := m.Method
+	switch method {
+	case http.MethodGet, http.MethodPut, http.MethodDelete, http.MethodPost:
+	default:
+		return nil, badMessage("method is GET, PUT, DELETE or POST.")
+	}
+	area, _, _ := strings.Cut(m.Path, "/")
+	if !liveArea(area) {
+		return nil, badMessage("path starts with shared/, by/, to/ or inbox/, or is batch, as in /v1/{space}/{path}. Everything else about a space is HTTP only.")
+	}
+	if strings.ContainsAny(m.Path, "?#") {
+		return nil, badMessage("path holds no query string; parameters go in query.")
+	}
+	var body []byte
+	takesBody := method == http.MethodPut || method == http.MethodPost
+	switch {
+	case m.Body != nil && m.Text != nil:
+		return nil, badMessage("Give body (a JSON value) or text (stored as text), not both.")
+	case !takesBody && (m.Body != nil || m.Text != nil):
+		return nil, badMessage("Only PUT and POST take a body.")
+	case m.Body != nil:
+		body = m.Body
+	case m.Text != nil:
+		body = []byte(*m.Text)
+	}
+	q := url.Values{}
+	for k, raw := range m.Query {
+		if k == "token" {
+			return nil, apierr.BadParam("token", "On a live connection the token comes from auth, not from query.")
+		}
+		var v string
+		switch {
+		case len(raw) > 0 && raw[0] == '"':
+			json.Unmarshal(raw, &v)
+		case len(raw) > 0 && (raw[0] == '-' || (raw[0] >= '0' && raw[0] <= '9') || raw[0] == 't' || raw[0] == 'f'):
+			v = string(raw)
+		default:
+			return nil, apierr.BadParam(k, "Query values are strings, numbers or booleans.")
+		}
+		q.Set(k, v)
+	}
+	r, err := http.NewRequestWithContext(ctx, method, "http://live/v1/"+space+"/"+m.Path+"?"+q.Encode(), bytes.NewReader(body))
+	if err != nil {
+		return nil, badMessage("path isn't a valid path.")
+	}
+	return r, nil
 }
 
 func (l *liveConn) startWatch(c *reqCtx, t store.Target, from int64) error {
@@ -890,5 +886,5 @@ func (l *liveConn) allowed(space string, op access.Op) bool {
 
 // liveArea: the data areas a live message may address.
 func liveArea(a string) bool {
-	return a == "shared" || a == "by" || a == "to" || a == "inbox"
+	return a == "shared" || a == "by" || a == "to" || a == "inbox" || a == "batch"
 }

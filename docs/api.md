@@ -52,6 +52,7 @@ Examples that mint tokens with jose, PyJWT and openssl are in `tools/interop/`.
 | `POST /v1/me/api-keys` | `{"space", "label", "access", "until"}` → `{"id", "key", ...}`, the key shown once |
 | `GET /v1/me/api-keys`, `DELETE /v1/me/api-keys/{id}` | list, revoke |
 | `POST /v1/spaces` | `{"label", "name", "anyone", "invite"}`, all optional → 201 `{"space", "id", "settings"}`, you are owner |
+| `GET /v1/spaces` | the spaces you belong to, [below](#your-spaces) |
 | `GET /v1/{space}/access` | `{"id", "access", "canInvite", "settings", "usage", "limits"}` |
 | `PATCH /v1/{space}` | owners: `{"anyone", "invite"}` |
 | `DELETE /v1/{space}` | owners: delete the space |
@@ -62,6 +63,7 @@ Examples that mint tokens with jose, PyJWT and openssl are in `tools/interop/`.
 | `PUT /v1/{space}/members/{id}` | owners: `{"access": "read"|"post"|"all"|"owner"|"banned", "until"}` |
 | `DELETE /v1/{space}/members/{id or me}` | owners remove; `me` leaves |
 | `GET /v1/{space}/live` | WebSocket, [below](#live-connection) |
+| `POST /v1/{space}/batch` | several writes, all or nothing, [below](#batch) |
 | `/v1/{space}/{area}/{key or pattern}[/watch|/series|/pulse]` | data, below |
 
 Anything else answers the same bare 404 `not_found`. Space names (four words or more, 16+ characters) can't collide with `me`, `spaces`, `visitors`, `pair`, `time` or `limits`.
@@ -105,6 +107,23 @@ Areas: `shared/{key}`, `by/{id|me}/{key}`, `to/{id|me|owners}/{key}` (send), `in
 - Deletes are kept 7 days. An older `version` answers 410 `version_expired`: start again from 0.
 - A pulse listener is the same with `after=seq`. The server keeps 10 seconds of pulses per space; `missed: true` means some fell out.
 
+### Batch
+
+`POST /v1/{space}/batch` with a JSON array of 1 to 100 writes, each shaped like a live message without `id`:
+
+```json
+[{"method": "PUT", "path": "shared/title", "body": "Trip"},
+ {"method": "PUT", "path": "by/me/cursor", "query": {"ttl": 60}, "text": "plain text"},
+ {"method": "DELETE", "path": "shared/draft", "query": {"ifVersion": 41}}]
+```
+→ `200 {"version": 59, "items": [{"path", "version", "created"?}, ...]}`, in request order.
+
+- All or nothing. Every write is checked exactly as if it came alone (path, access, parameters, value, quotas), and the first failure answers its usual error plus `"index"`. Nothing is written then.
+- `PUT` and `DELETE` of single keys only, each key once; anything else is 400 `bad_batch` with `index`.
+- Changed keys take consecutive versions in array order, in one transaction: a watch sees all of them or none, in one answer unless it pages (`more: true`). An identical rewrite keeps its version.
+- Counts as one write for rate limits. The body is at most twice the largest value plus 64 KB.
+- On a live connection: `{"id": 5, "method": "POST", "path": "batch", "body": [...]}`.
+
 ### Live connection
 
 `GET /v1/{space}/live` upgrades to a WebSocket that carries the same data requests. First message: `{"id": 1, "op": "auth", "token": "<jwt>"}` (or an `Authorization` header on the upgrade; never `?token=`).
@@ -123,6 +142,23 @@ Areas: `shared/{key}`, `by/{id|me}/{key}`, `to/{id|me|owners}/{key}` (send), `in
 - `auth` may come again at any time. Banned: a 403 `banned` frame, then close 4403. A signed-out device: data messages answer `unknown_key` until a new `auth`.
 - The server pings every 30 s. Close codes: 1001 restarting (reconnect), 1009 too large, 4408 no first message in 10 s.
 
+## Your spaces
+
+`GET /v1/spaces?limit=100&after=<next>` (signed in, not with an API key) lists the spaces where you hold a grant, owner included, newest membership change first:
+
+```json
+{"items": [{"space": "golf-lamp-sat-hazard-milky", "access": "owner", "via": "created",
+            "since": 1794787200000, "changed": 1794787200000, "until": null,
+            "members": 3, "lastActive": 1794790000000, "bytes": 18234, "keys": 41,
+            "settings": {"anyone": "none", "invite": "post"}}],
+ "next": null}
+```
+
+- `since`: when this membership began. `changed`: when it last changed (another invite redeemed, an owner set your level). Grants belong to the visitor, so every paired device sees the same list.
+- `via`: `created`, `invite` or `added` (by an owner). `access` and `until` are your current level and its end.
+- `limit` 1 to 100 (default 100). `next` is opaque; pass it as `after`, `null` on the last page. A membership that changes while you page can move.
+- Open spaces you wrote to without a grant aren't listed. Leaving, removal, bans, expiry and deletion take a space off at once.
+
 ## API keys
 
 - Minted with a signed request: `POST /v1/me/api-keys {"space": "...", "label": "...", "access": "post", "until": "30d"}`. `access` is `read`, `post` (default) or `all`, at most your level. `until` defaults to 30 days; `null` never expires and the answer carries a `warning`.
@@ -135,7 +171,7 @@ Areas: `shared/{key}`, `by/{id|me}/{key}`, `to/{id|me|owners}/{key}` (send), `in
 
 | Status | `error` |
 |---|---|
-| 400 | `invalid_space` (+`suggestion`), `invalid_key`, `invalid_parameter` (+`parameter`), `invalid_settings`, `invalid_encoding`, `empty_value`, `json_too_deep`, `batch_needs_object`, `bad_key`, `bad_message`, `id_in_use` |
+| 400 | `invalid_space` (+`suggestion`), `invalid_key`, `invalid_parameter` (+`parameter`), `invalid_settings`, `invalid_encoding`, `empty_value`, `json_too_deep`, `batch_needs_object`, `bad_batch` (+`index`), `bad_key`, `bad_message`, `id_in_use` |
 | 401 | `missing_token`, `unknown_key`, `token_expired`, `token_not_yet_valid`, `wrong_audience`, `token_too_long`, `bad_signature`, `bad_token`, `invalid_api_key` (+`serverTime`) |
 | 403 | `no_access` (+`need`), `owner_only`, `not_yours`, `not_member`, `exceeds_rights`, `banned` (+`until`), `api_key_not_allowed`, `api_key_space` |
 | 404 | `no_space` (missing, or private and not yours to see), `not_found`, `invite_invalid`, `no_visitor`, `bad_pairing_code` |

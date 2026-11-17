@@ -56,8 +56,12 @@
 // Never put an invite (inv_...), API key (cubby_...) or backup key in page source:
 // anyone who loads the page could use it. Invite links are for sending to people.
 //
+// Several keys at once, all or nothing: db.batch([{ set: "shared/title", value },
+// { delete: "shared/old" }]). Every space you belong to, on any of your
+// devices: spaces().
+//
 // Docs: docs/usage.md in the cubby repository. Exports: kv, createSpace,
-// openRoom, devices, takeInvite, inviteLink, newName, validSpace, KvError.
+// spaces, openRoom, devices, takeInvite, inviteLink, newName, validSpace, KvError.
 
 const SERVER = new URL(".", import.meta.url).href.replace(/\/$/, "")
 
@@ -417,7 +421,7 @@ export function kv(space, opts = {}) {
       if (qs) url += "?" + qs
       const headers = {}
       if (!read && cur?.token) headers.Authorization = "Bearer " + cur.token
-      const dataPath = /^(shared|by|to|inbox)\//.test(path)
+      const dataPath = /^(shared|by|to|inbox)\//.test(path) || path === "batch"
       // With live on, data requests go over the socket while it's open and
       // over HTTP otherwise. The answers are the same either way.
       const viaLive = live && dataPath && live.isOpen()
@@ -450,7 +454,7 @@ export function kv(space, opts = {}) {
           continue
         }
       }
-      if (dataPath && !read && (method !== "POST" || path.endsWith("/series"))) {
+      if (dataPath && !read && (method !== "POST" || path.endsWith("/series") || path === "batch")) {
         const header = res.headers.get("RateLimit")
         db.writeBudget = header ? parseBudget(header) : null
       }
@@ -1063,6 +1067,35 @@ export function kv(space, opts = {}) {
       const { limits, usage } = await db.access()
       return { limits, usage }
     },
+    // All or nothing: up to 100 writes in one request and one transaction.
+    // Each is { set: path, value, ifVersion, ttl, ifBefore } or
+    // { delete: path, ifVersion, ifBefore }, with paths as in the HTTP API:
+    // "shared/title", "by/me/cursor", "to/u_.../note". Changed keys take
+    // consecutive versions, and watchers get them together. Resolves
+    // { version, items: [{ path, version, created }] }. If one write fails,
+    // nothing is written and its error is thrown with details.index.
+    async batch(ops) {
+      if (!Array.isArray(ops) || ops.length === 0) {
+        throw new KvError(0, "bad_batch", "batch takes an array of 1 to 100 writes: { set: path, value } or { delete: path }.")
+      }
+      const body = ops.map((o, index) => {
+        const { set, delete: del, value, ifVersion, ttl, ifBefore, ...rest } = o || {}
+        const bad = msg => new KvError(0, "bad_batch", msg, { index })
+        if (Object.keys(rest).length) throw bad(`Unknown field ${Object.keys(rest)[0]}. A write has set or delete, value, ifVersion, ttl, ifBefore.`)
+        if ((set === undefined) === (del === undefined)) throw bad("A write has either set (with value) or delete.")
+        const query = {}
+        if (ifVersion !== undefined) query.ifVersion = ifVersion
+        if (ifBefore !== undefined) query.ifBefore = ifBefore
+        if (del !== undefined) {
+          if (value !== undefined || ttl !== undefined) throw bad("A delete has no value or ttl.")
+          return { method: "DELETE", path: del, query }
+        }
+        if (ttl !== undefined) query.ttl = ttl
+        if (JSON.stringify(value) === undefined) throw new KvError(0, "invalid_value", "That value can't be stored as JSON.", { index })
+        return { method: "PUT", path: set, query, body: value }
+      })
+      return call("POST", "batch", { body })
+    },
     async join(invite) {
       if (invite === null || invite === undefined || invite === "") return null
       await call("POST", "join", { body: { invite } })
@@ -1253,6 +1286,47 @@ export async function createSpace(o = {}) {
   if (!res.ok) throw await errorFrom(res)
   const out = await res.json()
   return { space: out.space }
+}
+
+// spaces: the spaces this visitor belongs to (holds an invite grant in, or
+// owns), the same on every paired device. Newest membership change first,
+// one page per call:
+//   const { items, next } = await spaces()            // up to 100
+//   if (next) more = await spaces({ after: next })
+// Each item: { space, access, via ("created", "invite", "added"), since,
+// changed, until, members, lastActive, bytes, keys, settings }. Open spaces
+// you only wrote to aren't listed. A device without a key yet gets an empty
+// list and isn't registered. Options: limit, after, and server, keyName and
+// fetch as for kv().
+export async function spaces(o = {}) {
+  const { server: srv, keyName, fetch: f, limit, after, ...rest } = o
+  for (const k of Object.keys(rest)) {
+    throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are limit, after, server, keyName, fetch.`)
+  }
+  const server = (srv || SERVER).replace(/\/$/, "")
+  const fetchFn = f || globalThis.fetch.bind(globalThis)
+  const ident = identity(server, keyName || "cubby:" + server, fetchFn)
+  const q = new URLSearchParams()
+  if (limit !== undefined) q.set("limit", String(limit))
+  if (after !== undefined && after !== null) q.set("after", after)
+  const qs = q.toString()
+  for (let attempt = 0; ; attempt++) {
+    const cur = await ident.peek()
+    if (!cur) return { items: [], next: null }
+    let res
+    try {
+      res = await fetchFn(server + "/v1/spaces" + (qs ? "?" + qs : ""), { headers: { Authorization: "Bearer " + cur.token } })
+    } catch (err) {
+      throw new KvError(0, "network_error", String(err?.message || err))
+    }
+    if (res.status === 401 && attempt === 0) {
+      const b = await res.clone().json().catch(() => ({}))
+      if (b.error === "token_expired" || b.error === "token_not_yet_valid") { await ident.learnSkew(); continue }
+      if (b.error === "unknown_key") { ident.forget(); return { items: [], next: null } }
+    }
+    if (!res.ok) throw await errorFrom(res)
+    return res.json()
+  }
 }
 
 // devices: this visitor on several devices. Not about a space, so it isn't

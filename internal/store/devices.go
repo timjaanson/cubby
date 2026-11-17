@@ -8,16 +8,23 @@ import (
 )
 
 // checkServerVersion refuses a server.db from before sign-in with keys.
-func checkServerVersion(db *sql.DB, path string) error {
+// checkServerVersion refuses a server.db from before v0.19 and reports
+// whether it needs migrating from v0.19's format.
+func checkServerVersion(db *sql.DB, path string) (migrate bool, err error) {
 	var v, tables int
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
-		return err
+		return false, err
 	}
 	db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table'`).Scan(&tables)
-	if tables > 0 && v != serverVersion {
-		return fmt.Errorf("%s is format %d, from a cubby before v0.19. v0.19 changed sign-in to device keys and starts with an empty data directory: move the old one away", path, v)
+	switch {
+	case tables == 0 || v == serverVersion:
+		return false, nil
+	case v == 2:
+		return true, nil
+	case v > serverVersion:
+		return false, fmt.Errorf("%s is format %d, from a newer cubby", path, v)
 	}
-	return nil
+	return false, fmt.Errorf("%s is format %d, from a cubby before v0.19. v0.19 changed sign-in to device keys and starts with an empty data directory: move the old one away", path, v)
 }
 
 type Device struct {
