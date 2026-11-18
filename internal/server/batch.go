@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -16,13 +17,92 @@ import (
 
 const maxBatchWrites = 100
 
-// batchIn is one write of a batch: a live data message without id.
+// batchIn is one write of a batch, named by what it does, with the same
+// option names as the single request: {"set": path, "value"}, {"delete":
+// path}, {"add": path, "value", "t"} (a series point).
 type batchIn struct {
-	Method string                     `json:"method"`
-	Path   string                     `json:"path"`
-	Query  map[string]json.RawMessage `json:"query"`
-	Body   json.RawMessage            `json:"body"`
-	Text   *string                    `json:"text"`
+	Set       *string         `json:"set"`
+	Delete    *string         `json:"delete"`
+	Add       *string         `json:"add"`
+	Check     *string         `json:"check"`
+	Value     json.RawMessage `json:"value"`
+	Text      *string         `json:"text"`
+	IfVersion json.RawMessage `json:"ifVersion"`
+	IfBefore  json.RawMessage `json:"ifBefore"`
+	TTL       json.RawMessage `json:"ttl"`
+	T         json.RawMessage `json:"t"`
+}
+
+const batchShape = `Each write is {"set": path, "value"}, {"delete": path} or {"add": path, "value"} (a series point), with ifVersion, ifBefore, ttl and t as on a single request, and "text" instead of "value" for a plain-text value. {"check": path, "ifVersion"} writes nothing and fails the batch if the key has another version.`
+
+// message turns a batch write into the request it stands for.
+func (in batchIn) message() (liveIn, error) {
+	var m liveIn
+	n := 0
+	for _, p := range []struct {
+		path   *string
+		method string
+	}{{in.Set, http.MethodPut}, {in.Delete, http.MethodDelete}, {in.Add, http.MethodPost}, {in.Check, http.MethodGet}} {
+		if p.path != nil {
+			n++
+			m.Method, m.Path = p.method, *p.path
+		}
+	}
+	if n != 1 {
+		return m, badBatch("A write has exactly one of set, delete, add or check. " + batchShape)
+	}
+	if strings.HasSuffix(m.Path, "/series") || strings.HasSuffix(m.Path, "/watch") || strings.HasSuffix(m.Path, "/pulse") {
+		return m, badBatch("A path in a batch is a key, like shared/temp, with nothing after it.")
+	}
+	if m.Path == "batch" {
+		return m, badBatch("A batch can't hold a batch.")
+	}
+	opt := func(name string, raw json.RawMessage, allowed bool) error {
+		if raw == nil {
+			return nil
+		}
+		if !allowed {
+			op := map[string]string{http.MethodPut: "A set", http.MethodDelete: "A delete", http.MethodPost: "An add", http.MethodGet: "A check"}[m.Method]
+			return badBatch(fmt.Sprintf("%s doesn't take %s.", op, name))
+		}
+		if m.Query == nil {
+			m.Query = map[string]json.RawMessage{}
+		}
+		m.Query[name] = raw
+		return nil
+	}
+	put, del, add, check := m.Method == http.MethodPut, m.Method == http.MethodDelete, m.Method == http.MethodPost, m.Method == http.MethodGet
+	if check {
+		if strings.Contains(m.Path, "*") {
+			return m, badBatch("A check names one key, not a pattern.")
+		}
+		if in.IfVersion == nil {
+			return m, badBatch("A check needs ifVersion: the version the key must still have, 0 for missing.")
+		}
+		if in.Value != nil || in.Text != nil {
+			return m, badBatch("A check has no value.")
+		}
+	}
+	for _, o := range []struct {
+		name    string
+		raw     json.RawMessage
+		allowed bool
+	}{{"ifVersion", in.IfVersion, put || del || check}, {"ifBefore", in.IfBefore, !check}, {"ttl", in.TTL, put || add}, {"t", in.T, add}} {
+		if err := opt(o.name, o.raw, o.allowed); err != nil {
+			return m, err
+		}
+	}
+	if del && (in.Value != nil || in.Text != nil) {
+		return m, badBatch("A delete has no value.")
+	}
+	if (put || add) && in.Value == nil && in.Text == nil {
+		return m, badBatch("A set or add needs a value (or text).")
+	}
+	m.Body, m.Text = in.Value, in.Text
+	if add {
+		m.Path += "/series"
+	}
+	return m, nil
 }
 
 func badBatch(msg string) *apierr.Error {
@@ -50,7 +130,7 @@ func atIndex(err error, i int) error {
 // transaction.
 func (s *Server) batch(c *reqCtx, space string) error {
 	if c.r.Method != http.MethodPost {
-		return methodErrMsg("POST", "POST a JSON array of writes: [{\"method\": \"PUT\", \"path\": \"shared/key\", \"body\": ...}, ...].")
+		return methodErrMsg("POST", `POST a JSON array of writes: [{"set": "shared/key", "value": ...}, ...].`)
 	}
 	if err := checkParams(c.r); err != nil {
 		return err
@@ -67,7 +147,7 @@ func (s *Server) batch(c *reqCtx, space string) error {
 	if int64(len(raw)) > limit {
 		return &apierr.Error{Status: 413, Code: "value_too_large", Message: "The batch is too large.", Extra: map[string]any{"limit": limit}}
 	}
-	notArray := badBatch("A batch is a JSON array of 1 to " + strconv.Itoa(maxBatchWrites) + " writes, each {\"method\": \"PUT\", \"DELETE\" or \"POST\" (to {key}/series), \"path\", \"query\", \"body\" or \"text\"}.")
+	notArray := badBatch("A batch is a JSON array of 1 to " + strconv.Itoa(maxBatchWrites) + " writes. " + batchShape)
 	if t := bytes.TrimSpace(raw); len(t) == 0 || t[0] != '[' {
 		return notArray
 	}
@@ -88,19 +168,14 @@ func (s *Server) batch(c *reqCtx, space string) error {
 		dec.DisallowUnknownFields()
 		var in batchIn
 		if err := dec.Decode(&in); err != nil {
-			return atIndex(badBatch("Each write is {\"method\", \"path\", \"query\", \"body\" or \"text\"}. "+err.Error()), i)
+			return atIndex(badBatch(batchShape+" "+err.Error()), i)
 		}
-		point := in.Method == http.MethodPost
-		if !point && in.Method != http.MethodPut && in.Method != http.MethodDelete {
-			return atIndex(badBatch("A batch holds PUT, DELETE, and POST of a series point."), i)
+		msg, err := in.message()
+		if err != nil {
+			return atIndex(err, i)
 		}
-		if point && !strings.HasSuffix(in.Path, "/series") {
-			return atIndex(badBatch("In a batch, POST only adds a series point: the path ends in /series."), i)
-		}
-		if in.Path == "batch" {
-			return atIndex(badBatch("A batch can't hold a batch."), i)
-		}
-		r, err := messageRequest(c.r.Context(), space, liveIn{Method: in.Method, Path: in.Path, Query: in.Query, Body: in.Body, Text: in.Text})
+		point := msg.Method == http.MethodPost
+		r, err := messageRequest(c.r.Context(), space, msg)
 		if err != nil {
 			return atIndex(err, i)
 		}
@@ -111,7 +186,7 @@ func (s *Server) batch(c *reqCtx, space string) error {
 			return atIndex(err, i)
 		}
 		if len(reqs) != before+1 || reqs[before].Point != point {
-			return atIndex(badBatch("A batch holds PUT and DELETE of single keys, and points added to single series."), i)
+			return atIndex(badBatch("A batch holds sets, deletes and checks of single keys, and points added to single series."), i)
 		}
 		w := reqs[before]
 		k := w.Area + "\x00" + w.Key
@@ -119,14 +194,14 @@ func (s *Server) batch(c *reqCtx, space string) error {
 			// Points may share a key when each names its own time.
 			p := reqs[j]
 			if !w.Point || !p.Point || w.T == 0 || p.T == 0 || times[k][w.T] {
-				return atIndex(badBatch("This key is already written by write "+strconv.Itoa(j)+". A batch writes each key once, except for points that each give a different t."), i)
+				return atIndex(badBatch("This key is already in write "+strconv.Itoa(j)+". A batch names each key once (a write checks itself with ifVersion), except for points that each give a different t."), i)
 			}
 		} else {
 			seen[k] = i
 			times[k] = map[int64]bool{}
 		}
 		times[k][w.T] = true
-		paths[i] = in.Path
+		paths[i] = strings.TrimSuffix(msg.Path, "/series")
 	}
 
 	if err := s.rate(s.lim.writesPerVisitor, c.visitor, 1, "rate_limited"); err != nil {

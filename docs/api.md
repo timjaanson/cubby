@@ -32,35 +32,45 @@ payload {"aud": "https://cubby.example.com", "iat": 1794787200, "exp": 179479080
 
 Examples that mint tokens with jose, PyJWT and openssl are in `tools/interop/`.
 
+## Conventions
+
+- A **time** is milliseconds since 1970. A **duration** is whole seconds, or a string `"90s"`, `"10m"`, `"12h"`, `"14d"`.
+- `ttl` is how long something lives, wherever something ends: keys, series points, invites, the access an invite gives (`accessTtl`), member levels, bans, API keys, pairing codes. `null` means no end where that's allowed. Answers say when it ends as `expires` (a time, or `null`).
+- A paged read takes `limit`, `order=asc|desc` and `after`, and answers `{"items": [...], "next"}`. Pass `next` back as `after` for the following page; `null` means there's no more. `next` is opaque. Key lists, series and your spaces work this way.
+- Order: what's sorted by time comes newest first (series, your spaces), what's sorted by name A to Z (key lists). `order` turns either around. Streams deliver in the order things happened.
+- A stream takes `after` and `timeout` (seconds) and answers at once if there's something after the cursor, else when something arrives or the timeout passes. Watches and pulse listeners work this way.
+- Record fields: `created` when something was made, `since` when a membership began, `expires` when something ends, `lastSeen` for devices and members, `lastUsed` for invites and API keys.
+- Unknown or repeated query parameters and unknown JSON fields are 400 `invalid_parameter`, so a typo never turns a conditional write into a plain one. `_` is ignored for cache busting.
+
 ## Routes
 
 | Route | Does |
 |---|---|
 | `GET /health` | `{"ok": true, "version"}` |
 | `GET /kv.js`, `/share.js` | the JS client and the share panel |
-| `GET /v1/time`, `/v1/limits` | server time; the server's limits |
+| `GET /v1/time`, `/v1/limits` | server time `{"t"}`; the server's limits, named as in its config file |
 | `POST /v1/visitors` | register a key, above |
 | `GET /v1/me` | `{"id", "device"}` |
 | `GET /v1/me/devices` | `{"id", "device", "items": [{"id", "label", "created", "lastSeen", "pairedBy", "current"}]}` |
 | `PATCH /v1/me/devices/{id or current}` | `{"label"}` |
 | `DELETE /v1/me/devices/{id or current}` | sign it out; 409 `last_device` for the last one |
 | `DELETE /v1/me/devices?others=1` | sign out every other device: `{"removed": [...]}` |
-| `POST /v1/me/pairing-codes` | optional `{"ttl": 30..3600}` (default 600) → `{"id", "code", "display", "expires", "state"}`. At most 3 open |
-| `GET /v1/me/pairing-codes/{id}?wait=55` | waits until used: `"state": "used"`, `"device"` |
+| `POST /v1/me/pairing-codes` | `{"ttl"}` (30 s to 1 h, default 10 min) → `{"id", "code", "display", "created", "expires", "state"}`. At most 3 open |
+| `GET /v1/me/pairing-codes/{id}?timeout=55` | waits until used: `"state": "used"`, `"device"` |
 | `DELETE /v1/me/pairing-codes/{id}` | cancel |
-| `POST /v1/pair` | `{"code", "label"}` or the code as the body, signed by the new key with `jwk` in the header → `{"id", "device", "previous", "deleted"}` |
-| `POST /v1/me/api-keys` | `{"space", "label", "access", "until"}` → `{"id", "key", ...}`, the key shown once |
+| `POST /v1/pair` | `{"code", "label"}`, signed by the new key with `jwk` in the header → `{"id", "device", "previous", "deleted"}` |
+| `POST /v1/me/api-keys` | `{"space", "label", "access", "ttl"}` → `{"id", "key", ...}`, the key shown once, [below](#api-keys) |
 | `GET /v1/me/api-keys`, `DELETE /v1/me/api-keys/{id}` | list, revoke |
-| `POST /v1/spaces` | `{"label", "name", "anyone", "invite"}`, all optional → 201 `{"space", "id", "settings"}`, you are owner |
-| `GET /v1/spaces` | the spaces you belong to, [below](#your-spaces) |
-| `GET /v1/{space}/access` | `{"id", "access", "canInvite", "settings", "usage", "limits"}` |
-| `PATCH /v1/{space}` | owners: `{"anyone", "invite"}` |
+| `POST /v1/spaces` | `{"prefix" or "name", "anyone", "inviters"}`, all optional → 201 `{"space", "id", "settings"}`, you are owner |
+| `GET /v1/spaces` | the spaces you belong to, a paged read, [below](#your-spaces) |
+| `GET /v1/{space}` | `{"space", "id", "access", "expires", "canInvite", "settings", "usage", "limits"}`: your level and when it ends |
+| `PATCH /v1/{space}` | owners: `{"anyone", "inviters"}` → `{"settings"}` |
 | `DELETE /v1/{space}` | owners: delete the space |
-| `POST /v1/{space}/join` | `{"invite": "inv_..."}` → `{"space", "id", "access", "until", "settings"}` |
-| `POST /v1/{space}/invites` | `{"label", "access", "uses", "until", "grantFor"}` → `{"id", "invite": "inv_...", ...}`. Defaults: all (or your level if lower), 10 uses, 7 days. `"access": "owner"`: owners only (403 otherwise), `uses` 1, `until` within 7 days, else 400 `invalid_parameter` |
-| `GET /v1/{space}/invites`, `PATCH`/`DELETE /invites/{id}` | yours, or all for owners; `PATCH {"uses", "until"}` (an owner invite keeps `uses` 0 or 1 and `until` within 7 days); delete revokes it and its grants |
-| `GET /v1/{space}/members` | `{"items": [{"id", "access", "since", ...}]}`, owners also see `until`, `invitedBy`, bans |
-| `PUT /v1/{space}/members/{id}` | owners: `{"access": "read"|"post"|"all"|"owner"|"banned", "until"}` |
+| `POST /v1/{space}/join` | `{"invite": "inv_..."}` → `{"space", "id", "access", "expires", "settings"}` |
+| `POST /v1/{space}/invites` | `{"label", "access", "uses", "ttl", "accessTtl"}` → the invite record plus `"invite": "inv_..."`, [below](#invites) |
+| `GET /v1/{space}/invites`, `PATCH`/`DELETE /invites/{id}` | yours, or all for owners; `PATCH {"uses", "ttl"}`; delete revokes it and its grants |
+| `GET /v1/{space}/members` | `{"items": [{"id", "access", "since"}]}`, highest level first; owners also see `expires`, `invitedBy`, `lastSeen`, `label` and bans |
+| `PUT /v1/{space}/members/{id}` | owners: `{"access": "read"|"post"|"all"|"owner"|"banned", "ttl"}` |
 | `DELETE /v1/{space}/members/{id or me}` | owners remove; `me` leaves |
 | `GET /v1/{space}/live` | WebSocket, [below](#live-connection) |
 | `POST /v1/{space}/batch` | several writes, all or nothing, [below](#batch) |
@@ -68,34 +78,31 @@ Examples that mint tokens with jose, PyJWT and openssl are in `tools/interop/`.
 
 Anything else answers the same bare 404 `not_found`. Space names (four words or more, 16+ characters) can't collide with `me`, `spaces`, `visitors`, `pair`, `time` or `limits`.
 
-`until` takes milliseconds, `"12h"`, `"30d"`, a date, an RFC 3339 time, or `null` for no end.
-
 ## Data
 
-Areas: `shared/{key}`, `by/{id|me}/{key}`, `to/{id|me|owners}/{key}` (send), `inbox/{sender|*}/{key}` and `inbox/owners/{sender|*}/{key}` (read and delete what was sent to you). A pattern is a key prefix ending in `*`. `by/*/{key}` reads every visitor's.
+Areas: `shared/{key}`, `by/{id|me}/{key}`, `to/{id|me|owners}/{key}` (send), `inbox/{sender|*}/{key}` and `inbox/owners/{sender|*}/{key}` (read and delete what was sent to you). A pattern is a key prefix ending in `*`. `by/*/`, `to/*/` and `inbox/*/` read across every author, recipient or sender.
 
 | Request | Answer |
 |---|---|
 | `GET .../{key}` | the value; `ETag: "version"`, `KV-By`, `KV-Time`, `KV-Expires` |
-| `PUT .../{key}` body = value | 200 or 201 `{"version"}`. Query: `ifVersion` (0 = only if missing), `ttl` (5 s to 90 d), `ifBefore` (ms) |
-| `DELETE .../{key}` | `ifVersion`, `ifBefore` |
-| `GET .../{pattern}` | `{"items": [{"key", "value", "version", "by", "t"?, "expires"?}], "version", "next"}`. Query: `limit` (≤1000), `order=desc`, `after=<next>` |
-| `GET .../{pattern}/watch?version=N` | long poll, below |
-| `POST .../{key}/series` body = value | add a point: `{"version", "t"}`. Query: `t` (ms, a late reading; the same `t` replaces that point), `ttl` (seconds after `t`), `ifBefore` |
-| `POST .../{prefix*}/series` body = object | a point in `prefix + name` for each member, up to 100, at one time |
-| `GET .../{key}/series` | `{"key", "points": [{"t", "value", "expires"?}], "version", "next"}`. Query: `since`, `until` (ms, exclusive), `order=desc`, `limit` (≤10000, default 1000) |
+| `PUT .../{key}` body = value | 200 or 201 `{"version"}`. Query: `ifVersion` (0 = only if missing), `ttl` (5 s to 90 d), `ifBefore` (a time) |
+| `DELETE .../{key}` | `{"version"}`. Query: `ifVersion`, `ifBefore` |
+| `GET .../{pattern}` | paged, in key order: `{"items": [{"key", "value", "version", "by", "t"?, "expires"?}], "version", "next"}`. `limit` ≤ 1000 (default 1000) |
+| `GET .../{pattern}/watch` | a stream, below |
+| `POST .../{key}/series` body = value | add a point: `{"version", "t"}`. Query: `t` (the reading's own time; the same `t` replaces that point), `ttl` (after `t`), `ifBefore` |
+| `GET .../{key}/series` | paged, newest first: `{"items": [{"t", "value", "expires"?}], "version", "next"}`. Query: `since` (inclusive), `before` (exclusive), `order=asc` for oldest first, `limit` ≤ 10000 (default 1000) |
+| `GET .../{prefix*}/series` | every series under the prefix (at most 100), merged by time, ties by key: items carry `"key"`. Same query |
 | `POST .../{key}/pulse` body = value | 202 `{"t"}`, not stored |
-| `GET .../{pattern}/pulse?after=SEQ` | long poll: `{"pulses": [{"key", "by", "value", "t"}], "seq", "missed"}` |
+| `GET .../{pattern}/pulse?after=SEQ` | a stream: `{"pulses": [{"key", "by", "value", "t"}], "seq", "missed"}` |
 
 - A value is UTF-8, not empty, at most 512 KB (points and pulses 4 KB). Valid JSON is stored and returned as `application/json`, anything else as `text/plain`, byte for byte. In lists and watches, text values are JSON strings.
-- Versions grow per space. Pass the `version` of a key's own entry as `ifVersion`.
+- Versions grow per space. Pass the `version` of a key's own entry as `ifVersion`, and a list's or watch's `version` as a watch's `after`.
 - A series keeps its newest `max_series_points` (1,000,000 by default). A point with `ttl` is removed at `t + ttl`; one whose `t + ttl` has already passed is refused (400, `parameter: "ttl"`). When the newest point goes, the key's value becomes the next newest under a new version; when the last goes, the key is removed and watchers see `"expired": true`.
-- Series reads are oldest first. Without `since` (and without `order=desc`) they return the newest `limit` points, oldest first, and `next` is null. With `order=desc` points come newest first. A page stops at `limit` or 4 MB of values; then `next` is the `t` to pass as `since` for the following page, or as `until` with `order=desc`.
-- Unknown or repeated query parameters and unknown JSON fields are 400 `invalid_parameter`, so a typo never turns a conditional write into a plain one. `_` is ignored for cache busting.
+- A series page stops at `limit` or 4 MB of values. Points go to several series at once through a [batch](#batch); a pattern reads them back together. More than 100 series under one prefix is 400 `too_many_series`.
 
 ### Watching
 
-`GET .../{key or pattern}/watch?version=N&timeout=25` answers with every matching key whose version is above N:
+`GET .../{key or pattern}/watch?after=N&timeout=25` answers with every matching key whose version is above N:
 
 ```json
 {"changes": [{"key": "msg.1", "value": {"text": "hey"}, "version": 58, "by": "u_..."},
@@ -103,26 +110,29 @@ Areas: `shared/{key}`, `by/{id|me}/{key}`, `to/{id|me|owners}/{key}` (send), `in
  "version": 59, "more": false}
 ```
 
-- `version=0` is a snapshot of what exists now. No `version` means changes from now on.
+- `after=0`, the default, is everything that exists now, then changes. `after=now` is only what changes from here on.
 - It answers at once if something changed after N, else waits up to `timeout` (1 to 55 s) and answers with no changes.
-- Send the answer's `version` next time and nothing is lost. Several writes to one key between requests come back as its latest state. `more: true` means ask again at once.
-- Deletes are kept 7 days. An older `version` answers 410 `version_expired`: start again from 0.
-- A pulse listener is the same with `after=seq`. The server keeps 10 seconds of pulses per space; `missed: true` means some fell out.
+- Send the answer's `version` as `after` next time and nothing is lost. Several writes to one key between requests come back as its latest state. `more: true` means ask again at once.
+- Deletes are kept 7 days. An older `after` answers 410 `version_expired`: start again from 0.
+- A pulse listener is the same with `after=seq`, from now by default. The server keeps 10 seconds of pulses per space; `missed: true` means some fell out.
 
 ### Batch
 
-`POST /v1/{space}/batch` with a JSON array of 1 to 100 writes, each shaped like a live message without `id`:
+`POST /v1/{space}/batch` with a JSON array of 1 to 100 writes. Each names what it does and its path, with the same options as the single request:
 
 ```json
-[{"method": "PUT", "path": "shared/title", "body": "Trip"},
- {"method": "PUT", "path": "by/me/cursor", "query": {"ttl": 60}, "text": "plain text"},
- {"method": "DELETE", "path": "shared/draft", "query": {"ifVersion": 41}},
- {"method": "POST", "path": "shared/temp/series", "query": {"t": 1794927600000, "ttl": 1209600}, "body": 21.4}]
+[{"check": "shared/state", "ifVersion": 40},
+ {"set": "shared/title", "value": "Trip"},
+ {"set": "by/me/cursor", "text": "plain text", "ttl": 60},
+ {"delete": "shared/draft", "ifVersion": 41},
+ {"add": "shared/temp", "value": 21.4, "t": 1794927600000, "ttl": "14d"}]
 ```
 → `200 {"version": 59, "items": [{"path", "version", "created"?, "t"?}, ...]}`, in request order; `t` for points.
 
+- `set` takes `value` (or `text` for a plain-text value), `ifVersion`, `ttl`, `ifBefore`. `delete` takes `ifVersion`, `ifBefore`. `add` takes `value` (or `text`), `t`, `ttl`, `ifBefore`.
+- `check` takes `ifVersion` only and writes nothing: the batch fails with `version_conflict` unless the key still has that version (`0`: doesn't exist). It needs read access, sees the batch's earlier writes, and answers the key's version in `items`. Use it for a key the batch depends on but doesn't write; a written key checks itself with `ifVersion`.
 - All or nothing. Every write is checked exactly as if it came alone (path, access, parameters, value, quotas), and the first failure answers its usual error plus `"index"`. Nothing is written then.
-- `PUT` and `DELETE` of single keys, and `POST {key}/series` points (not `{prefix*}/series`). Each key once, except points to one series that each give a different `t`. Points without `t` share one server time. Anything else is 400 `bad_batch` with `index`.
+- Each key once (checks included), except points to one series that each give a different `t`. Points without `t` share one server time. Anything else is 400 `bad_batch` with `index`.
 - Changed keys take consecutive versions in array order, in one transaction: a watch sees all of them or none, in one answer unless it pages (`more: true`). An identical rewrite keeps its version.
 - Counts as one write for rate limits. The body is at most twice the largest value plus 64 KB.
 - On a live connection: `{"id": 5, "method": "POST", "path": "batch", "body": [...]}`.
@@ -134,7 +144,7 @@ Areas: `shared/{key}`, `by/{id|me}/{key}`, `to/{id|me|owners}/{key}` (send), `in
 ```
 → {"id":2,"method":"PUT","path":"shared/note","query":{"ifVersion":17},"body":{"text":"hi"}}
 ← {"id":2,"status":200,"headers":{"ETag":"\"18\""},"body":{"version":18}}
-→ {"id":3,"method":"GET","path":"shared/board.*/watch","query":{"version":0}}
+→ {"id":3,"method":"GET","path":"shared/board.*/watch","query":{"after":0}}
 ← {"id":3,"status":200,"body":{"changes":[...],"version":40,"more":false}}     then a push per change
 → {"op":"stop","watch":3}
 → {"id":4,"op":"will","path":"by/me/here/pulse","body":{"left":true}}   sent by the server when the connection ends
@@ -145,28 +155,36 @@ Areas: `shared/{key}`, `by/{id|me}/{key}`, `to/{id|me|owners}/{key}` (send), `in
 - `auth` may come again at any time. Banned: a 403 `banned` frame, then close 4403. A signed-out device: data messages answer `unknown_key` until a new `auth`.
 - The server pings every 30 s. Close codes: 1001 restarting (reconnect), 1009 too large, 4408 no first message in 10 s.
 
+## Invites
+
+- Minted by owners, and by members at the space's `inviters` level (`post` unless changed). Members see and change only their own.
+- `access` defaults to `all`, or your own level if lower. Nobody gives more than they have. `uses` defaults to no limit, `ttl` to 7 days. `accessTtl` makes the access it gives end that long after it's redeemed.
+- `"access": "owner"`: owners only, `uses` 1, `ttl` at most 7 days, else 400 `invalid_parameter`. A `PATCH` keeps it within those bounds.
+- The record: `{"id", "label", "access", "uses" (left), "expires", "accessTtl", "state" (active, expired, used_up, revoked), "members", "created", "lastUsed", "by"}`.
+- An invite travels in a link as `#space=NAME&invite=inv_...`; kv.js and the CLI make and read that form.
+
 ## Your spaces
 
-`GET /v1/spaces?limit=100&after=<next>` (signed in, not with an API key) lists the spaces where you hold a grant, owner included, newest membership change first:
+`GET /v1/spaces?limit=100&after=<next>` (signed in, not with an API key) lists the spaces where you hold a grant, owner included, most recently active first:
 
 ```json
 {"items": [{"space": "golf-lamp-sat-hazard-milky", "access": "owner", "via": "created",
-            "since": 1794787200000, "changed": 1794787200000, "until": null,
-            "members": 3, "lastActive": 1794790000000, "bytes": 18234, "keys": 41,
-            "settings": {"anyone": "none", "invite": "post"}}],
+            "since": 1794787200000, "expires": null, "members": 3,
+            "lastActive": 1794790000000, "bytes": 18234, "keys": 41,
+            "settings": {"anyone": "none", "inviters": "post"}}],
  "next": null}
 ```
 
-- `since`: when this membership began. `changed`: when it last changed (another invite redeemed, an owner set your level). Grants belong to the visitor, so every paired device sees the same list.
-- `via`: `created`, `invite` or `added` (by an owner). `access` and `until` are your current level and its end.
-- `limit` 1 to 100 (default 100). `next` is opaque; pass it as `after`, `null` on the last page. A membership that changes while you page can move.
+- `since`: when this membership began. Grants belong to the visitor, so every paired device sees the same list.
+- `via`: `created`, `invite` or `added` (by an owner). `access` and `expires` are your current level and its end.
+- `limit` 1 to 1000 (default 100). A space that becomes active while you page can move.
 - Open spaces you wrote to without a grant aren't listed. Leaving, removal, bans, expiry and deletion take a space off at once.
 
 ## API keys
 
-- Minted with a signed request: `POST /v1/me/api-keys {"space": "...", "label": "...", "access": "post", "until": "30d"}`. `access` is `read`, `post` (default) or `all`, at most your level. `until` defaults to 30 days; `null` never expires and the answer carries a `warning`.
+- Minted with a signed request: `POST /v1/me/api-keys {"space": "...", "label": "...", "access": "post", "ttl": "30d"}`. `access` is `read`, `post` or `all`, at most your level, and defaults as an invite's does. `ttl` defaults to 30 days; `null` never expires and the answer carries a `warning`.
 - The server keeps only a hash. The key belongs to the device that made it: signing that device out ends it.
-- It reads and writes in its space only. Anything else, including another space, answers 403 `api_key_not_allowed` or `api_key_space`.
+- It reads and writes in its space, and reads `GET /v1/{space}`. Anything else, including another space, answers 403 `api_key_not_allowed` or `api_key_space`.
 
 ## Errors
 
@@ -174,9 +192,9 @@ Areas: `shared/{key}`, `by/{id|me}/{key}`, `to/{id|me|owners}/{key}` (send), `in
 
 | Status | `error` |
 |---|---|
-| 400 | `invalid_space` (+`suggestion`), `invalid_key`, `invalid_parameter` (+`parameter`), `invalid_settings`, `invalid_encoding`, `empty_value`, `json_too_deep`, `batch_needs_object`, `bad_batch` (+`index`), `bad_key`, `bad_message`, `id_in_use` |
+| 400 | `invalid_space` (+`suggestion`), `invalid_key`, `too_many_series` (+`limit`), `invalid_parameter` (+`parameter`), `invalid_settings`, `invalid_encoding`, `empty_value`, `json_too_deep`, `bad_batch` (+`index`), `bad_key`, `bad_message`, `id_in_use` |
 | 401 | `missing_token`, `unknown_key`, `token_expired`, `token_not_yet_valid`, `wrong_audience`, `token_too_long`, `bad_signature`, `bad_token`, `invalid_api_key` (+`serverTime`) |
-| 403 | `no_access` (+`need`), `owner_only`, `not_yours`, `not_member`, `exceeds_rights`, `banned` (+`until`), `api_key_not_allowed`, `api_key_space` |
+| 403 | `no_access` (+`need`), `owner_only`, `not_yours`, `not_member`, `exceeds_rights`, `banned` (+`expires`), `api_key_not_allowed`, `api_key_space` |
 | 404 | `no_space` (missing, or private and not yours to see), `not_found`, `invite_invalid`, `no_visitor`, `bad_pairing_code` |
 | 405 | `method_not_allowed` (+`allow`) |
 | 409 | `space_exists`, `is_series`, `not_series`, `last_device`, `same_visitor`, `too_many_pairing_codes`, `identity_changed` |
@@ -186,4 +204,4 @@ Areas: `shared/{key}`, `by/{id|me}/{key}`, `to/{id|me|owners}/{key}` (send), `in
 | 429 | `rate_limited`, `stored_limit`, `space_limit`, `too_many_watches`, `too_many_wills` (+`retryAfter`, `Retry-After`) |
 | 507 | `visitor_quota_exceeded`, `space_quota_exceeded`, `server_full` |
 
-Data writes carry `RateLimit` and `RateLimit-Policy` headers with what's left. `GET /v1/limits` and `/access` report the actual limits, which the operator can change.
+Data writes carry `RateLimit` and `RateLimit-Policy` headers with what's left. `GET /v1/limits` and `GET /v1/{space}` report the actual limits, which the operator can change.

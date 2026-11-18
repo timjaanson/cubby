@@ -37,7 +37,7 @@ func TestCLISpacesAndBatch(t *testing.T) {
 	}
 
 	f := filepath.Join(t.TempDir(), "w.json")
-	os.WriteFile(f, []byte(`[{"method":"PUT","path":"shared/title","body":"Trip"},{"method":"PUT","path":"by/me/n","text":"x"}]`), 0o600)
+	os.WriteFile(f, []byte(`[{"set":"shared/title","value":"Trip"},{"set":"by/me/n","text":"x"}]`), 0o600)
 	out, code = cli(t, home, "batch", space, f)
 	if code != 0 || !strings.HasPrefix(out, "shared/title\t") || !strings.Contains(out, "\nby/me/n\t") {
 		t.Fatalf("batch: %d %q", code, out)
@@ -45,7 +45,7 @@ func TestCLISpacesAndBatch(t *testing.T) {
 	if out, _ := cli(t, home, "get", space+"/shared/title"); out != `"Trip"` {
 		t.Fatalf("get after batch: %q", out)
 	}
-	os.WriteFile(f, []byte(`[{"method":"PUT","path":"shared/a","body":1},{"method":"DELETE","path":"shared/missing"}]`), 0o600)
+	os.WriteFile(f, []byte(`[{"set":"shared/a","value":1},{"delete":"shared/missing"}]`), 0o600)
 	if _, code := cli(t, home, "batch", space, f); code == 0 {
 		t.Fatal("failing batch exited 0")
 	}

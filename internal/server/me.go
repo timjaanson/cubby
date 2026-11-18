@@ -1,9 +1,7 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -190,7 +188,7 @@ func (s *Server) meRoute(c *reqCtx, rest []string) error {
 		}
 		switch m {
 		case http.MethodGet, http.MethodHead:
-			if err := checkParams(c.r, "wait"); err != nil {
+			if err := checkParams(c.r, "timeout"); err != nil {
 				return err
 			}
 			return s.pairingStatus(c, rest[1])
@@ -253,16 +251,17 @@ func pairingJSON(l *store.Pairing) map[string]any {
 
 func (s *Server) createPairing(c *reqCtx) error {
 	var in struct {
-		TTL *int64 `json:"ttl"`
+		TTL json.RawMessage `json:"ttl"`
 	}
 	if err := decodeBody(c, &in); err != nil {
 		return err
 	}
 	ttl := int64(store.PairingTTLDefault)
 	if in.TTL != nil {
-		ttl = *in.TTL * 1000
-		if ttl < store.PairingTTLMin || ttl > store.PairingTTLMax {
-			return apierr.BadParam("ttl", "ttl is 30 to 3600 seconds. The default is 600.")
+		d, err := access.TTL(in.TTL)
+		ttl = d.Milliseconds()
+		if err != nil || ttl < store.PairingTTLMin || ttl > store.PairingTTLMax {
+			return apierr.BadParam("ttl", `ttl is 30 seconds to 1 hour ("30s" to "1h"). The default is 10 minutes.`)
 		}
 	}
 	if err := s.rate(s.lim.linksPerVisitor, c.visitor, 1, "rate_limited"); err != nil {
@@ -283,10 +282,10 @@ func (s *Server) pairingStatus(c *reqCtx, pairingID string) error {
 		return err
 	}
 	var wait time.Duration
-	if c.r.URL.Query().Has("wait") {
-		n, ok := parseUint(c.r.URL.Query().Get("wait"))
+	if c.r.URL.Query().Has("timeout") {
+		n, ok := parseUint(c.r.URL.Query().Get("timeout"))
 		if !ok || n > int64(maxPairingWait/time.Second) {
-			return apierr.BadParam("wait", "wait is 0 to 60 seconds.")
+			return apierr.BadParam("timeout", "timeout is 0 to 60 seconds.")
 		}
 		wait = time.Duration(n) * time.Second
 	}
@@ -334,29 +333,19 @@ func (s *Server) cancelPairing(c *reqCtx, pairingID string) error {
 }
 
 // pair is POST /v1/pair: the device whose key signed the request becomes a
-// device of the visitor that made the code. The code is a JSON object or the
-// whole body, so curl -d CODE works. A new key comes in the token's jwk
-// header; a key that already is a device leaves its old visitor.
+// device of the visitor that made the code, sent as {"code", "label"}. A
+// new key comes in the token's jwk header; a key that already is a device
+// leaves its old visitor.
 func (s *Server) pair(c *reqCtx) error {
 	if c.apiKey != nil {
 		return apierr.APIKeyNotAllowed
-	}
-	body, err := io.ReadAll(io.LimitReader(c.r.Body, maxJSONBody+1))
-	if err != nil || len(body) > maxJSONBody {
-		return apierr.BadParam("body", "The body is the pairing code, or {\"code\": \"...\", \"label\": \"...\"}.")
 	}
 	var in struct {
 		Code  string `json:"code"`
 		Label string `json:"label"`
 	}
-	if t := bytes.TrimSpace(body); len(t) > 0 && t[0] == '{' {
-		dec := json.NewDecoder(bytes.NewReader(t))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&in); err != nil {
-			return apierr.BadParam("body", "The body is the pairing code, or {\"code\": \"...\", \"label\": \"...\"}.")
-		}
-	} else {
-		in.Code = string(t)
+	if err := decodeBody(c, &in); err != nil {
+		return err
 	}
 	label, err := deviceLabel(in.Label)
 	if err != nil {
@@ -392,7 +381,7 @@ func (s *Server) pair(c *reqCtx) error {
 	code := names.NormalizePairingCode(in.Code)
 	if code == "" {
 		if strings.TrimSpace(in.Code) == "" {
-			return apierr.BadParam("code", "Send the pairing code as the body, or as {\"code\": \"...\"}.")
+			return apierr.BadParam("code", "Send the pairing code as {\"code\": \"...\"}.")
 		}
 		return miss()
 	}
@@ -436,14 +425,15 @@ func (s *Server) signOutOthers(c *reqCtx) error {
 }
 
 // createAPIKey mints a static credential for one space. Its level defaults
-// to post and is capped by the minter's; it can't be owner. It lasts 30
-// days unless asked otherwise; no end at all takes an explicit null.
+// to all, or the minter's own if lower, as an invite's does; it can't be
+// owner. It lasts 30 days unless asked otherwise; no end at all takes an
+// explicit null.
 func (s *Server) createAPIKey(c *reqCtx) error {
 	var in struct {
 		Space  string          `json:"space"`
 		Label  string          `json:"label"`
 		Access json.RawMessage `json:"access"`
-		Until  json.RawMessage `json:"until"`
+		TTL    json.RawMessage `json:"ttl"`
 	}
 	if err := decodeBody(c, &in); err != nil {
 		return err
@@ -458,28 +448,26 @@ func (s *Server) createAPIKey(c *reqCtx) error {
 	if err != nil {
 		return err
 	}
-	level := access.Post
-	if in.Access != nil {
-		if level, err = access.ParseIn(in.Access, "access", access.Read, access.Post, access.All); err != nil {
-			return apierr.BadParam("access", err.Error()+" An API key can't be owner.")
-		}
+	ttl, set, err := ttlField(in.TTL, "ttl")
+	if err != nil {
+		return err
 	}
-	now := time.Now()
-	until := now.Add(apiKeyDefault).UnixMilli()
-	untilPtr := &until
-	if in.Until != nil {
-		if isNull(in.Until) {
-			untilPtr = nil
-		} else if until, err = access.ParseTime(in.Until, now); err != nil {
-			return apierr.BadParam("until", err.Error())
-		}
+	if !set {
+		ttl = apiKeyDefault
 	}
+	untilPtr := expiresIn(ttl)
 	rights, err := s.store.Rights(in.Space, c.visitor)
 	if err != nil {
 		return err
 	}
 	if rights == nil || !rights.Visible() {
 		return apierr.NoSpace
+	}
+	level := min(access.All, rights.Level())
+	if in.Access != nil {
+		if level, err = access.ParseIn(in.Access, "access", access.Read, access.Post, access.All); err != nil {
+			return apierr.BadParam("access", err.Error()+" An API key can't be owner.")
+		}
 	}
 	if rights.Level() < level {
 		return &apierr.Error{Status: 403, Code: "exceeds_rights", Message: "An API key can't do more than you can: your level in this space is " + rights.Level().String() + "."}
@@ -488,7 +476,7 @@ func (s *Server) createAPIKey(c *reqCtx) error {
 	if err != nil {
 		return err
 	}
-	out := map[string]any{"id": k.ID, "key": secret, "label": k.Label, "space": k.Space, "access": k.Access, "until": k.Until, "device": k.Device, "created": k.Created}
+	out := map[string]any{"id": k.ID, "key": secret, "label": k.Label, "space": k.Space, "access": k.Access, "expires": k.Until, "device": k.Device, "created": k.Created}
 	if untilPtr == nil {
 		out["warning"] = "This API key never expires. Anyone who sees it can use it until you delete it. A key with an end, or a token signed by a device, is safer."
 	}

@@ -280,7 +280,7 @@ func TestMissLimitHTTP(t *testing.T) {
 	ip := as("203.0.113.7")
 	ownerTok, owner := c.anon()
 	for _, n := range []string{"inuse-space-xxxxxxxx", "never-touched-xxxxxx"} {
-		if _, err := c.store.CreateSpace(n, "", access.Settings{Anyone: access.Read, Invite: access.Post}, owner); err != nil {
+		if _, err := c.store.CreateSpace(n, "", access.Settings{Anyone: access.Read, Inviters: access.Post}, owner); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -350,7 +350,7 @@ func TestMissLimitHTTP(t *testing.T) {
 	}
 	// A space created while blocked is usable by its creator right away.
 	tokB, _ := c.anon()
-	_, _, b = c.req("POST", "/v1/spaces", `{"label":"late"}`, "Authorization", "Bearer "+tokB, "X-Forwarded-For", "203.0.113.7")
+	_, _, b = c.req("POST", "/v1/spaces", `{"prefix":"late"}`, "Authorization", "Bearer "+tokB, "X-Forwarded-For", "203.0.113.7")
 	var created struct{ Space string }
 	json.Unmarshal([]byte(b), &created)
 	if created.Space == "" {
@@ -363,7 +363,7 @@ func TestMissLimitHTTP(t *testing.T) {
 	tok, _ := c.anon()
 	auth := []string{"Authorization", "Bearer " + tok, "X-Forwarded-For", "198.51.100.1"}
 	for i := range 3 {
-		if s, _, b := c.req("POST", "/v1/spaces", `{"label":"room"}`, auth...); s != 201 {
+		if s, _, b := c.req("POST", "/v1/spaces", `{"prefix":"room"}`, auth...); s != 201 {
 			t.Fatalf("create %d: %d %s", i, s, b)
 		}
 	}

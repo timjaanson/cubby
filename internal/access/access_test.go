@@ -34,11 +34,11 @@ func TestLevelNames(t *testing.T) {
 
 func TestSettings(t *testing.T) {
 	s, err := ApplyInput(Default, raw(`"post"`), nil)
-	if err != nil || s.Anyone != Post || s.Invite != Post {
+	if err != nil || s.Anyone != Post || s.Inviters != Post {
 		t.Fatalf("%+v %v", s, err)
 	}
 	s, err = ApplyInput(s, nil, raw(`"owner"`))
-	if err != nil || s.Anyone != Post || s.Invite != Owner {
+	if err != nil || s.Anyone != Post || s.Inviters != Owner {
 		t.Fatalf("%+v %v", s, err)
 	}
 	for _, bad := range [][2]string{{`"owner"`, ""}, {`"banned"`, ""}, {`"respond"`, ""}, {"", `"none"`}, {"", `"banned"`}} {
@@ -53,7 +53,7 @@ func TestSettings(t *testing.T) {
 		t.Fatal("unreadable settings must be the private default")
 	}
 	b, _ := json.Marshal(s)
-	if string(b) != `{"anyone":"post","invite":"owner"}` {
+	if string(b) != `{"anyone":"post","inviters":"owner"}` {
 		t.Fatal(string(b))
 	}
 	var back Settings
@@ -79,19 +79,19 @@ func TestRights(t *testing.T) {
 		t.Fatalf("open space %+v", r)
 	}
 	// A member's own level counts when it's higher.
-	r = &Rights{Settings: Settings{Anyone: Read, Invite: Post}, Member: Post}
+	r = &Rights{Settings: Settings{Anyone: Read, Inviters: Post}, Member: Post}
 	if r.Level() != Post || !r.Allows(Op{Area: "by", Write: true}) || r.Allows(Op{Area: "shared", Write: true}) || !r.CanInvite() {
 		t.Fatalf("post member %+v", r)
 	}
 	if !r.CanGive(Read) || !r.CanGive(Post) || r.CanGive(All) {
 		t.Fatal("a member gives at most their own level")
 	}
-	r.Settings.Invite = All
+	r.Settings.Inviters = All
 	if r.CanInvite() {
 		t.Fatal("below the invite level")
 	}
 	// A ban beats everything.
-	r = &Rights{Settings: Settings{Anyone: All, Invite: Read}, Member: All, Banned: true}
+	r = &Rights{Settings: Settings{Anyone: All, Inviters: Read}, Member: All, Banned: true}
 	if r.Level() != Banned || r.Visible() || r.CanInvite() {
 		t.Fatalf("banned %+v", r)
 	}
@@ -101,21 +101,24 @@ func TestRights(t *testing.T) {
 	}
 }
 
-func TestParseTime(t *testing.T) {
-	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.Local)
-	if ms, err := ParseTime(raw(`"7d"`), now); err != nil || ms != now.Add(7*24*time.Hour).UnixMilli() {
-		t.Fatal("duration", err)
+func TestParseDuration(t *testing.T) {
+	for in, want := range map[string]time.Duration{"3600": time.Hour, "90s": 90 * time.Second, "10m": 10 * time.Minute, "12h": 12 * time.Hour, "14d": 14 * 24 * time.Hour} {
+		if d, err := ParseDuration(in); err != nil || d != want {
+			t.Errorf("%q: %v %v", in, d, err)
+		}
 	}
-	if ms, err := ParseTime(raw(`"2026-10-23"`), now); err != nil || time.UnixMilli(ms).Day() != 23 || time.UnixMilli(ms).Hour() != 23 {
-		t.Fatal("date", err)
+	for _, in := range []string{"", "0", "-5", "1h30m", "1.5h", "7 d", "soon", "d"} {
+		if _, err := ParseDuration(in); err == nil {
+			t.Errorf("%q parsed", in)
+		}
 	}
-	if _, err := ParseTime(raw(`"2026-10-23T18:00"`), now); err != nil {
-		t.Fatal("local time", err)
+	if d, err := TTL(json.RawMessage(`60`)); err != nil || d != time.Minute {
+		t.Fatal(d, err)
 	}
-	if _, err := ParseTime(raw(`"2020-01-01"`), now); err == nil {
-		t.Fatal("past accepted")
+	if d, err := TTL(json.RawMessage(`"2h"`)); err != nil || d != 2*time.Hour {
+		t.Fatal(d, err)
 	}
-	if _, err := ParseTime(raw(`"soon"`), now); err == nil {
-		t.Fatal("garbage accepted")
+	if _, err := TTL(json.RawMessage(`"2026-01-01"`)); err == nil {
+		t.Fatal("a date is not a duration")
 	}
 }

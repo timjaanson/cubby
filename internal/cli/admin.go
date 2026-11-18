@@ -114,7 +114,7 @@ func cmdAdmin(args []string) int {
 				if r.Pinned {
 					name += " (pinned)"
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n", name, r.Settings.Anyone, r.Settings.Invite, humanBytes(r.Bytes), r.Keys, time.Unix(r.LastActive, 0).Format("2006-01-02 15:04"))
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n", name, r.Settings.Anyone, r.Settings.Inviters, humanBytes(r.Bytes), r.Keys, time.Unix(r.LastActive, 0).Format("2006-01-02 15:04"))
 			}
 			return tw.Flush()
 		case "stats":

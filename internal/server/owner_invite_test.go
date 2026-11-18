@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,14 +12,13 @@ func TestOwnerInvite(t *testing.T) {
 	own := c.create(``, "")
 	sp := "/v1/" + own.Space
 	o := bearer(own.Token)
-	ms := func(d time.Duration) string { return strconv.FormatInt(time.Now().Add(d).UnixMilli(), 10) }
 
 	// Defaults: one use, 7 days.
 	s, _, b := c.req("POST", sp+"/invites", `{"access":"owner","label":"laptop"}`, o...)
 	var inv struct {
 		ID, Invite, Access string
 		Uses               *int64
-		Until              *int64
+		Until              *int64 `json:"expires"`
 	}
 	json.Unmarshal([]byte(b), &inv)
 	week := time.Now().Add(7 * 24 * time.Hour).UnixMilli()
@@ -30,27 +28,27 @@ func TestOwnerInvite(t *testing.T) {
 	// uses is 1, until within 7 days and never open-ended.
 	for _, body := range []string{
 		`{"access":"owner","uses":2}`, `{"access":"owner","uses":null}`, `{"access":"owner","uses":0}`,
-		`{"access":"owner","until":null}`, `{"access":"owner","until":"8d"}`, `{"access":"owner","until":` + ms(8*24*time.Hour) + `}`,
+		`{"access":"owner","ttl":null}`, `{"access":"owner","ttl":"8d"}`, `{"access":"owner","ttl":` + itoa(8*24*3600) + `}`,
 	} {
 		if s, _, b := c.req("POST", sp+"/invites", body, o...); s != 400 || errCode(b) != "invalid_parameter" {
 			t.Errorf("%s: %d %s", body, s, b)
 		}
 	}
-	if s, _, b := c.req("POST", sp+"/invites", `{"access":"owner","uses":1,"until":"2d"}`, o...); s != 201 {
+	if s, _, b := c.req("POST", sp+"/invites", `{"access":"owner","uses":1,"ttl":"2d"}`, o...); s != 201 {
 		t.Fatalf("explicit: %d %s", s, b)
 	}
 	// PATCH keeps the same rules; uses 0 stops it.
-	for _, body := range []string{`{"uses":2}`, `{"uses":null}`, `{"until":null}`, `{"until":"30d"}`} {
+	for _, body := range []string{`{"uses":2}`, `{"uses":null}`, `{"ttl":null}`, `{"ttl":"30d"}`} {
 		if s, _, b := c.req("PATCH", sp+"/invites/"+inv.ID, body, o...); s != 400 || errCode(b) != "invalid_parameter" {
 			t.Errorf("patch %s: %d %s", body, s, b)
 		}
 	}
-	if s, _, b := c.req("PATCH", sp+"/invites/"+inv.ID, `{"until":"3d"}`, o...); s != 200 {
+	if s, _, b := c.req("PATCH", sp+"/invites/"+inv.ID, `{"ttl":"3d"}`, o...); s != 200 {
 		t.Fatalf("patch until: %d %s", s, b)
 	}
 	// Other invites keep their old rules.
 	plainID, _ := c.mint(own.Space, own.Token, `{"access":"read"}`)
-	if s, _, b := c.req("PATCH", sp+"/invites/"+plainID, `{"uses":null,"until":"30d"}`, o...); s != 200 {
+	if s, _, b := c.req("PATCH", sp+"/invites/"+plainID, `{"uses":null,"ttl":"30d"}`, o...); s != 200 {
 		t.Fatalf("patch plain: %d %s", s, b)
 	}
 

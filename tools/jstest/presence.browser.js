@@ -6,8 +6,8 @@ async page => {
   // Pages on the server's own origin, so Chrome allows sockets to localhost.
   await page.goto(base + '/health')
   const space = await page.evaluate(async base => {
-    const { createSpace, kv } = await import(base + '/kv.js')
-    const { space } = await createSpace({ server: base, anyone: 'all' })
+    const { visitor, kv } = await import(base + '/kv.js')
+    const { space } = await visitor({ server: base }).createSpace({ anyone: 'all' })
     const db = kv(space, { server: base, live: true })
     window.here = db.presence('here', { value: { name: 'first tab' } })
     window.left = []
@@ -17,10 +17,11 @@ async page => {
   const tab = await page.context().newPage()
   await tab.goto(base + '/health')
   const other = await tab.evaluate(async ([base, space]) => {
-    const { kv } = await import(base + '/kv.js')
-    const db = kv(space, { server: base, live: true, keyName: 'second-tab-' + Date.now() })
+    const { kv, visitor } = await import(base + '/kv.js')
+    const keyName = 'second-tab-' + Date.now()
+    const db = kv(space, { server: base, live: true, keyName })
     window.here = db.presence('here', { value: { name: 'second tab' } })
-    return db.id()
+    return visitor({ server: base, keyName }).id()
   }, [base, space])
   await page.waitForFunction(id => window.here.peers.get(id)?.value.name === 'second tab', other)
   const closedAt = await page.evaluate(() => performance.now())

@@ -6,19 +6,28 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"strconv"
 )
 
-// spaces prints every space this visitor belongs to, newest membership
-// change first, following the pages.
+// spaces prints every space this visitor belongs to, most recently active
+// first, following the pages up to --limit.
 func (c *client) spaces(f *flags) error {
 	if len(f.args) != 0 {
 		return usageCli("spaces takes no arguments")
 	}
-	after := ""
+	limit, err := limitFlag(f)
+	if err != nil {
+		return err
+	}
+	q := url.Values{}
+	printed := 0
 	for {
+		if limit > 0 {
+			q.Set("limit", strconv.Itoa(min(1000, limit-printed)))
+		}
 		path := "/v1/spaces"
-		if after != "" {
-			path += "?after=" + url.QueryEscape(after)
+		if len(q) > 0 {
+			path += "?" + q.Encode()
 		}
 		var out struct {
 			Items []json.RawMessage
@@ -28,22 +37,23 @@ func (c *client) spaces(f *flags) error {
 			return err
 		}
 		for _, raw := range out.Items {
+			printed++
 			if f.bool("json") {
 				fmt.Println(string(raw))
 				continue
 			}
 			var it struct {
 				Space, Access string
-				Changed       int64
+				LastActive    int64
 				Members       int
 			}
 			json.Unmarshal(raw, &it)
-			fmt.Printf("%s\t%s\t%s\t%d\n", it.Space, it.Access, fmtTime(&it.Changed), it.Members)
+			fmt.Printf("%s\t%s\t%s\t%d\n", it.Space, it.Access, fmtTime(&it.LastActive), it.Members)
 		}
-		if out.Next == nil {
+		if out.Next == nil || limit > 0 && printed >= limit {
 			return nil
 		}
-		after = *out.Next
+		q.Set("after", *out.Next)
 	}
 }
 

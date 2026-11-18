@@ -19,12 +19,12 @@ func (c *client) watch(f *flags) error {
 	if f.bool("raw") && (p.isPattern() || p.area == "by/*") {
 		return usageCli("--raw is for watching one key")
 	}
-	fromNow := f.str("from") == "now"
+	fromNow := f.str("after") == "now"
 	var from int64
 	haveFrom := !fromNow
-	if f.has("from") && !fromNow {
-		if from, err = strconv.ParseInt(f.str("from"), 10, 64); err != nil || from < 0 {
-			return usageCli("--from takes a version or now")
+	if f.has("after") && !fromNow {
+		if from, err = strconv.ParseInt(f.str("after"), 10, 64); err != nil || from < 0 {
+			return usageCli("--after takes a version, 0 for everything that exists, or now")
 		}
 	}
 	state := f.str("state")
@@ -43,9 +43,9 @@ func (c *client) watch(f *flags) error {
 	needToken := p.needsToken()
 
 	for {
-		u := p.url() + "/watch"
+		u := p.url() + "/watch?after=now"
 		if haveFrom {
-			u += "?version=" + strconv.FormatInt(from, 10)
+			u = p.url() + "/watch?after=" + strconv.FormatInt(from, 10)
 		}
 		resp, b, err := c.do("GET", u, nil, reqOpts{needToken: needToken})
 		if err != nil {

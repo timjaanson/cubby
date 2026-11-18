@@ -98,7 +98,7 @@ func TestPagesStopAtPageBytes(t *testing.T) {
 	var seen int
 	from := "0"
 	for range 5 {
-		_, _, b := c.req("GET", "/v1/"+space+"/shared/big.*/watch?version="+from, "", auth...)
+		_, _, b := c.req("GET", "/v1/"+space+"/shared/big.*/watch?after="+from, "", auth...)
 		var w struct {
 			Changes []struct{ Key string }
 			Version int64

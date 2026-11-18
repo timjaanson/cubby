@@ -19,8 +19,8 @@ async page => {
       while (Date.now() < end) { if (await f()) return; await sleep(10) }
       throw Error('timeout: ' + m)
     }
-    const { createSpace, kv } = await import(base + '/kv.js')
-    const { space } = await createSpace({ server: base, anyone: 'all' })
+    const { visitor, kv } = await import(base + '/kv.js')
+    const { space } = await visitor({ server: base }).createSpace({ anyone: 'all' })
     const a = kv(space, { server: base, live: true })
     const b = kv(space, { server: base, keyName: 'second-person' }) // plain HTTP participant
     const states = []
@@ -41,10 +41,10 @@ async page => {
     const t1 = performance.now()
     for (let i = 0; i < 20; i++) await a.shared.set('card.2', { x: i })
     const writeMs = (performance.now() - t1) / 20
-    const seen = await b.shared.getEntry('card.2')
+    const seen = await b.shared.get('card.2')
     if (seen.value.x !== 19) throw Error('http read of live write')
-    const e = await a.shared.getEntry('card.2')
-    if (!e.mine || !e.t || e.value.x !== 19) throw Error('live getEntry ' + JSON.stringify(e))
+    const e = await a.shared.get('card.2')
+    if (!e.mine || !e.t || e.value.x !== 19) throw Error('live get ' + JSON.stringify(e))
 
     // pagehide closes the socket (back/forward cache); pageshow brings it back.
     const mark = states.length
@@ -58,12 +58,12 @@ async page => {
 
     // Pulses: a live listener and an HTTP listener, 30 quick pulses each way.
     const onA = [], onB = []
-    const stopA = a.by.onPulse('cursor', p => { if (!p.mine) onA.push(p) })
-    const stopB = b.by.onPulse('cursor', p => { if (!p.mine) onB.push(p) })
+    const stopA = a.by('*').pulses('cursor', p => { if (!p.mine) onA.push(p) })
+    const stopB = b.by('*').pulses('cursor', p => { if (!p.mine) onB.push(p) })
     await sleep(200)
     const t2 = performance.now()
     // maxRate 0: every one of a burst must arrive, past the client throttle.
-    for (let i = 0; i < 30; i++) { a.mine.pulse('cursor', { x: i }, { maxRate: 0 }); b.mine.pulse('cursor', { x: i }, { maxRate: 0 }) }
+    for (let i = 0; i < 30; i++) { a.by('me').pulse('cursor', { x: i }, { maxRate: 0 }); b.by('me').pulse('cursor', { x: i }, { maxRate: 0 }) }
     await until(() => onA.length === 30 && onB.length === 30, `pulses ${onA.length}/${onB.length}`)
     const pulseMs = performance.now() - t2
     if (await a.shared.get('cursor') !== null) throw Error('pulse was stored')

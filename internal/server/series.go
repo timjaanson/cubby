@@ -1,10 +1,10 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
 	"io"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/timjaanson/cubby/internal/apierr"
@@ -13,6 +13,7 @@ import (
 )
 
 type pointJSON struct {
+	Key     string          `json:"key,omitempty"` // in a read of several series
 	T       int64           `json:"t"`
 	Value   json.RawMessage `json:"value"`
 	Expires int64           `json:"expires,omitempty"`
@@ -26,13 +27,11 @@ func jsonValue(v []byte, isJSON bool) json.RawMessage {
 	return b
 }
 
-const maxBatchMembers = 100
-
 // maxSeriesLimit is the most points one series read returns.
 const maxSeriesLimit = 10000
 
-// seriesAdd handles POST {key}/series and POST {prefix}*/series. Inside a
-// batch it only collects the point.
+// seriesAdd handles POST {key}/series. Inside a batch it only collects the
+// point.
 func (s *Server) seriesAdd(c *reqCtx, t store.Target) error {
 	id := c.visitor // route checked access
 	if c.collect == nil {
@@ -60,26 +59,12 @@ func (s *Server) seriesAdd(c *reqCtx, t store.Target) error {
 
 	maxPoint, _ := s.cfg.SeriesLimitsFor(t.Space)
 	readLimit := maxPoint + 1
-	if t.Pattern {
-		readLimit = maxBatchMembers*(maxPoint+160) + 2
-	}
 	body, err := io.ReadAll(io.LimitReader(c.r.Body, readLimit))
 	if err != nil {
 		return &apierr.Error{Status: 400, Code: "invalid_encoding", Message: "Could not read the body."}
 	}
-	tooLarge := func(key string) error {
-		e := &apierr.Error{Status: 413, Code: "value_too_large", Message: "A point is at most " + strconv.FormatInt(maxPoint, 10) + " bytes.", Extra: map[string]any{"limit": maxPoint}}
-		if key != "" {
-			e.Message = "The point for " + key + " is too large. " + e.Message
-			e.Extra["key"] = key
-		}
-		return e
-	}
 	if int64(len(body)) >= readLimit {
-		if t.Pattern {
-			return &apierr.Error{Status: 413, Code: "value_too_large", Message: "The body is too large for a batch.", Extra: map[string]any{"limit": readLimit - 1}}
-		}
-		return tooLarge("")
+		return &apierr.Error{Status: 413, Code: "value_too_large", Message: "A point is at most " + strconv.FormatInt(maxPoint, 10) + " bytes.", Extra: map[string]any{"limit": maxPoint}}
 	}
 	if len(body) == 0 {
 		return &apierr.Error{Status: 400, Code: "empty_value", Message: "Empty values aren't stored. A point needs a value."}
@@ -92,18 +77,9 @@ func (s *Server) seriesAdd(c *reqCtx, t store.Target) error {
 		return &apierr.Error{Status: 400, Code: "json_too_deep", Message: "JSON may be nested at most 64 levels."}
 	}
 
-	req := store.PointsReq{IfBefore: before, Space: t.Space, Area: t.Area, T: at, TTL: ttl, Writer: id}
-	if t.Pattern {
-		if req.Points, err = parseBatch(body, isJSON, t.Key, maxPoint, tooLarge); err != nil {
-			return err
-		}
-	} else {
-		req.Points = []store.PointIn{{Key: t.Key, Value: body, IsJSON: isJSON}}
-	}
+	req := store.PointsReq{IfBefore: before, Space: t.Space, Area: t.Area, T: at, TTL: ttl, Writer: id,
+		Points: []store.PointIn{{Key: t.Key, Value: body, IsJSON: isJSON}}}
 	if c.collect != nil {
-		if t.Pattern {
-			return badBatch("In a batch, each write adds one point to one key: POST {key}/series, not {prefix}*/series.")
-		}
 		*c.collect = append(*c.collect, store.WriteReq{Space: t.Space, Area: t.Area, Key: t.Key, Value: body, IsJSON: isJSON,
 			Writer: id, IfBefore: before, Point: true, T: at, TTL: ttl})
 		return nil
@@ -127,14 +103,6 @@ func (s *Server) seriesAdd(c *reqCtx, t store.Target) error {
 	if res.Changed {
 		s.notify.fire(t.Space)
 	}
-	if t.Pattern {
-		keys := make([]string, len(req.Points))
-		for i, p := range req.Points {
-			keys[i] = p.Key
-		}
-		c.json(200, map[string]any{"version": res.Version, "t": res.T, "keys": keys})
-		return nil
-	}
 	c.header().Set("ETag", etag(res.Version))
 	status := 200
 	if res.Created {
@@ -144,59 +112,12 @@ func (s *Server) seriesAdd(c *reqCtx, t store.Target) error {
 	return nil
 }
 
-// parseBatch reads a JSON object into one point per member, keeping the
-// members' order and their bytes exactly as sent.
-func parseBatch(body []byte, isJSON bool, prefix string, maxPoint int64, tooLarge func(string) error) ([]store.PointIn, error) {
-	notObject := &apierr.Error{Status: 400, Code: "batch_needs_object",
-		Message: "A batch body is a JSON object of 1 to 100 members, like {\"temp\": 21.4, \"rh\": 45}. Each member becomes a point in the series named by the prefix plus the member's name."}
-	if !isJSON {
-		return nil, notObject
-	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
-		return nil, notObject
-	}
-	seen := map[string]bool{}
-	var out []store.PointIn
-	for dec.More() {
-		tok, err := dec.Token()
-		if err != nil {
-			return nil, notObject
-		}
-		name, _ := tok.(string)
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			return nil, notObject
-		}
-		key := prefix + name
-		if seen[key] {
-			return nil, &apierr.Error{Status: 400, Code: "batch_needs_object", Message: "The member " + strconv.Quote(name) + " appears twice.", Extra: map[string]any{"key": key}}
-		}
-		seen[key] = true
-		if !names.ValidKey(key) {
-			return nil, &apierr.Error{Status: 400, Code: "invalid_key", Extra: map[string]any{"key": key},
-				Message: strconv.Quote(key) + " isn't a valid key. The prefix plus each member's name must be 1 to 128 of A-Z a-z 0-9 . _ : -, and not \"watch\", \"series\" or \"pulse\"."}
-		}
-		if int64(len(raw)) > maxPoint {
-			return nil, tooLarge(key)
-		}
-		out = append(out, store.PointIn{Key: key, Value: raw, IsJSON: true})
-		if len(out) > maxBatchMembers {
-			return nil, notObject
-		}
-	}
-	if len(out) == 0 {
-		return nil, notObject
-	}
-	return out, nil
-}
-
 func (s *Server) seriesRead(c *reqCtx, t store.Target) error {
 	if err := s.rate(s.lim.readsPerIP, c.ip, 1, "rate_limited"); err != nil {
 		return err
 	}
 	q := c.r.URL.Query()
-	pq := store.PointsQuery{Limit: 1000}
+	pq := store.PointsQuery{Limit: 1000, Desc: true}
 	if q.Has("limit") {
 		n, ok := parseUint(q.Get("limit"))
 		if !ok || n < 1 || n > maxSeriesLimit {
@@ -204,26 +125,36 @@ func (s *Server) seriesRead(c *reqCtx, t store.Target) error {
 		}
 		pq.Limit = int(n)
 	}
+	// Newest first unless asked: things ordered by time start with the latest.
 	switch q.Get("order") {
-	case "", "asc":
-	case "desc":
-		pq.Desc = true
+	case "", "desc":
+	case "asc":
+		pq.Desc = false
 	default:
 		return apierr.BadParam("order", "order is asc or desc.")
 	}
-	if q.Has("since") {
-		n, ok := parseUint(q.Get("since"))
-		if !ok {
-			return apierr.BadParam("since", "since is a time in milliseconds. Points after it are returned.")
+	ms := func(name, what string) (*int64, error) {
+		if !q.Has(name) {
+			return nil, nil
 		}
-		pq.Since = &n
+		n, ok := parseUint(q.Get(name))
+		if !ok {
+			return nil, apierr.BadParam(name, name+" is "+what)
+		}
+		return &n, nil
 	}
-	if q.Has("until") {
-		n, ok := parseUint(q.Get("until"))
-		if !ok {
-			return apierr.BadParam("until", "until is a time in milliseconds. Points before it are returned.")
-		}
-		pq.Until = &n
+	var err error
+	if pq.Since, err = ms("since", "a time in milliseconds since 1970. Points at or after it are returned."); err != nil {
+		return err
+	}
+	if pq.Before, err = ms("before", "a time in milliseconds since 1970. Points before it are returned."); err != nil {
+		return err
+	}
+	if t.Pattern {
+		return s.seriesReadPattern(c, t, pq)
+	}
+	if pq.After, err = ms("after", "the next value of the previous page."); err != nil {
+		return err
 	}
 	points, next, version, err := s.store.ReadPoints(t.Space, t.Area, t.Key, pq)
 	if err != nil {
@@ -237,6 +168,33 @@ func (s *Server) seriesRead(c *reqCtx, t store.Target) error {
 	if next != nil {
 		nx = *next
 	}
-	c.json(200, map[string]any{"key": t.Key, "points": out, "version": version, "next": nx})
+	c.json(200, map[string]any{"items": out, "version": version, "next": nx})
+	return nil
+}
+
+// seriesReadPattern reads every series under a prefix, merged by time; each
+// point carries its key. next is "t:key", as ties at one t go by key.
+func (s *Server) seriesReadPattern(c *reqCtx, t store.Target, pq store.PointsQuery) error {
+	if a := c.r.URL.Query().Get("after"); c.r.URL.Query().Has("after") {
+		ts, key, ok := strings.Cut(a, ":")
+		n, okN := parseUint(ts)
+		if !ok || !okN || !names.ValidKey(key) || !strings.HasPrefix(key, t.Key) {
+			return apierr.BadParam("after", "after is the next value of the previous page.")
+		}
+		pq.After, pq.AfterKey = &n, key
+	}
+	points, next, version, err := s.store.ReadSeriesPrefix(t.Space, t.Area, t.Key, pq)
+	if err != nil {
+		return err
+	}
+	out := make([]pointJSON, 0, len(points))
+	for _, p := range points {
+		out = append(out, pointJSON{Key: p.Key, T: p.T, Value: jsonValue(p.Value, p.IsJSON), Expires: p.Expires})
+	}
+	var nx any
+	if next != nil {
+		nx = strconv.FormatInt(next.T, 10) + ":" + next.Key
+	}
+	c.json(200, map[string]any{"items": out, "version": version, "next": nx})
 	return nil
 }

@@ -55,24 +55,24 @@ func isNull(raw json.RawMessage) bool { return raw != nil && string(bytes.TrimSp
 
 func (s *Server) createSpace(c *reqCtx) error {
 	var in struct {
-		Name   string          `json:"name"`
-		Label  string          `json:"label"`
-		Anyone json.RawMessage `json:"anyone"`
-		Invite json.RawMessage `json:"invite"`
+		Name     string          `json:"name"`
+		Prefix   string          `json:"prefix"`
+		Anyone   json.RawMessage `json:"anyone"`
+		Inviters json.RawMessage `json:"inviters"`
 	}
 	if err := decodeBody(c, &in); err != nil {
 		return err
 	}
-	if in.Label != "" && in.Name != "" {
-		return apierr.BadParam("name", "Give a name or a label, not both.")
+	if in.Prefix != "" && in.Name != "" {
+		return apierr.BadParam("name", "Give a name or a prefix, not both.")
 	}
-	if in.Label != "" && !names.ValidLabel(in.Label) {
-		return apierr.BadParam("label", fmt.Sprintf("A label is lowercase letters, digits and single hyphens, at most %d characters.", names.MaxLabel))
+	if in.Prefix != "" && !names.ValidLabel(in.Prefix) {
+		return apierr.BadParam("prefix", fmt.Sprintf("A prefix is lowercase letters, digits and single hyphens, at most %d characters.", names.MaxLabel))
 	}
 	if in.Name != "" && !names.ValidSpace(in.Name) {
 		return apierr.InvalidSpace(names.SuggestFor(in.Name))
 	}
-	settings, err := access.ApplyInput(access.Default, in.Anyone, in.Invite)
+	settings, err := access.ApplyInput(access.Default, in.Anyone, in.Inviters)
 	if err != nil {
 		return apierr.InvalidSettings(err.Error())
 	}
@@ -86,7 +86,7 @@ func (s *Server) createSpace(c *reqCtx) error {
 	if err := s.spaceRate(c, id); err != nil {
 		return err
 	}
-	name, err := s.store.CreateSpace(in.Name, in.Label, settings, id)
+	name, err := s.store.CreateSpace(in.Name, in.Prefix, settings, id)
 	if err != nil {
 		return err
 	}
@@ -137,7 +137,7 @@ func (s *Server) join(c *reqCtx, space string, rights *access.Rights) error {
 	if err != nil {
 		return err
 	}
-	c.json(200, map[string]any{"space": space, "id": id, "access": j.Access, "until": j.Until, "settings": settings})
+	c.json(200, map[string]any{"space": space, "id": id, "access": j.Access, "expires": j.Until, "settings": settings})
 	return nil
 }
 
@@ -145,10 +145,7 @@ func (s *Server) join(c *reqCtx, space string, rights *access.Rights) error {
 // routes. rest is the path after the space name.
 func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest []string) error {
 	m := c.r.Method
-	if len(rest) == 1 && rest[0] == "access" {
-		if m != http.MethodGet && m != http.MethodHead {
-			return methodErr("GET, HEAD")
-		}
+	if len(rest) == 0 && (m == http.MethodGet || m == http.MethodHead) {
 		if err := checkParams(c.r); err != nil {
 			return err
 		}
@@ -163,8 +160,16 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 		if err != nil {
 			return err
 		}
-		c.json(200, map[string]any{"id": id, "access": rights.Level(), "canInvite": c.visitor != "" && rights.CanInvite(),
-			"settings": rights.Settings, "usage": usage, "limits": s.spaceLimits(space)})
+		var expires any
+		switch {
+		case rights.Banned && rights.BannedUntil != 0:
+			expires = rights.BannedUntil
+		case !rights.Banned && rights.Member > access.None && rights.Member >= rights.Settings.Anyone && rights.MemberUntil != 0:
+			expires = rights.MemberUntil
+		}
+		c.json(200, map[string]any{"space": space, "id": id, "access": rights.Level(), "expires": expires,
+			"canInvite": c.visitor != "" && rights.CanInvite(),
+			"settings":  rights.Settings, "usage": usage, "limits": s.spaceLimits(space)})
 		return nil
 	}
 
@@ -211,7 +216,7 @@ func (s *Server) spaceRoute(c *reqCtx, space string, rights *access.Rights, rest
 			c.json(200, map[string]any{})
 			return nil
 		}
-		return methodErr("PATCH, DELETE")
+		return methodErr("GET, HEAD, PATCH, DELETE")
 
 	case rest[0] == "invites" && len(rest) == 1:
 		switch m {
@@ -326,13 +331,13 @@ func (s *Server) patchSettings(c *reqCtx, space string, cur access.Settings) err
 		return err
 	}
 	var in struct {
-		Anyone json.RawMessage `json:"anyone"`
-		Invite json.RawMessage `json:"invite"`
+		Anyone   json.RawMessage `json:"anyone"`
+		Inviters json.RawMessage `json:"inviters"`
 	}
 	if err := decodeBody(c, &in); err != nil {
 		return err
 	}
-	st, err := access.ApplyInput(cur, in.Anyone, in.Invite)
+	st, err := access.ApplyInput(cur, in.Anyone, in.Inviters)
 	if err != nil {
 		return apierr.InvalidSettings(err.Error())
 	}
@@ -343,10 +348,9 @@ func (s *Server) patchSettings(c *reqCtx, space string, cur access.Settings) err
 	return nil
 }
 
-// Defaults for a new invite: 10 uses, 7 days. An owner invite is always
-// one use, for at most 7 days.
+// Defaults for a new invite: any number of uses for 7 days. An owner
+// invite is always one use, for at most 7 days.
 const (
-	defaultInviteUses = 10
 	defaultInviteTTL  = 7 * 24 * time.Hour
 	maxOwnerInviteTTL = 7 * 24 * time.Hour
 )
@@ -355,17 +359,41 @@ func ownerInviteUses() error {
 	return apierr.BadParam("uses", "An owner invite is for one visitor: uses is 1.")
 }
 
-func ownerInviteUntil() error {
-	return apierr.BadParam("until", "An owner invite lasts at most 7 days: until is a time within 7 days.")
+func ownerInviteTTL() error {
+	return apierr.BadParam("ttl", "An owner invite lasts at most 7 days.")
+}
+
+// ttlField reads an optional duration field from a body. set reports that
+// the field was there; d is 0 for null (no end).
+func ttlField(raw json.RawMessage, name string) (d time.Duration, set bool, err error) {
+	if raw == nil {
+		return 0, false, nil
+	}
+	if isNull(raw) {
+		return 0, true, nil
+	}
+	d, err = access.TTL(raw)
+	if err != nil {
+		return 0, true, apierr.BadParam(name, name+": "+err.Error()+", or null for no end.")
+	}
+	return d, true, nil
+}
+
+func expiresIn(d time.Duration) *int64 {
+	if d == 0 {
+		return nil
+	}
+	ms := time.Now().Add(d).UnixMilli()
+	return &ms
 }
 
 func (s *Server) mintInvite(c *reqCtx, space string, rights *access.Rights) error {
 	var in struct {
-		Label    string          `json:"label"`
-		Access   json.RawMessage `json:"access"`
-		Uses     json.RawMessage `json:"uses"`
-		Until    json.RawMessage `json:"until"`
-		GrantFor json.RawMessage `json:"grantFor"`
+		Label     string          `json:"label"`
+		Access    json.RawMessage `json:"access"`
+		Uses      json.RawMessage `json:"uses"`
+		TTL       json.RawMessage `json:"ttl"`
+		AccessTTL json.RawMessage `json:"accessTtl"`
 	}
 	if err := decodeBody(c, &in); err != nil {
 		return err
@@ -373,72 +401,47 @@ func (s *Server) mintInvite(c *reqCtx, space string, rights *access.Rights) erro
 	if utf8.RuneCountInString(in.Label) > 63 {
 		return apierr.BadParam("label", "A label is at most 63 characters.")
 	}
-	// The default is all, or the inviter's own level if that's lower.
-	level := min(access.All, rights.Member)
-	if in.Access != nil {
-		var err error
-		if level, err = access.ParseIn(in.Access, "access", access.Read, access.Post, access.All, access.Owner); err != nil {
-			return apierr.BadParam("access", err.Error())
-		}
-		if !rights.CanGive(level) {
-			return &apierr.Error{Status: 403, Code: "exceeds_rights",
-				Message: fmt.Sprintf("An invite can give at most your own level, %q.", rights.Member.String())}
-		}
+	level, err := s.giveLevel(in.Access, rights, true)
+	if err != nil {
+		return err
 	}
-	now := time.Now()
 	spec := store.InviteSpec{By: c.visitor, Label: in.Label, Access: level}
 
 	owner := level == access.Owner
-	uses := int64(defaultInviteUses)
 	if owner {
-		uses = 1
+		one := int64(1)
+		spec.Uses = &one
 	}
-	spec.Uses = &uses
-	switch {
-	case isNull(in.Uses):
-		if owner {
-			return ownerInviteUses()
-		}
-		spec.Uses = nil
-	case in.Uses != nil:
+	if owner && isNull(in.Uses) {
+		return ownerInviteUses()
+	}
+	if in.Uses != nil && !isNull(in.Uses) {
+		var uses int64
 		if json.Unmarshal(in.Uses, &uses) != nil || uses < 1 {
 			return apierr.BadParam("uses", "uses is how many visitors can redeem the invite, 1 or more, or null for no limit.")
 		}
-		if owner && uses != 1 {
-			return ownerInviteUses()
-		}
+		spec.Uses = &uses
+	}
+	if owner && (spec.Uses == nil || *spec.Uses != 1) {
+		return ownerInviteUses()
 	}
 
-	until := now.Add(defaultInviteTTL).UnixMilli()
-	spec.Until = &until
-	switch {
-	case isNull(in.Until):
-		if owner {
-			return ownerInviteUntil()
-		}
-		spec.Until = nil
-	case in.Until != nil:
-		var err error
-		if until, err = access.ParseTime(in.Until, now); err != nil {
-			return apierr.BadParam("until", "until: "+err.Error()+".")
-		}
-		if owner && until > now.Add(maxOwnerInviteTTL).UnixMilli() {
-			return ownerInviteUntil()
-		}
+	ttl, set, err := ttlField(in.TTL, "ttl")
+	if err != nil {
+		return err
 	}
+	if !set {
+		ttl = defaultInviteTTL
+	}
+	if owner && (ttl == 0 || ttl > maxOwnerInviteTTL) {
+		return ownerInviteTTL()
+	}
+	spec.Until = expiresIn(ttl)
 
-	if in.GrantFor != nil && !isNull(in.GrantFor) {
-		var d string
-		dur, err := time.Duration(0), error(nil)
-		if json.Unmarshal(in.GrantFor, &d) == nil {
-			dur, err = access.ParseDuration(d)
-		} else {
-			err = fmt.Errorf("not a duration")
-		}
-		if err != nil || dur <= 0 {
-			return apierr.BadParam("grantFor", `grantFor is a duration like "30d", or null for grants that last until revoked.`)
-		}
-		ms := dur.Milliseconds()
+	if grant, _, err := ttlField(in.AccessTTL, "accessTtl"); err != nil {
+		return err
+	} else if grant > 0 {
+		ms := grant.Milliseconds()
 		spec.GrantFor = &ms
 	}
 
@@ -446,15 +449,42 @@ func (s *Server) mintInvite(c *reqCtx, space string, rights *access.Rights) erro
 	if err != nil {
 		return err
 	}
-	c.json(201, map[string]any{"id": info.ID, "invite": token, "label": info.Label, "access": info.Access,
-		"uses": info.UsesLeft, "until": info.Until, "grantFor": info.GrantFor})
+	c.json(201, inviteOut{Invite: info, Token: token})
 	return nil
+}
+
+type inviteOut struct {
+	store.Invite
+	Token string `json:"invite"`
+}
+
+// giveLevel reads the access a member hands out with an invite or an API
+// key. Without one it's all, or the giver's own level if that's lower.
+// Nobody gives more than they have.
+func (s *Server) giveLevel(raw json.RawMessage, rights *access.Rights, ownerOK bool) (access.Level, error) {
+	level := min(access.All, rights.Member)
+	if raw == nil {
+		return level, nil
+	}
+	allowed := []access.Level{access.Read, access.Post, access.All}
+	if ownerOK {
+		allowed = append(allowed, access.Owner)
+	}
+	level, err := access.ParseIn(raw, "access", allowed...)
+	if err != nil {
+		return 0, apierr.BadParam("access", err.Error())
+	}
+	if !rights.CanGive(level) {
+		return 0, &apierr.Error{Status: 403, Code: "exceeds_rights",
+			Message: fmt.Sprintf("You can give at most your own level, %q.", rights.Member.String())}
+	}
+	return level, nil
 }
 
 func (s *Server) patchInvite(c *reqCtx, space, id, by string) error {
 	var in struct {
-		Uses  json.RawMessage `json:"uses"`
-		Until json.RawMessage `json:"until"`
+		Uses json.RawMessage `json:"uses"`
+		TTL  json.RawMessage `json:"ttl"`
 	}
 	if err := decodeBody(c, &in); err != nil {
 		return err
@@ -465,20 +495,18 @@ func (s *Server) patchInvite(c *reqCtx, space, id, by string) error {
 		if !isNull(in.Uses) {
 			var n int64
 			if json.Unmarshal(in.Uses, &n) != nil || n < 0 {
-				return apierr.BadParam("uses", "uses is how many more visitors can redeem the token, 0 to stop new ones, or null for no limit.")
+				return apierr.BadParam("uses", "uses is how many more visitors can redeem the invite, 0 to stop new ones, or null for no limit.")
 			}
 			ch.Uses = &n
 		}
 	}
-	if in.Until != nil {
+	ttl, set, err := ttlField(in.TTL, "ttl")
+	if err != nil {
+		return err
+	}
+	if set {
 		ch.SetUntil = true
-		if !isNull(in.Until) {
-			ms, err := access.ParseTime(in.Until, time.Now())
-			if err != nil {
-				return apierr.BadParam("until", "until: "+err.Error()+".")
-			}
-			ch.Until = &ms
-		}
+		ch.Until = expiresIn(ttl)
 	}
 	// An owner invite stays one use within 7 days; uses 0 stops it.
 	ch.Check = func(l access.Level) error {
@@ -488,8 +516,8 @@ func (s *Server) patchInvite(c *reqCtx, space, id, by string) error {
 		if ch.SetUses && (ch.Uses == nil || *ch.Uses > 1) {
 			return ownerInviteUses()
 		}
-		if ch.SetUntil && (ch.Until == nil || *ch.Until > time.Now().Add(maxOwnerInviteTTL).UnixMilli()) {
-			return ownerInviteUntil()
+		if set && (ttl == 0 || ttl > maxOwnerInviteTTL) {
+			return ownerInviteTTL()
 		}
 		return nil
 	}
@@ -506,7 +534,7 @@ func (s *Server) patchInvite(c *reqCtx, space, id, by string) error {
 func (s *Server) setMember(c *reqCtx, space, user string) error {
 	var in struct {
 		Access json.RawMessage `json:"access"`
-		Until  json.RawMessage `json:"until"`
+		TTL    json.RawMessage `json:"ttl"`
 	}
 	if err := decodeBody(c, &in); err != nil {
 		return err
@@ -518,14 +546,11 @@ func (s *Server) setMember(c *reqCtx, space, user string) error {
 	if level == access.Banned && user == c.visitor {
 		return apierr.BadParam("access", "You can't ban yourself.")
 	}
-	var until *int64
-	if in.Until != nil && !isNull(in.Until) {
-		ms, err := access.ParseTime(in.Until, time.Now())
-		if err != nil {
-			return apierr.BadParam("until", "until: "+err.Error()+".")
-		}
-		until = &ms
+	ttl, _, err := ttlField(in.TTL, "ttl")
+	if err != nil {
+		return err
 	}
+	until := expiresIn(ttl)
 	mem, err := s.store.SetMember(space, user, c.visitor, level, until)
 	if err != nil {
 		return err
@@ -542,7 +567,7 @@ func (s *Server) setMember(c *reqCtx, space, user string) error {
 }
 
 // listSpaces handles GET /v1/spaces: the spaces the visitor belongs to,
-// the most recently changed membership first.
+// the most recently active first.
 func (s *Server) listSpaces(c *reqCtx) error {
 	visitor, err := c.needVisitor()
 	if err != nil {
@@ -552,19 +577,24 @@ func (s *Server) listSpaces(c *reqCtx) error {
 	limit := 100
 	if q.Has("limit") {
 		n, ok := parseUint(q.Get("limit"))
-		if !ok || n < 1 || n > 100 {
-			return apierr.BadParam("limit", "limit is 1 to 100.")
+		if !ok || n < 1 || n > 1000 {
+			return apierr.BadParam("limit", "limit is 1 to 1000.")
 		}
 		limit = int(n)
 	}
 	var after *store.SpacesCursor
 	if q.Has("after") {
-		t, sp, ok := strings.Cut(q.Get("after"), ":")
-		n, okN := parseUint(t)
-		if !ok || !okN || !names.ValidSpace(sp) {
-			return apierr.BadParam("after", "after is the next value of the previous page.")
+		parts := strings.Split(q.Get("after"), ":")
+		bad := apierr.BadParam("after", "after is the next value of the previous page.")
+		if len(parts) != 3 || !names.ValidSpace(parts[2]) {
+			return bad
 		}
-		after = &store.SpacesCursor{Changed: n, Space: sp}
+		active, ok1 := parseUint(parts[0])
+		since, ok2 := parseUint(parts[1])
+		if !ok1 || !ok2 {
+			return bad
+		}
+		after = &store.SpacesCursor{Active: active, Since: since, Space: parts[2]}
 	}
 	if err := s.rate(s.lim.readsPerIP, c.ip, 1, "rate_limited"); err != nil {
 		return err
@@ -575,7 +605,7 @@ func (s *Server) listSpaces(c *reqCtx) error {
 	}
 	var nx any
 	if next != nil {
-		nx = strconv.FormatInt(next.Changed, 10) + ":" + next.Space
+		nx = strconv.FormatInt(next.Active, 10) + ":" + strconv.FormatInt(next.Since, 10) + ":" + next.Space
 	}
 	c.json(200, map[string]any{"items": items, "next": nx})
 	return nil

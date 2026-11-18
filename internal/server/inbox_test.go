@@ -232,7 +232,7 @@ func TestInboxLiveIdentity(t *testing.T) {
 	alice := c.create(`{"anyone":"all"}`, "")
 	bobTok, _ := c.anon()
 	w := c.dial(alice.Space, bearer(alice.Token)...)
-	w.send(`{"id":"in","method":"GET","path":"inbox/*/*/watch","query":{"version":0}}`)
+	w.send(`{"id":"in","method":"GET","path":"inbox/*/*/watch","query":{"after":0}}`)
 	watchBody(t, w.reply(`"in"`))
 	c.req("PUT", "/v1/"+alice.Space+"/to/"+alice.ID+"/hello", `1`, bearer(bobTok)...)
 	changes, _ := watchBody(t, w.reply(`"in"`))
@@ -267,7 +267,7 @@ func TestBans(t *testing.T) {
 	w.call("2", `{"id":2,"op":"will","path":"by/me/here/pulse","body":0}`)
 	gone := c.listen(sp+"/by/*/here/pulse?timeout=1", o...)
 
-	if s, _, body := c.req("PUT", sp+"/members/"+bobID, `{"access":"banned","until":"1h"}`, o...); s != 200 || !strings.Contains(body, `"until":1`) {
+	if s, _, body := c.req("PUT", sp+"/members/"+bobID, `{"access":"banned","ttl":"1h"}`, o...); s != 200 || !strings.Contains(body, `"expires":1`) {
 		t.Fatalf("ban: %d %s", s, body)
 	}
 	if s, _, _ := c.req("PUT", sp+"/members/"+bobID, `{"access":"banned"}`, o...); s != 200 {
@@ -284,9 +284,9 @@ func TestBans(t *testing.T) {
 		t.Fatalf("a banned visitor's will fired: %+v", p)
 	}
 	// Every request with the token says so, reads and access included.
-	for _, r := range [][2]string{{"GET", "/shared/x"}, {"PUT", "/shared/x"}, {"GET", "/access"}, {"POST", "/by/me/x/pulse"}, {"GET", "/inbox/*/*"}} {
+	for _, r := range [][2]string{{"GET", "/shared/x"}, {"PUT", "/shared/x"}, {"GET", ""}, {"POST", "/by/me/x/pulse"}, {"GET", "/inbox/*/*"}} {
 		s, _, body := c.req(r[0], sp+r[1], `1`, b...)
-		if s != 403 || errCode(body) != "banned" || !strings.Contains(body, `"until":null`) {
+		if s != 403 || errCode(body) != "banned" || !strings.Contains(body, `"expires":null`) {
 			t.Fatalf("%s %s banned: %d %s", r[0], r[1], s, body)
 		}
 	}
@@ -303,7 +303,7 @@ func TestBans(t *testing.T) {
 	if s, _, body := c.req("DELETE", sp+"/members/"+bobID, "", o...); s != 200 || !strings.Contains(body, `"removed":true`) {
 		t.Fatalf("unban: %d %s", s, body)
 	}
-	if _, _, body := c.req("GET", sp+"/access", "", b...); !strings.Contains(body, `"access":"all"`) {
+	if _, _, body := c.req("GET", sp, "", b...); !strings.Contains(body, `"access":"all"`) {
 		t.Fatalf("after unban %s", body)
 	}
 }
@@ -333,11 +333,11 @@ func TestBanBlocksJoin(t *testing.T) {
 		t.Fatalf("private read: %d %s", s, body)
 	}
 	// A ban with an end lapses by itself, and they can join again.
-	c.req("PUT", sp+"/members/"+who.ID, `{"access":"banned","until":`+itoa(time.Now().Add(300*time.Millisecond).UnixMilli())+`}`, o...)
+	c.req("PUT", sp+"/members/"+who.ID, `{"access":"banned","ttl":1}`, o...)
 	if s, _, _ := c.req("GET", sp+"/shared/x", "", bearer(bobTok)...); s != 403 {
 		t.Fatalf("timed ban: %d", s)
 	}
-	time.Sleep(400 * time.Millisecond)
+	time.Sleep(1100 * time.Millisecond)
 	if s, _, body := c.join(own.Space, link, bobTok); s != 200 || !strings.Contains(body, `"access":"all"`) {
 		t.Fatalf("join after lapse: %d %s", s, body)
 	}

@@ -47,9 +47,9 @@ func spaceArg(s string) (string, error) {
 	return s, nil
 }
 
-// settingsFlags puts --anyone and --invite into a request body.
+// settingsFlags puts --anyone and --inviters into a request body.
 func settingsFlags(f *flags, body map[string]any) error {
-	for _, k := range []string{"anyone", "invite"} {
+	for _, k := range []string{"anyone", "inviters"} {
 		if f.has(k) {
 			body[k] = f.str(k)
 		}
@@ -57,17 +57,29 @@ func settingsFlags(f *flags, body map[string]any) error {
 	return nil
 }
 
-// inviteArg takes an invite, or a link with invite=INVITE in its fragment.
-func inviteArg(s string) string {
-	if strings.HasPrefix(s, "inv_") {
-		return s
-	}
+// linkParts reads an invite link: #space=NAME&invite=inv_... in its
+// fragment.
+func linkParts(s string) (space, invite string) {
 	if _, frag, ok := strings.Cut(s, "#"); ok {
-		if q, err := url.ParseQuery(frag); err == nil && q.Get("invite") != "" {
-			return q.Get("invite")
+		if q, err := url.ParseQuery(frag); err == nil {
+			return q.Get("space"), q.Get("invite")
 		}
 	}
-	return s
+	return "", ""
+}
+
+// inviteLink adds space and invite to base's fragment, keeping what else
+// is there.
+func inviteLink(base, space, invite string) string {
+	u, frag, _ := strings.Cut(base, "#")
+	var keep []string
+	for _, p := range strings.Split(frag, "&") {
+		if k, _, _ := strings.Cut(p, "="); p != "" && k != "space" && k != "invite" {
+			keep = append(keep, p)
+		}
+	}
+	keep = append(keep, "space="+url.QueryEscape(space), "invite="+url.QueryEscape(invite))
+	return u + "#" + strings.Join(keep, "&")
 }
 
 func fmtTime(ms *int64) string {
@@ -78,38 +90,48 @@ func fmtTime(ms *int64) string {
 }
 
 func (c *client) join(f *flags) error {
-	if len(f.args) != 2 {
-		return usageCli("join takes a space and an invite or link")
+	var space, invite string
+	switch len(f.args) {
+	case 1:
+		if space, invite = linkParts(f.args[0]); space == "" || invite == "" {
+			return usageCli("join takes an invite link (with #space=...&invite=...), or a space and an invite")
+		}
+	case 2:
+		space, invite = f.args[0], f.args[1]
+	default:
+		return usageCli("join takes an invite link, or a space and an invite")
 	}
-	space, err := spaceArg(f.args[0])
+	space, err := spaceArg(space)
 	if err != nil {
 		return err
 	}
 	var out struct{ ID, Access string }
-	if err := c.call("POST", "/v1/"+space+"/join", map[string]string{"invite": inviteArg(f.args[1])}, 200, &out); err != nil {
+	if err := c.call("POST", "/v1/"+space+"/join", map[string]string{"invite": invite}, 200, &out); err != nil {
 		return err
 	}
 	fmt.Println(out.Access)
 	return nil
 }
 
-type settingsOut struct{ Anyone, Invite string }
+type settingsOut struct{ Anyone, Inviters string }
 
-func (s settingsOut) print() { fmt.Printf("anyone\t%s\ninvite\t%s\n", s.Anyone, s.Invite) }
+func (s settingsOut) print() { fmt.Printf("anyone\t%s\ninviters\t%s\n", s.Anyone, s.Inviters) }
 
-func (c *client) access(f *flags) error {
+// info prints GET /v1/{space}: your level, the settings, usage and limits.
+func (c *client) info(f *flags) error {
 	if len(f.args) != 1 {
-		return usageCli("access takes a space")
+		return usageCli("info takes a space")
 	}
 	space, err := spaceArg(f.args[0])
 	if err != nil {
 		return err
 	}
-	var out struct{ Access string }
-	if err := c.call("GET", "/v1/"+space+"/access", nil, 200, &out); err != nil {
+	var out map[string]any
+	if err := c.call("GET", "/v1/"+space, nil, 200, &out); err != nil {
 		return err
 	}
-	fmt.Println(out.Access)
+	b, _ := json.MarshalIndent(out, "", "  ")
+	fmt.Println(string(b))
 	return nil
 }
 
@@ -127,7 +149,7 @@ func (c *client) settings(f *flags) error {
 	}
 	var out struct{ Settings settingsOut }
 	if len(body) == 0 {
-		if err := c.call("GET", "/v1/"+space+"/access", nil, 200, &out); err != nil {
+		if err := c.call("GET", "/v1/"+space, nil, 200, &out); err != nil {
 			return err
 		}
 	} else if err := c.call("PATCH", "/v1/"+space, body, 200, &out); err != nil {
@@ -155,7 +177,7 @@ func (c *client) drop(f *flags) error {
 	return c.call("DELETE", "/v1/"+space, nil, 200, nil)
 }
 
-// limitFlags reads --uses and --until: "unlimited" and "never" are null.
+// limitFlags reads --uses and --ttl: "unlimited" and "never" are null.
 func limitFlags(f *flags, body map[string]any) error {
 	if f.has("uses") {
 		if u := f.str("uses"); u == "unlimited" {
@@ -166,14 +188,20 @@ func limitFlags(f *flags, body map[string]any) error {
 			return usageCli("--uses takes a number or unlimited")
 		}
 	}
-	if f.has("until") {
-		if u := f.str("until"); u == "never" {
-			body["until"] = nil
-		} else {
-			body["until"] = u
-		}
-	}
+	ttlFlag(f, "ttl", "ttl", body)
 	return nil
+}
+
+// ttlFlag copies a duration flag into body as name, "never" as null.
+func ttlFlag(f *flags, flag, name string, body map[string]any) {
+	if !f.has(flag) {
+		return
+	}
+	if v := f.str(flag); v == "never" {
+		body[name] = nil
+	} else {
+		body[name] = v
+	}
 }
 
 func (c *client) inviteCmd(f *flags) error {
@@ -198,9 +226,7 @@ func (c *client) inviteCmd(f *flags) error {
 		if f.has("label") {
 			body["label"] = f.str("label")
 		}
-		if f.has("grant-for") {
-			body["grantFor"] = f.str("grant-for")
-		}
+		ttlFlag(f, "access-ttl", "accessTtl", body)
 		if err := limitFlags(f, body); err != nil {
 			return err
 		}
@@ -209,11 +235,7 @@ func (c *client) inviteCmd(f *flags) error {
 			return err
 		}
 		if l := f.str("link"); l != "" {
-			sep := "#"
-			if strings.Contains(l, "#") {
-				sep = "&"
-			}
-			fmt.Println(l + sep + "invite=" + out.Invite)
+			fmt.Println(inviteLink(l, space, out.Invite))
 			return nil
 		}
 		fmt.Println(out.Invite)
@@ -222,7 +244,7 @@ func (c *client) inviteCmd(f *flags) error {
 		var out struct {
 			Items []struct {
 				ID, Label, State, Access string
-				UsesLeft, Until          *int64
+				Uses, Expires            *int64
 				Members                  int
 			}
 		}
@@ -231,14 +253,14 @@ func (c *client) inviteCmd(f *flags) error {
 		}
 		for _, t := range out.Items {
 			uses := "-"
-			if t.UsesLeft != nil {
-				uses = strconv.FormatInt(*t.UsesLeft, 10)
+			if t.Uses != nil {
+				uses = strconv.FormatInt(*t.Uses, 10)
 			}
 			label := t.Label
 			if label == "" {
 				label = "-"
 			}
-			fmt.Printf("%s\t%s\t%s\t%s\t%d\t%s\t%s\n", t.ID, t.State, uses, fmtTime(t.Until), t.Members, label, t.Access)
+			fmt.Printf("%s\t%s\t%s\t%s\t%d\t%s\t%s\n", t.ID, t.State, uses, fmtTime(t.Expires), t.Members, label, t.Access)
 		}
 		return nil
 	case "set":
@@ -250,7 +272,7 @@ func (c *client) inviteCmd(f *flags) error {
 			return err
 		}
 		if len(body) == 0 {
-			return usageCli("invite set needs --uses or --until")
+			return usageCli("invite set needs --uses or --ttl")
 		}
 		return c.call("PATCH", base+"/"+url.PathEscape(f.args[2]), body, 200, nil)
 	case "rm":
@@ -281,7 +303,7 @@ func (c *client) memberCmd(f *flags) error {
 			Items []struct {
 				ID, Access string
 				Since      int64
-				Until      *int64
+				Expires    *int64
 			}
 		}
 		if err := c.call("GET", base, nil, 200, &out); err != nil {
@@ -289,7 +311,7 @@ func (c *client) memberCmd(f *flags) error {
 		}
 		for _, m := range out.Items {
 			since := m.Since
-			fmt.Printf("%s\t%s\t%s\t%s\n", m.ID, m.Access, fmtTime(&since), fmtTime(m.Until))
+			fmt.Printf("%s\t%s\t%s\t%s\n", m.ID, m.Access, fmtTime(&since), fmtTime(m.Expires))
 		}
 		return nil
 	case "set":
@@ -297,9 +319,7 @@ func (c *client) memberCmd(f *flags) error {
 			return usageCli("member set takes a space, a visitor ID and a level")
 		}
 		body := map[string]any{"access": f.args[3]}
-		if f.has("until") {
-			body["until"] = f.str("until")
-		}
+		ttlFlag(f, "ttl", "ttl", body)
 		return c.call("PUT", base+"/"+url.PathEscape(f.args[2]), body, 200, nil)
 	case "rm":
 		if len(f.args) != 3 {

@@ -89,9 +89,9 @@ func TestHTTPValidation(t *testing.T) {
 		{"GET", sp + "/shared/*?timeout=5", 400, "invalid_parameter"},
 		{"GET", sp + "/shared/x/watch?timeout=0", 400, "invalid_parameter"},
 		{"GET", sp + "/shared/x/watch?timeout=56", 400, "invalid_parameter"},
-		{"GET", sp + "/shared/x/watch?version=-1", 400, "invalid_parameter"},
+		{"GET", sp + "/shared/x/watch?after=-1", 400, "invalid_parameter"},
 		{"GET", sp + "/shared/x/watch?since=0", 400, "invalid_parameter"},
-		{"GET", sp + "/shared/x/watch?version=1;2", 400, "invalid_parameter"},
+		{"GET", sp + "/shared/x/watch?after=1;2", 400, "invalid_parameter"},
 		{"POST", "/v1/spaces?label=poll", 400, "invalid_parameter"},
 		{"POST", "/v1/spaces?locked", 400, "invalid_parameter"},
 		{"POST", "/v1/visitors?x=1", 400, "invalid_parameter"},
@@ -144,7 +144,7 @@ func TestHTTPTokens(t *testing.T) {
 // FuzzRoute throws arbitrary paths and queries at the router. Nothing may
 // answer 500 or panic, and no file may appear outside spaces/.
 func FuzzRoute(f *testing.F) {
-	for _, s := range []string{"/v1/poll-cedar-pilot-mango/shared/x", "/v1/poll-cedar-pilot-mango/by/*/v", "/v1/a/../b", "/v1/%2e%2e/x/y", "/v1/cedar-pilot-mango-frost/to/me/x/watch?version=0&timeout=1"} {
+	for _, s := range []string{"/v1/poll-cedar-pilot-mango/shared/x", "/v1/poll-cedar-pilot-mango/by/*/v", "/v1/a/../b", "/v1/%2e%2e/x/y", "/v1/cedar-pilot-mango-frost/to/me/x/watch?after=0&timeout=1"} {
 		f.Add("PUT", s)
 		f.Add("GET", s)
 	}

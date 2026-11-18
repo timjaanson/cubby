@@ -35,6 +35,15 @@ func valueHeaders(h http.Header, e *store.Entry) {
 func etag(v int64) string { return `"` + strconv.FormatInt(v, 10) + `"` }
 
 func (s *Server) read(c *reqCtx, t store.Target) error {
+	if c.collect != nil {
+		// A batch check: compared inside the batch's transaction.
+		v, ok := parseUint(c.r.URL.Query().Get("ifVersion"))
+		if !ok {
+			return apierr.BadParam("ifVersion", "A check takes ifVersion: the version the key must still have, 0 for missing.")
+		}
+		*c.collect = append(*c.collect, store.WriteReq{Space: t.Space, Area: t.Area, Key: t.Key, Writer: c.visitor, IfVersion: &v, Check: true})
+		return nil
+	}
 	if err := s.rate(s.lim.readsPerIP, c.ip, 1, "rate_limited"); err != nil {
 		return err
 	}
@@ -306,19 +315,22 @@ func (s *Server) watch(c *reqCtx, t store.Target) error {
 		}
 		timeout = time.Duration(n) * time.Second
 	}
+	// after: the version to continue from. 0, the default, is everything
+	// that exists now first; "now" is only what changes from here on.
 	var from int64
-	if q.Has("version") {
-		n, ok := parseUint(q.Get("version"))
-		if !ok {
-			return apierr.BadParam("version", "version is the version from your last list or watch response, or 0.")
-		}
-		from = n
-	} else {
+	switch a := q.Get("after"); {
+	case a == "now":
 		seq, err := s.store.CurrentSeq(t.Space)
 		if err != nil {
 			return err
 		}
 		from = seq
+	case q.Has("after"):
+		n, ok := parseUint(a)
+		if !ok {
+			return apierr.BadParam("after", "after is the version from your last list or watch answer, 0 for everything that exists, or now.")
+		}
+		from = n
 	}
 	if c.live != nil {
 		return c.live.startWatch(c, t, from)

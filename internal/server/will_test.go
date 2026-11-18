@@ -84,7 +84,7 @@ func TestLastWillRechecksAccess(t *testing.T) {
 	if f := w.call(`1`, `{"id":1,"op":"will","path":"shared/door/pulse","body":"gone"}`); f.Status != 200 {
 		t.Fatalf("member will: %s", f.Body)
 	}
-	_, _, b := c.req("GET", sp+"/access", "", bearer(m)...)
+	_, _, b := c.req("GET", sp, "", bearer(m)...)
 	var a struct{ ID string }
 	json.Unmarshal([]byte(b), &a)
 	if s, _, _ := c.req("DELETE", sp+"/members/"+a.ID, "", o...); s != 200 {

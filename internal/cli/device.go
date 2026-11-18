@@ -29,11 +29,7 @@ func (c *client) deviceCmd(f *flags) error {
 		}
 		body := map[string]any{}
 		if f.has("ttl") {
-			d, err := time.ParseDuration(f.str("ttl"))
-			if err != nil {
-				return usageCli("--ttl takes a duration like 10m or 90s")
-			}
-			body["ttl"] = int64(d.Seconds())
+			body["ttl"] = f.str("ttl")
 		}
 		p, err := c.pairingCode(body)
 		if err != nil {
@@ -53,7 +49,7 @@ func (c *client) deviceCmd(f *flags) error {
 				State  string
 				Device *struct{ ID, Label string }
 			}
-			if err := c.call("GET", "/v1/me/pairing-codes/"+p.ID+"?wait=55", nil, 200, &st); err != nil {
+			if err := c.call("GET", "/v1/me/pairing-codes/"+p.ID+"?timeout=55", nil, 200, &st); err != nil {
 				return err
 			}
 			switch st.State {
@@ -274,16 +270,10 @@ func (c *client) apiKeyCmd(f *flags) error {
 		if f.has("label") {
 			body["label"] = f.str("label")
 		}
-		if f.has("until") {
-			if u := f.str("until"); u == "never" {
-				body["until"] = nil
-			} else {
-				body["until"] = u
-			}
-		}
+		ttlFlag(f, "ttl", "ttl", body)
 		var out struct {
 			ID, Key, Warning string
-			Until            *int64
+			Expires          *int64
 		}
 		if err := c.call("POST", "/v1/me/api-keys", body, 201, &out); err != nil {
 			return err
@@ -292,22 +282,22 @@ func (c *client) apiKeyCmd(f *flags) error {
 		if out.Warning != "" {
 			fmt.Fprintln(os.Stderr, "Warning:", out.Warning)
 		} else {
-			fmt.Fprintf(os.Stderr, "%s, valid until %s. Shown once.\n", out.ID, fmtTime(out.Until))
+			fmt.Fprintf(os.Stderr, "%s, valid until %s. Shown once.\n", out.ID, fmtTime(out.Expires))
 		}
 		return nil
 	case "ls":
 		var out struct {
 			Items []struct {
 				ID, Label, Space, Access string
-				Until, LastUsed          *int64
+				Expires, LastUsed        *int64
 			}
 		}
 		if err := c.call("GET", "/v1/me/api-keys", nil, 200, &out); err != nil {
 			return err
 		}
 		for _, k := range out.Items {
-			until := fmtTime(k.Until)
-			if k.Until == nil {
+			until := fmtTime(k.Expires)
+			if k.Expires == nil {
 				until = "never"
 			}
 			fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\n", k.ID, k.Space, k.Access, until, fmtTime(k.LastUsed), firstNonEmpty(k.Label, "-"))

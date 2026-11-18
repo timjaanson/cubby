@@ -18,7 +18,7 @@ type APIKey struct {
 	Access   access.Level `json:"access"`
 	Device   string       `json:"device"` // the device that minted it
 	Created  int64        `json:"created"`
-	Until    *int64       `json:"until"`
+	Until    *int64       `json:"expires"`
 	LastUsed *int64       `json:"lastUsed"`
 	Visitor  string       `json:"-"`
 }

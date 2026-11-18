@@ -12,7 +12,7 @@
 //
 // Headless: import { qrSvg } from ".../share.js" for an SVG QR code of any text.
 
-import { kv, devices, inviteLink } from "./kv.js"
+import { kv, visitor } from "./kv.js"
 
 // ---------- QR code: byte mode, error correction M, versions 1 to 40 ----------
 
@@ -240,6 +240,7 @@ const ANYONE = [
 ]
 
 // What each level means to the person choosing it.
+const LEVELS = ["read", "post", "all", "owner"]
 const LEVEL_NAMES = { read: "Can look", post: "Can add their own", all: "Can change everything", owner: "Owner" }
 
 const CSS = `
@@ -304,7 +305,7 @@ class CubbyShare extends Base {
     const root = this.shadowRoot
     if (!db) { root.replaceChildren(); return }
     let a
-    try { a = await db.access() } catch { a = null }
+    try { a = await db.open({ invite: null }) } catch { a = null }
     if (generation !== this._generation) return
     this._access = a
     const style = h("style", {}, CSS)
@@ -330,9 +331,9 @@ class CubbyShare extends Base {
     this.shadowRoot.append(dlg)
     const render = async () => {
       // Owners manage everything; members invite and see their own open invites.
-      const a = await db.access()
+      const a = await db.open({ invite: null })
       const owner = a.access === "owner"
-      const [invites, members] = await Promise.all([db.invites.list(), owner ? db.members() : []])
+      const [invites, members] = await Promise.all([db.invites.list(), owner ? db.members.list() : []])
       dlg.replaceChildren(
         h("button", { className: "close", "aria-label": "Close", onclick: () => dlg.close() }, "×"),
         h("h2", {}, "Share"),
@@ -356,7 +357,7 @@ class CubbyShare extends Base {
     )
     const make = async () => {
       const server = this.getAttribute("server") || undefined
-      const text = await devices(server ? { server } : {}).backup()
+      const text = await visitor(server ? { server } : {}).backup()
       const file = URL.createObjectURL(new Blob([text], { type: "application/json" }))
       box.replaceChildren(
         h("h3", {}, "Backup key"),
@@ -372,54 +373,40 @@ class CubbyShare extends Base {
     return box
   }
 
+  // One way to make an invite: the defaults (any number of people, 7
+  // days, your level) with the choices under More options.
   _invite(db, rerender, mine) {
-    const name = h("input", { type: "text", placeholder: "Who is it for?", "aria-label": "Who is it for?" })
+    const name = h("input", { type: "text", placeholder: "Who is it for? (optional)", "aria-label": "Who is it for?" })
     const result = h("div")
+    const top = mine === "owner" ? "all" : mine
+    const level = h("select", { "aria-label": "Level" },
+      ...Object.entries(LEVEL_NAMES).filter(([v]) => v !== "owner" && LEVELS.indexOf(v) <= LEVELS.indexOf(top))
+        .map(([v, t]) => h("option", { value: v, selected: v === top }, t)),
+      mine === "owner" ? h("option", { value: "owner" }, "Owner (one person, at most 7 days)") : null)
+    const uses = h("input", { type: "number", min: 1, placeholder: "any", style: "width:5em", "aria-label": "People" })
+    const days = h("input", { type: "number", min: 1, value: 7, style: "width:5em", "aria-label": "Days" })
+    const forever = h("input", { type: "checkbox", "aria-label": "No end" })
     const more = h("details", {},
       h("summary", { className: "muted" }, "More options"),
+      h("div", { className: "row" }, "Level", level),
+      h("div", { className: "row" }, "People", uses, "Days", days, h("label", {}, forever, " no end")),
     )
-    const uses = h("input", { type: "number", min: 1, value: 1, style: "width:5em", "aria-label": "Uses" })
-    const days = h("input", { type: "number", min: 1, value: 7, style: "width:5em", "aria-label": "Days" })
-    let armed = false
-    const forever = h("button", {
-      onclick: async e => {
-        if (!armed) {
-          armed = true
-          e.target.textContent = "Click again: anyone with this link can join, with no limit, until you cancel it"
-          return
-        }
-        await make({ uses: null, until: null })
-      },
-    }, "Link with no limits")
-    // Owners can hand ownership to one person: one use, 7 days.
-    let ownerArmed = false
-    const ownerLink = mine !== "owner" ? null : h("button", {
-      onclick: async e => {
-        if (!ownerArmed) {
-          ownerArmed = true
-          e.target.textContent = "Click again: whoever opens this link first becomes an owner, with all your rights"
-          return
-        }
-        await make({ uses: 1, access: "owner" })
-      },
-    }, "Owner link (one person, 7 days)")
-    more.append(
-      h("div", { className: "row" }, "Uses", uses, "Valid for", days, "days",
-        h("button", { onclick: () => make({ uses: Number(uses.value) || 1, until: `${Number(days.value) || 7}d` }) }, "Create")),
-      h("div", { className: "row" }, forever),
-    )
-    if (ownerLink) more.append(h("div", { className: "row" }, ownerLink))
-    const make = async o => {
+    const make = async () => {
       const label = name.value.trim()
-      const inv = await db.share({ label, ...o, base: this.getAttribute("base") || undefined })
+      const o = { label, base: this.getAttribute("base") || undefined }
+      if (level.value !== top) o.access = level.value
+      if (level.value === "owner") o.uses = 1
+      else if (uses.value) o.uses = Number(uses.value)
+      o.ttl = forever.checked && level.value !== "owner" ? null : `${Number(days.value) || 7}d`
+      if (forever.checked && o.ttl === null && !confirm("Anyone with this link can join until you cancel it. Continue?")) return
+      const inv = await db.invites.create(o)
       this.dispatchEvent(new CustomEvent("cubby-invite", { detail: inv, bubbles: true, composed: true }))
       const link = h("input", { type: "text", readOnly: true, className: "link", value: inv.link })
       const qr = h("div", { className: "qr" })
       qr.innerHTML = qrSvg(inv.link)
-      const limits = inv.uses === null ? "No limit on uses or time." :
-        `Works for ${inv.uses === 1 ? "one person" : `${inv.uses} people`} until ${when(inv.until)}.`
+      const who = inv.uses === null ? "anyone with the link" : inv.uses === 1 ? "one person" : `${inv.uses} people`
       result.replaceChildren(
-        h("p", {}, label ? `Invite for ${label}. ` : "", limits),
+        h("p", {}, label ? `Invite for ${label}: ` : "", `${LEVEL_NAMES[inv.access]}, ${who}, ${inv.expires ? "until " + when(inv.expires) : "no end"}.`),
         link,
         h("div", { className: "row" },
           h("button", { onclick: e => { navigator.clipboard?.writeText(inv.link); e.target.textContent = "Copied" } }, "Copy"),
@@ -431,13 +418,8 @@ class CubbyShare extends Base {
     }
     return h("section", {},
       h("h3", {}, "Invite"),
-      h("div", { className: "row" }, name),
-      h("div", { className: "row" },
-        h("button", { className: "main", onclick: () => make({ uses: 1 }) }, "Create personal link"),
-        h("button", { onclick: () => make({}) }, "Create group link"),
-        h("button", { onclick: () => make({ uses: 1, access: "read" }) }, "Create view-only link"),
-      ),
-      h("p", { className: "muted" }, `One person: one use, 7 days. A group link: 10 people, 7 days. People you invite get "${LEVEL_NAMES[mine === "owner" ? "all" : mine] || "Can look"}" unless the link says view-only.`),
+      h("div", { className: "row" }, name, h("button", { className: "main", onclick: make }, "Create link")),
+      h("p", { className: "muted" }, `A link works for anyone you send it to for 7 days and gives "${LEVEL_NAMES[top] || "Can look"}".`),
       more,
       result,
     )
@@ -448,22 +430,22 @@ class CubbyShare extends Base {
     const act = fn => async () => { await fn(); this._changed(); rerender() }
     const others = members.filter(m => m.id !== me)
     const level = m => m.access === "banned" ? h("span", { className: "muted" }, " · banned") :
-      h("select", { "aria-label": "Level", onchange: async e => { await db.owner.members.set(m.id, e.target.value); this._changed(); rerender() } },
+      h("select", { "aria-label": "Level", onchange: async e => { await db.members.set(m.id, e.target.value); this._changed(); rerender() } },
         ...Object.entries(LEVEL_NAMES).map(([v, t]) => h("option", { value: v, selected: v === m.access }, t)))
     return h("section", {},
       owner ? h("h3", {}, "People") : null,
       !owner ? null : others.length ? h("ul", {}, others.map(m => h("li", {},
-        h("span", {}, m.label || m.id, h("span", { className: "muted" }, ` · joined ${ago(m.since)}, active ${ago(m.lastUsedAt)}`)),
+        h("span", {}, m.label || m.id, h("span", { className: "muted" }, ` · joined ${ago(m.since)}, active ${ago(m.lastSeen)}`)),
         h("span", { className: "row" }, level(m),
-          h("button", { onclick: act(() => db.owner.members.remove(m.id)) }, m.access === "banned" ? "Lift ban" : "Remove")),
+          h("button", { onclick: act(() => db.members.remove(m.id)) }, m.access === "banned" ? "Lift ban" : "Remove")),
       ))) : h("p", { className: "muted" }, "Nobody has joined yet."),
       pending.length ? h("div", {},
         h("p", { className: "muted" }, "Open invites"),
         h("ul", {}, pending.map(t => h("li", {},
           h("span", {}, t.label || "Invite", h("span", { className: "muted" },
-            ` · ${t.usesLeft === null ? "no limit" : `${t.usesLeft} left`}, until ${when(t.until)}`)),
+            ` · ${t.uses === null ? "any number" : `${t.uses} left`}, ${t.expires ? "until " + when(t.expires) : "no end"}`)),
           h("span", { className: "row" },
-            h("button", { onclick: act(() => db.invites.update(t.id, { until: "7d" })) }, "Extend"),
+            h("button", { onclick: act(() => db.invites.update(t.id, { ttl: "7d" })) }, "Extend"),
             h("button", { onclick: act(() => t.members ? db.invites.update(t.id, { uses: 0 }) : db.invites.revoke(t.id)) }, "Cancel"),
           ),
         ))),
@@ -480,7 +462,7 @@ class CubbyShare extends Base {
           type: "radio", name: "anyone", checked: value === current,
           onchange: async e => {
             if (value !== "none" && !confirm(warning + " Continue?")) { e.target.checked = false; rerender(); return }
-            await db.owner.settings({ anyone: value })
+            await db.settings({ anyone: value })
             this._changed()
             rerender()
           },

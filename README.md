@@ -14,17 +14,20 @@ A small back-end for live web apps. One binary serves a key-value store with liv
 <button>Pizza</button> <button>Tacos</button> <p id="results"></p>
 
 <script type="module">
-import { kv, createSpace } from "https://cubby.example.com/kv.js"
+import { kv, visitor } from "https://cubby.example.com/kv.js"
 
-const space = location.hash.slice(1) || (await createSpace({ anyone: "post" })).space
-location.hash = space
+let space = new URLSearchParams(location.hash.slice(1)).get("space")
+if (!space) {
+  space = (await visitor().createSpace({ prefix: "poll", anyone: "post" })).space
+  location.hash = "space=" + space
+}
 const db = kv(space, { live: true })
 
 for (const b of document.querySelectorAll("button"))
-  b.onclick = () => db.mine.set("vote", b.textContent)    // your own key: nobody else can change it
+  b.onclick = () => db.by("me").set("vote", b.textContent)    // your own key: nobody else can change it
 
 const votes = new Map()
-db.by.watch("vote", c => c.deleted ? votes.delete(c.by) : votes.set(c.by, c.value), {
+db.by("*").watch("vote", c => c.deleted ? votes.delete(c.by) : votes.set(c.by, c.value), {
   onSync: () => results.textContent = ["Pizza", "Tacos"]
     .map(v => `${v} ${[...votes.values()].filter(x => x === v).length}`).join(", "),
 })

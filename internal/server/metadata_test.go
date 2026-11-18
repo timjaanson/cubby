@@ -43,7 +43,7 @@ func TestTTLWatchAndMetadata(t *testing.T) {
 	// The real long poll gets a marked deletion when the sweep runs.
 	done := make(chan string, 1)
 	go func() {
-		_, _, body := c.req("GET", path+"/watch?version="+itoa(version)+"&timeout=3", "")
+		_, _, body := c.req("GET", path+"/watch?after="+itoa(version)+"&timeout=3", "")
 		done <- body
 	}()
 	time.Sleep(1100 * time.Millisecond)
@@ -68,7 +68,7 @@ func TestTTLWatchAndMetadata(t *testing.T) {
 	}
 	// Reusing the key clears the expired flag.
 	c.req("PUT", path, "back", auth...)
-	_, _, b = c.req("GET", path+"/watch?version="+itoa(version), "")
+	_, _, b = c.req("GET", path+"/watch?after="+itoa(version), "")
 	if strings.Contains(b, `"expired":true`) {
 		t.Fatalf("stale expiry flag %s", b)
 	}
@@ -126,7 +126,7 @@ func TestLimitsAndBudgetsMatchConfiguration(t *testing.T) {
 	c := &tc{t: t, url: ts.URL, store: st, cfg: cfg}
 	_, _, b := c.req("GET", "/v1/limits", "")
 	limits := decode[map[string]any](t, b)
-	if limits["writes_per_minute"] != float64(1) || limits["write_burst"] != float64(2) || limits["watches_per_ip"] != float64(50) || limits["rate_limits"] != true {
+	if limits["writesPerMinute"] != float64(1) || limits["writeBurst"] != float64(2) || limits["watchesPerIp"] != float64(50) || limits["rateLimits"] != true {
 		t.Fatalf("server limits %s", b)
 	}
 	tok := c.open(space, "")
@@ -141,7 +141,7 @@ func TestLimitsAndBudgetsMatchConfiguration(t *testing.T) {
 			t.Fatalf("headers %v", h)
 		}
 	}
-	_, _, b = c.req("GET", "/v1/"+space+"/access", "", auth...)
+	_, _, b = c.req("GET", "/v1/"+space, "", auth...)
 	a := decode[struct {
 		Limits struct{ SpaceBytes, SpaceKeys int }
 		Usage  struct{ Bytes, Keys, VisitorBytes int }
@@ -158,7 +158,7 @@ func TestLimitsAndBudgetsMatchConfiguration(t *testing.T) {
 		t.Fatal("disabled budget advertised")
 	}
 	_, _, b = c.req("GET", "/v1/limits", "")
-	if decode[map[string]any](t, b)["rate_limits"] != false {
+	if decode[map[string]any](t, b)["rateLimits"] != false {
 		t.Fatalf("disabled limits %s", b)
 	}
 	status, _, b := c.req("POST", "/v1/time", "")

@@ -49,7 +49,7 @@ func TestCLISharing(t *testing.T) {
 	if out, code := cli(t, owner, "set", space+"/shared/item.1", "milk"); code != 0 {
 		t.Fatalf("owner set: %d %s", code, out)
 	}
-	if out, _ := cli(t, owner, "settings", space); !strings.Contains(out, "anyone\tnone\ninvite\tpost") {
+	if out, _ := cli(t, owner, "settings", space); !strings.Contains(out, "anyone\tnone\ninviters\tpost") {
 		t.Fatalf("settings: %q", out)
 	}
 	// A stranger sees nothing: exit 1, like a missing space.
@@ -57,19 +57,19 @@ func TestCLISharing(t *testing.T) {
 		t.Fatalf("stranger get: %d", code)
 	}
 	link, code := cli(t, owner, "invite", "new", space, "--label", "anna", "--uses", "1", "--link", "https://example.com/list/#list="+space)
-	if code != 0 || !strings.Contains(link, "&invite=inv_") {
+	if code != 0 || !strings.Contains(link, "&invite=inv_") || !strings.Contains(link, "space="+space) {
 		t.Fatalf("invite new: %d %q", code, link)
 	}
-	if out, code := cli(t, member, "join", space, link); code != 0 || out != "all" {
+	if out, code := cli(t, member, "join", link); code != 0 || out != "all" {
 		t.Fatalf("join: %d %q", code, out)
 	}
 	if out, _ := cli(t, member, "get", space+"/shared/item.1"); out != "milk" {
 		t.Fatalf("member get: %q", out)
 	}
-	if out, _ := cli(t, member, "access", space); out != "all" {
+	if out, _ := cli(t, member, "info", space); !strings.Contains(out, `"access": "all"`) {
 		t.Fatalf("access: %q", out)
 	}
-	if _, code := cli(t, stranger, "join", space, link); code != 3 {
+	if _, code := cli(t, stranger, "join", link); code != 3 {
 		t.Fatalf("used-up invite: %d", code)
 	}
 	if out, _ := cli(t, owner, "invite", "ls", space); !strings.Contains(out, "used_up") || !strings.Contains(out, "anna") {
@@ -116,7 +116,7 @@ func TestCLISharing(t *testing.T) {
 	if out, code := cli(t, stranger, "login", file); code != 0 || out != ownerID {
 		t.Fatalf("login: %d %q, want %s", code, out, ownerID)
 	}
-	if out, _ := cli(t, stranger, "access", space); out != "owner" {
+	if out, _ := cli(t, stranger, "info", space); !strings.Contains(out, `"access": "owner"`) {
 		t.Fatalf("access after login: %q", out)
 	}
 	if _, code := cli(t, stranger, "drop", space, "--yes"); code != 0 {
@@ -146,7 +146,7 @@ func TestCLIMetadata(t *testing.T) {
 	t.Setenv("CUBBY_API_KEY", "")
 	home := t.TempDir()
 	out, code := cli(t, home, "limits")
-	if code != 0 || !strings.Contains(out, `"writes_per_minute": 120`) {
+	if code != 0 || !strings.Contains(out, `"writesPerMinute": 120`) {
 		t.Fatalf("limits %d %s", code, out)
 	}
 	out, code = cli(t, home, "new")
@@ -155,7 +155,7 @@ func TestCLIMetadata(t *testing.T) {
 	}
 	space := strings.Split(out, "\n")[0]
 	path := space + "/shared/lease"
-	out, code = cli(t, home, "set", path, "holder", "--ttl", "30s", "--create")
+	out, code = cli(t, home, "set", path, "holder", "--ttl", "30s", "--if-version", "0")
 	if code != 0 {
 		t.Fatalf("set ttl %d %s", code, out)
 	}
@@ -168,7 +168,7 @@ func TestCLIMetadata(t *testing.T) {
 			t.Fatalf("deadline %v -> %d", args, code)
 		}
 	}
-	out, code = cli(t, home, "limits", space)
+	out, code = cli(t, home, "info", space)
 	if code != 0 || !strings.Contains(out, `"keys": 1`) || !strings.Contains(out, `"rateLimits": false`) {
 		t.Fatalf("space limits %d %s", code, out)
 	}
@@ -176,7 +176,7 @@ func TestCLIMetadata(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "offset_ms\t") || !strings.Contains(out, "rtt_ms\t") {
 		t.Fatalf("time %d %s", code, out)
 	}
-	if _, code = cli(t, home, "set", path, "x", "--ttl", "100ms"); code != 64 {
+	if _, code = cli(t, home, "set", path, "x", "--ttl", "100ms"); code != 5 {
 		t.Fatalf("fractional ttl %d", code)
 	}
 }
@@ -233,7 +233,7 @@ func TestCLIToInboxAndBans(t *testing.T) {
 	if _, code := cli(t, guest, "get", space+"/users/me/draft"); code != 5 {
 		t.Fatalf("old users/ path: %d", code)
 	}
-	if _, code := cli(t, owner, "member", "set", space, guestID, "banned", "--until", "1h"); code != 0 {
+	if _, code := cli(t, owner, "member", "set", space, guestID, "banned", "--ttl", "1h"); code != 0 {
 		t.Fatal("ban")
 	}
 	if out, _ := cli(t, owner, "member", "ls", space); !strings.Contains(out, guestID+"\tbanned\t") {
@@ -303,7 +303,7 @@ func TestCLIDevices(t *testing.T) {
 		t.Fatalf("api key creates a space: %d", code)
 	}
 	t.Setenv("CUBBY_API_KEY", "")
-	if out, _ := cli(t, laptop, "api-key", "ls"); !strings.Contains(out, space+"\tpost\t") || !strings.HasSuffix(out, "hook") {
+	if out, _ := cli(t, laptop, "api-key", "ls"); !strings.Contains(out, space+"\tall\t") || !strings.HasSuffix(out, "hook") {
 		t.Fatalf("api-key ls: %q", out)
 	}
 	// The desk's token is gone; it gets a new visitor that can't see the space.

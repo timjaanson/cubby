@@ -1,5 +1,9 @@
 // cubby client. A guide for whoever writes code with this, person or coding agent.
 //
+// Two handles:
+//   kv(space)    one space: its data, its members, its invites
+//   visitor()    you: your ID, your spaces, your devices, your API keys
+//
 // Spaces are PRIVATE by default: only the creator (the owner) and people they
 // invite get in. Everyone else gets 404 no_space, exactly as if the space
 // didn't exist, so a missing invite looks like a wrong name. Check both.
@@ -11,59 +15,61 @@
 //
 // Everyone has one level per space. me.access is yours ("none" outside):
 //   read    read the space, and your own inbox
-//   post    also write your own keys: db.mine, db.to()
+//   post    also write your own keys: db.by("me"), db.to(id)
 //   all     also write common keys: db.shared
 //   owner   also moderate, change settings, manage members
 //
-// Where data goes:
+// Areas mirror the HTTP paths:
 //   db.shared             common keys, for "all": a title, a list, a board
-//   db.mine               your own keys: only you write them, everyone reads them
-//   db.by.list("msg.*")   everyone's own keys together; each item's by is its author
+//   db.by("me")           your own keys: only you write them, everyone reads them
+//   db.by("*")            everyone's own keys together; each item's by is its author
 //   db.to(id)             for one reader: a visitor ID, "owners", or "me" (yourself)
-// Messages, comments, votes and names go in db.mine and are read with db.by,
-// never in db.shared, so nobody can edit or delete someone else's. Owners can
-// still delete them, as moderation.
+//   db.inbox("*")         what was sent to you; db.inbox.owners("*") for owners
+// Messages, comments, votes and names go in db.by("me") and are read with
+// db.by("*"), never in db.shared, so nobody can edit or delete someone
+// else's. Owners can still delete them, as moderation.
 //
-// Creating a space (once from a shell with `cubby new`, or per room in the page):
-//   const { space } = await createSpace()   // this browser's visitor owns it
-// Each browser signs in with its own key, made and kept by kv.js. To get back
-// in from elsewhere: pair another device, or keep devices().backup() somewhere safe.
-// A page that is a room, shared by its link? openRoom("board") creates or finds
-// the space, opens it and gives await room.link(). Members can share it too.
+// Every area has get, set, delete, update, add, series, list, watch, pulse,
+// pulses and will. "*" areas only read: list, watch, pulses.
+//
+// Creating a space (once from a shell with `cubby new`, or in the page):
+//   const { space } = await visitor().createSpace()   // this browser's visitor owns it
+// To get back in from elsewhere: pair another device, or keep
+// visitor().backup() somewhere safe. Your spaces on every device:
+// visitor().spaces().
 //
 // Inviting. An invite gives a level, at most your own:
-//   const { link } = await db.share()                    // all, 10 uses, 7 days
-//   const { link } = await db.share({ access: "post" })  // can't change db.shared
+//   const { link } = await db.invites.create()                   // all, any uses, 7 days
+//   const { link } = await db.invites.create({ access: "post" }) // can't change db.shared
+// The link is this page with #space=NAME&invite=inv_... A page that takes its
+// space from the link reads it with new URLSearchParams(location.hash.slice(1)).
 //   Ready-made UI with link, QR code and members: import "<server>/share.js"
 //   and put <cubby-share space="..."></cubby-share> in the page.
-// Members: db.members(). Owners: db.owner.members.set(id, level, { until }) with
-// "read", "post", "all", "owner" or "banned", and .remove(id). Anyone: db.leave().
+// Members: db.members.list(), .set(id, level, { ttl }) with "read", "post",
+// "all", "owner" or "banned" (owners), .remove(id), .remove("me") to leave.
 //
 // Open a space to everyone only when the user asked for it:
-//   createSpace({ anyone: "read" })   anyone reads: status pages
-//   createSpace({ anyone: "post" })   anyone reads and posts their own: polls, RSVPs
-//   createSpace({ anyone: "all" })    anyone with the name reads and writes
+//   visitor().createSpace({ anyone: "read" })  anyone reads: status pages
+//   visitor().createSpace({ anyone: "post" })  anyone reads and posts their own: polls, RSVPs
+//   visitor().createSpace({ anyone: "all" })   anyone with the name reads and writes
 //
 // Live interaction (a board, a quiz, a game)? kv(SPACE, { live: true }): the same
 // API over one WebSocket, falling back to HTTP by itself.
 // Pulses are values that are never stored, for cursors and reactions:
-//   db.mine.pulse("cursor", { x, y })
-//   db.by.onPulse("cursor", p => draw(p.by, p.value))
+//   db.by("me").pulse("cursor", { x, y })
+//   db.by("*").pulses("cursor", p => draw(p.by, p.value))
 //   db.presence("here", { value: { name } })     // .peers, .onJoin, .onLeave
 //
-// Another device of the same person isn't sharing: devices().pair() and accept().
+// Units: a time is ms since 1970 (or a Date); a duration (ttl, interval) is
+// seconds or a string like "90s", "10m", "12h", "14d".
 //
 // Never put an invite (inv_...), API key (cubby_...) or backup key in page source:
 // anyone who loads the page could use it. Invite links are for sending to people.
 //
-// Several keys at once, all or nothing: db.batch([{ set: "shared/title", value },
-// { delete: "shared/old" }, { add: "shared/temp", value: 21.4, t, ttl }]). Every space you belong to, on any of your
-// devices: spaces().
-//
-// Docs: docs/usage.md in the cubby repository. Exports: kv, createSpace,
-// spaces, openRoom, devices, takeInvite, inviteLink, newName, validSpace, KvError.
+// Docs: docs/usage.md in the cubby repository. Exports: kv, visitor, KvError.
 
 const SERVER = new URL(".", import.meta.url).href.replace(/\/$/, "")
+
 
 export class KvError extends Error {
   constructor(status, code, message, details = {}) {
@@ -109,10 +115,10 @@ const WORDS = "__CUBBY_WORDS__".split(" ")
 const MAX_LABEL = 35
 
 // A space name is 16 to 63 lowercase letters, digits and single hyphens.
-export const validSpace = name => typeof name === "string" && name.length >= 16 && name.length <= 63 && SPACE_RE.test(name)
+const validSpace = name => typeof name === "string" && name.length >= 16 && name.length <= 63 && SPACE_RE.test(name)
 
 // newName returns the label (cleaned up) and four random words, 48 random bits.
-export function newName(label = "") {
+function newName(label = "") {
   label = String(label).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, MAX_LABEL).replace(/-+$/, "")
   // 65536 is a multiple of 4096, so the low 12 bits are unbiased. Four
   // 3-letter words would be one character short of a valid name; redraw those.
@@ -375,7 +381,7 @@ const pulseReport = (() => {
       parts.push(`${path.replace(/\/pulse$/, "")} ${bits.join(", ")}`)
     }
     console.warn(`cubby: pulses throttled since the last report: ${parts.join("; ")}. ` +
-      "The newest value per key is always sent. Pass { maxRate } to pulse() or pulseRate to kv() to change the limit.")
+      "The newest value per key is always sent. Pass { maxRate } to pulse() to change the limit.")
     counts = new Map(); last = Date.now()
   }
   return {
@@ -392,7 +398,9 @@ const pulseReport = (() => {
   }
 })()
 
+
 export function kv(space, opts = {}) {
+  checkOptions(opts, ["server", "fetch", "keyName", "credentials", "apiKey", "WebSocket", "live"], "kv()")
   if (!validSpace(space)) {
     const suggestion = newName(String(space ?? ""))
     throw new KvError(0, "invalid_space", `"${space}" isn't a valid space name. Try ${suggestion}.`, { suggestion })
@@ -401,8 +409,8 @@ export function kv(space, opts = {}) {
   const fetchFn = opts.fetch || globalThis.fetch.bind(globalThis)
   const ident = identity(server, opts.keyName || "cubby:" + server, fetchFn, { credentials: opts.credentials, apiKey: opts.apiKey })
   const WS = opts.WebSocket || globalThis.WebSocket
-  const pulseRate = opts.pulseRate ?? 20
   const live = opts.live && typeof WS === "function" ? makeLive(server.replace(/^http/, "ws") + "/v1/" + space + "/live", WS) : null
+
 
   // auth: the request needs a signed-in device, and registers this one if
   // it isn't yet. Without auth, whatever token there is still goes along, so
@@ -454,10 +462,6 @@ export function kv(space, opts = {}) {
           continue
         }
       }
-      if (dataPath && !read && (method !== "POST" || path.endsWith("/series") || path === "batch")) {
-        const header = res.headers.get("RateLimit")
-        db.writeBudget = header ? parseBudget(header) : null
-      }
       return res
     }
   }
@@ -474,7 +478,7 @@ export function kv(space, opts = {}) {
 
   // Per path: when the last send went out, and the value waiting for the next slot.
   const throttles = new Map()
-  function throttledPulse(path, body, rate, report = true) {
+  function throttledPulse(path, body, rate = 20, report = true) {
     if (!(rate > 0) || rate === Infinity) return sendPulse(path, body)
     const gap = 1000 / rate
     let t = throttles.get(path)
@@ -501,133 +505,166 @@ export function kv(space, opts = {}) {
   // mine: this visitor made the last write or the delete.
   const withMine = e => ({ ...e, mine: !!e.by && e.by === ident.visitorId() })
 
-  // other: for another visitor's area, the ID only they may write under.
-  // Owners may still delete there; the server decides that.
-  function area(prefix, { needsAuth = false, other = null } = {}) {
-    const checkWrite = () => {
-      if (other && ident.visitorId() !== other) throw new KvError(0, "not_yours", "This is another visitor's area. Only they can write it.")
-    }
-    const pathOf = async target => {
-      const p = typeof prefix === "function" ? await prefix() : prefix
-      return `${p}/${target}`
-    }
+  // An area is a path prefix like "shared" or "by/u_...". prefix may be a
+  // function for "by/me", whose ID is known only after signing in. auth:
+  // reads need a signed-in visitor. other: another visitor's area, where only
+  // they write (owners may still delete; the server decides). byAuthor: the
+  // area spans every author, so entries differ by who wrote them.
+  function makeArea(prefix, { auth = false, other = null, byAuthor = false } = {}) {
+    const pathOf = async target => `${typeof prefix === "function" ? await prefix() : prefix}/${target}`
+    return { pathOf, auth, other, byAuthor }
+  }
 
-    const a = {
-      async getEntry(key) {
+  function checkWrite(a) {
+    if (a.other && ident.visitorId() !== a.other) throw new KvError(0, "not_yours", "This is another visitor's area. Only they can write it.")
+  }
+
+  function jsonBody(value) {
+    const body = JSON.stringify(value)
+    if (body === undefined) throw new KvError(0, "invalid_value", "That value can't be stored as JSON.")
+    return body
+  }
+
+  // The methods of one area. Every write returns what the server answered.
+  function areaMethods(a) {
+    const m = {
+      // The entry for key: { key, value, version, by, mine, t?, expires? },
+      // the same shape as list items and watch changes. null if it doesn't exist.
+      async get(key) {
         checkKey(key)
-        const res = await request("GET", await pathOf(key), { auth: needsAuth })
+        const res = await request("GET", await a.pathOf(key), { auth: a.auth })
         if (await missingKey(res)) return null
-        if (!res.ok) throw await fail(res)
+        if (!res.ok) throw await errorFrom(res)
         const version = Number((res.headers.get("ETag") || "").replace(/"/g, ""))
         const text = await res.text()
         const isJSON = (res.headers.get("Content-Type") || "").startsWith("application/json")
-        const entry = { value: isJSON ? JSON.parse(text) : text, version, by: res.headers.get("KV-By") || undefined }
+        const entry = { key, value: isJSON ? JSON.parse(text) : text, version, by: res.headers.get("KV-By") || undefined }
         const t = res.headers.get("KV-Time")
         if (t) entry.t = Number(t)
         const expires = res.headers.get("KV-Expires")
         if (expires) entry.expires = Number(expires)
         return withMine(entry)
       },
-      async get(key) {
-        const e = await a.getEntry(key)
-        return e ? e.value : null
-      },
+      // { version }. Options: ifVersion (0: only if missing), ttl, ifBefore.
       async set(key, value, o = {}) {
         checkKey(key)
-        checkWrite()
-        const body = JSON.stringify(value)
-        if (body === undefined) throw new KvError(0, "invalid_value", "That value can't be stored as JSON.")
-        const res = await request("PUT", await pathOf(key), { body, auth: true, query: { ifVersion: o.ifVersion, ttl: o.ttl, ifBefore: o.ifBefore } })
-        if (!res.ok) throw await fail(res)
-        return (await res.json()).version
+        checkOptions(o, ["ifVersion", "ttl", "ifBefore"], "set()")
+        checkWrite(a)
+        const res = await request("PUT", await a.pathOf(key), { body: jsonBody(value), auth: true, query: writeQuery(o) })
+        if (!res.ok) throw await errorFrom(res)
+        return res.json()
       },
+      // { version }, or null if there was nothing to delete.
       async delete(key, o = {}) {
         checkKey(key)
-        const res = await request("DELETE", await pathOf(key), { auth: true, query: { ifVersion: o.ifVersion, ifBefore: o.ifBefore } })
-        if (await missingKey(res)) return false
-        if (!res.ok) throw await fail(res)
-        return true
+        checkOptions(o, ["ifVersion", "ifBefore"], "delete()")
+        const res = await request("DELETE", await a.pathOf(key), { auth: true, query: writeQuery(o) })
+        if (await missingKey(res)) return null
+        if (!res.ok) throw await errorFrom(res)
+        return res.json()
       },
+      // Read, change with fn, write back with ifVersion; again on a conflict.
+      // fn gets the value (null if missing) and returns the new one, or
+      // undefined to leave it. Resolves with the entry as it is now.
       async update(key, fn, o = {}) {
-        const retries = o.retries ?? 10
+        checkOptions(o, ["ttl", "ifBefore", "retries"], "update()")
+        const { retries = 10, ...write } = o
         for (let i = 0; ; i++) {
-          const cur = await a.getEntry(key)
+          const cur = await m.get(key)
           const next = fn(cur ? cur.value : null)
-          if (next === undefined || (cur && JSON.stringify(next) === JSON.stringify(cur.value))) return cur ? cur.value : null
+          if (next === undefined || (cur && JSON.stringify(next) === JSON.stringify(cur.value))) return cur
           try {
-            await a.set(key, next, { ...o, ifVersion: cur ? cur.version : 0 })
-            return next
+            const { version } = await m.set(key, next, { ...write, ifVersion: cur ? cur.version : 0 })
+            return withMine({ key, value: next, version, by: ident.visitorId() })
           } catch (err) {
             if (err.code !== "version_conflict" || i >= retries) throw err
             await sleep(50 + Math.random() * 150)
           }
         }
       },
-      // add("temp", 21.4) adds one point; value can be any JSON value, an
-      // object is one point. add("env.*", { temp: 21.4, rh: 45 }) adds one
-      // point to env.temp and one to env.rh. The target decides, never the value.
-      // Options: t (ms, for a late reading; the same t replaces that point),
-      // ttl (seconds after t the point is removed), ifBefore.
-      async add(target, value, o = {}) {
-        checkKey(target, true)
-        checkWrite()
-        const batch = target.endsWith("*")
-        if (batch && (value === null || typeof value !== "object" || Array.isArray(value))) {
-          throw new KvError(0, "batch_needs_object", `Adding to ${target} takes an object like { temp: 21.4 }; each property becomes a point in its own series.`)
-        }
-        const body = JSON.stringify(value)
-        if (body === undefined) throw new KvError(0, "invalid_value", "That value can't be stored as JSON.")
-        const res = await request("POST", (await pathOf(target)) + "/series", { body, auth: true, query: { t: o.t, ttl: o.ttl, ifBefore: o.ifBefore } })
-        if (!res.ok) throw await fail(res)
-        return res.json()
-      },
-      // One request. Points come oldest first: pass next back as since for
-      // more. With order: "desc" they come newest first: pass next back as
-      // until. until is exclusive, like since. null if the key doesn't exist.
-      async series(key, o = {}) {
+      // Adds a point to the series at key: { version, t }. Options: t (the
+      // reading's own time; the same t replaces that point), ttl (how long
+      // after t the point is kept), ifBefore.
+      async add(key, value, o = {}) {
         checkKey(key)
-        const res = await request("GET", (await pathOf(key)) + "/series", { auth: needsAuth, query: { since: o.since, until: o.until, order: o.order, limit: o.limit } })
-        if (await missingKey(res)) return null
-        if (!res.ok) throw await fail(res)
+        checkOptions(o, ["t", "ttl", "ifBefore"], "add()")
+        checkWrite(a)
+        const res = await request("POST", (await a.pathOf(key)) + "/series", { body: jsonBody(value), auth: true, query: writeQuery(o) })
+        if (!res.ok) throw await errorFrom(res)
         return res.json()
       },
-      list: (target, o) => list(pathOf, needsAuth, target, o),
-      watch: (target, onChange, o) => watch(pathOf, needsAuth, target, onChange, o),
+      // One page of points, newest first: { items: [{ t, value, expires? }],
+      // version, next }. since (inclusive) and before (exclusive) bound them;
+      // order "asc" gives oldest first; pass next back as after. A pattern
+      // like "env.*" reads every series under it, merged by time, each item
+      // with its key. null if a single key doesn't exist.
+      async series(key, o = {}) {
+        checkKey(key, true)
+        checkOptions(o, ["since", "before", "order", "limit", "after"], "series()")
+        const query = { since: timeMs(o.since), before: timeMs(o.before), order: o.order, limit: o.limit, after: o.after }
+        const res = await request("GET", (await a.pathOf(key)) + "/series", { auth: a.auth, query })
+        if (await missingKey(res)) return null
+        if (!res.ok) throw await errorFrom(res)
+        return res.json()
+      },
+      list: (pattern, o) => list(a, pattern, o),
+      watch: (target, onChange, o) => watch(a, target, onChange, o),
       // Pulses are never stored. pulse() hands a value to whoever is
       // listening right now; nothing keeps it, so get() and watch() never
       // see it. For cursors, drags, reactions: things sent often, or that
       // matter as events rather than as state.
       //
-      // At most maxRate per second per key (default 20, kv option pulseRate).
-      // Faster sends wait for the next slot, and a newer value replaces one
-      // still waiting, so the latest always goes out. Resolves true when
-      // sent, false when replaced. maxRate: 0 sends everything at once.
+      // At most maxRate per second per key (default 20). Faster sends wait
+      // for the next slot, and a newer value replaces one still waiting, so
+      // the latest always goes out. Resolves true when sent, false when
+      // replaced. maxRate: 0 sends everything at once.
       async pulse(key, value, o = {}) {
         checkKey(key)
-        checkWrite()
-        const body = JSON.stringify(value)
-        if (body === undefined) throw new KvError(0, "invalid_value", "That value can't be sent as JSON.")
-        const path = (await pathOf(key)) + "/pulse"
-        return throttledPulse(path, body, o.maxRate ?? pulseRate, !o[QUIET])
+        checkOptions(o, ["maxRate", QUIET], "pulse()")
+        checkWrite(a)
+        const path = (await a.pathOf(key)) + "/pulse"
+        return throttledPulse(path, jsonBody(value), o.maxRate ?? 20, !o[QUIET])
       },
-      onPulse: (target, onPulse, o) => listenPulses(pathOf, needsAuth, target, onPulse, o),
+      pulses: (target, onPulse, o) => listenPulses(a, target, onPulse, o),
       // A last will: a pulse the server sends for you when your live
       // connection ends without you clearing it, such as a closed tab. Only
       // with live: true; over HTTP it's kept and does nothing, so the same
       // code works either way. Resolves with a function that clears it.
       async will(key, value) {
         checkKey(key)
-        checkWrite()
-        const body = JSON.stringify(value)
-        if (body === undefined) throw new KvError(0, "invalid_value", "That value can't be sent as JSON.")
-        const path = (await pathOf(key)) + "/pulse"
+        checkWrite(a)
+        const body = jsonBody(value)
+        const path = (await a.pathOf(key)) + "/pulse"
         if (!live) return () => {}
         const res = await live.setWill((await ident.get()).token, path, body)
-        if (res && !res.ok) throw await fail(res)
+        if (res && !res.ok) throw await errorFrom(res)
         return () => live.clearWill(path)
       },
     }
-    return a
+    return m
+  }
+
+  // A "*" area spans several: it lists, watches and listens, and says so
+  // when asked to do anything else.
+  function readOnly(a, name, hint) {
+    const all = areaMethods(a)
+    const out = { list: all.list, watch: all.watch, pulses: all.pulses }
+    for (const k of ["get", "set", "delete", "update", "add", "series", "pulse", "will"]) {
+      out[k] = async () => { throw new KvError(0, "read_only", `${name} spans several areas: it lists, watches and listens to pulses. ${hint}`) }
+    }
+    return out
+  }
+
+  // One page of entries matching pattern, in key order (order "desc" for
+  // the reverse): { items, version, next }. Pass next back as after for
+  // the following page; version starts a watch right after this list.
+  async function list(a, pattern, o = {}) {
+    checkKey(pattern, true)
+    checkOptions(o, ["limit", "order", "after"], "list()")
+    const res = await request("GET", await a.pathOf(pattern), { auth: a.auth, query: { limit: o.limit, order: o.order, after: o.after } })
+    if (!res.ok) throw await errorFrom(res)
+    const body = await res.json()
+    return { ...body, items: body.items.map(withMine) }
   }
 
   // Who else is here, from pulses on by/{id}/{key}: a heartbeat every
@@ -637,11 +674,12 @@ export function kv(space, opts = {}) {
   // leaving shows over HTTP. peers never includes you.
   function presence(key, o = {}) {
     checkKey(key)
-    const interval = o.interval ?? 2000
-    const timeout = o.timeout ?? interval * 3
+    checkOptions(o, ["value", "interval", "timeout", "onError"], "presence()")
+    const interval = durationMs(o.interval ?? 2, "interval")
+    const timeout = o.timeout === undefined ? interval * 3 : durationMs(o.timeout, "timeout")
     const warn = o.onError || (err => console.warn("cubby presence:", err))
     const hasWin = typeof window !== "undefined" && typeof window.addEventListener === "function"
-    const mine = db.mine
+    const mine = db.by("me")
     let value = o.value ?? null, stopped = false, clearWill = null
     const peers = new Map()
     const h = {
@@ -660,7 +698,7 @@ export function kv(space, opts = {}) {
     }
     // The helper's own sends coalesce on purpose, so they aren't reported.
     const beat = () => { if (!stopped) mine.pulse(key, { v: value }, { [QUIET]: true }).catch(warn) }
-    const stopListen = db.by.onPulse(key, p => {
+    const stopListen = db.by("*").pulses(key, p => {
       if (p.mine || !p.by || stopped) return
       const v = p.value
       if (v && typeof v === "object" && v.left === true) return leave(p.by)
@@ -699,51 +737,28 @@ export function kv(space, opts = {}) {
     return h
   }
 
-  async function list(pathOf, auth, target, o = {}) {
-    checkKey(target, true)
-    const limit = o.limit ?? Infinity
-    const items = []
-    let after, version
-    for (;;) {
-      const res = await request("GET", await pathOf(target), {
-        auth, query: { limit: Math.min(1000, limit - items.length), order: o.order, after },
-      })
-      if (!res.ok) throw await fail(res)
-      const body = await res.json()
-      if (version === undefined) version = body.version
-      items.push(...body.items.map(withMine))
-      if (!body.next || items.length >= limit) return { items, version }
-      after = body.next
-    }
-  }
 
-  // Everyone's own keys, across by/*/.
-  const byAll = async t => `by/*/${t}`
-
-  // from:
+  // after:
   //   0 (default)   every existing key first, then changes
   //   "now"         only changes from now on
-  //   a list result continue right after that list
-  //   a version     continue after that version
+  //   a version     continue after that version (a list's or watch's version)
   // After a 410 (the version is too old, say after a week asleep) a watch with
   // state starts again from 0 and reports keys it knew that are gone as
-  // deleted. It knows the keys it has delivered, plus a list's items. A "now"
-  // watch skips ahead to now instead. Either way the next onSync has resync: true.
-  function watch(pathOf, auth, target, onChange, o = {}) {
+  // deleted. A "now" watch skips ahead to now instead. Either way the next
+  // onSync has resync: true.
+  function watch(a, target, onChange, o = {}) {
+    const { pathOf, auth, byAuthor } = a
     checkKey(target, true)
-    const fromList = o.from !== null && typeof o.from === "object"
-    if (fromList && !(Array.isArray(o.from.items) && Number.isSafeInteger(o.from.version))) {
-      throw new KvError(0, "invalid_option", "from takes 0, \"now\", a version, or a result of list().")
-    }
-    let from = fromList ? o.from.version : (o.from ?? 0)
+    checkOptions(o, ["after", "onSync", "onError"], "watch()")
+    let from = o.after ?? 0
     if (from !== "now" && !(Number.isSafeInteger(from) && from >= 0)) {
-      throw new KvError(0, "invalid_option", "from takes 0, \"now\", a version, or a result of list().")
+      throw new KvError(0, "invalid_option", "after takes 0, \"now\" or a version.")
     }
     const onlyNew = from === "now"
     // One entry: its key and, across several areas, whose it is. Under
     // shared/ by is just the last writer, so it isn't part of the entry.
-    const entryId = e => JSON.stringify([pathOf === byAll ? e.by || "" : "", e.from || "", e.to || "", e.key])
-    const known = new Set(fromList ? o.from.items.map(entryId) : [])
+    const entryId = e => JSON.stringify([byAuthor ? e.by || "" : "", e.from || "", e.to || "", e.key])
+    const known = new Set()
     const onSync = o.onSync || (() => {})
     const onError = o.onError || (err => console.warn("cubby watch:", err))
     const hasDoc = typeof document !== "undefined"
@@ -854,7 +869,7 @@ export function kv(space, opts = {}) {
       }
       const path = await pathOf(target)
       if (stopped || !live.isOpen()) return true
-      sub = live.subscribe(cur?.token, path + "/watch", from === "now" ? undefined : { version: String(from) }, handle)
+      sub = live.subscribe(cur?.token, path + "/watch", { after: String(from) }, handle)
       const end = await sub.done
       sub = null
       if (!end.frame) return true // the connection closed, or stop()
@@ -892,7 +907,7 @@ export function kv(space, opts = {}) {
         let res, body
         try {
           res = await request("GET", (await pathOf(target)) + "/watch", {
-            auth, signal: controller.signal, query: { version: from === "now" ? undefined : from },
+            auth, signal: controller.signal, query: { after: from },
           })
           if (res.ok) body = await res.json()
         } catch (err) {
@@ -938,8 +953,10 @@ export function kv(space, opts = {}) {
   // HTTP long polls otherwise; switching loses nothing still in the
   // server's short window. onMissed runs when some were dropped: the
   // listener fell more than a few seconds or 256 pulses behind.
-  function listenPulses(pathOf, auth, target, onPulse, o = {}) {
+  function listenPulses(a, target, onPulse, o = {}) {
+    const { pathOf, auth } = a
     checkKey(target, true)
+    checkOptions(o, ["onError", "onMissed"], "pulses()")
     const onError = o.onError || (err => console.warn("cubby pulses:", err))
     const onMissed = o.onMissed || (() => {})
     const hasDoc = typeof document !== "undefined"
@@ -1035,185 +1052,150 @@ export function kv(space, opts = {}) {
     }
   }
 
-  const myArea = async () => "by/" + (await ident.get()).id
+  const me = async () => "by/" + (await ident.get()).id
+  const byAreas = new Map()
 
-  // The recipient's side of to/: read and delete only. prefix is "" or "owners/".
-  function inboxOf(prefix) {
-    const all = async t => `inbox/${prefix}*/${t}`
-    const box = {
-      list: (target, o) => list(all, true, target, o),
-      watch: (target, onChange, o) => watch(all, true, target, onChange, o),
-      onPulse: (target, onPulse, o) => listenPulses(all, true, target, onPulse, o),
-      from(sender) {
-        if (sender !== "me") checkVisitor(sender)
-        const a = area(`inbox/${prefix}${sender}`, { needsAuth: true })
-        return { getEntry: a.getEntry, get: a.get, delete: a.delete, series: a.series, list: a.list, watch: a.watch, onPulse: a.onPulse }
-      },
-    }
-    if (!prefix) box.owners = inboxOf("owners/")
-    return box
-  }
-
-  // JSON calls on the space itself: join, access, settings, tokens, members.
+  // JSON calls on the space itself: open, settings, invites, members.
   async function call(method, path, { body, auth = true, query } = {}) {
     const res = await request(method, path, { body: body === undefined ? undefined : JSON.stringify(body), auth, query })
-    if (!res.ok) throw await fail(res)
+    if (!res.ok) throw await errorFrom(res)
     return res.json()
   }
 
-  const accessFrom = (a, extra = {}) => makeAccess({ joined: false, inviteFailed: false, until: null, ...a, ...extra })
+  // The recipient's side of to/: read and delete only. owners: the owners'
+  // shared mailbox.
+  function inbox(owners) {
+    const base = owners ? "inbox/owners/" : "inbox/"
+    return sender => {
+      if (sender === "*") return readOnly(makeArea(base + "*", { auth: true }), `inbox${owners ? ".owners" : ""}("*")`, "Read or delete one sender's with inbox(senderId).")
+      if (sender !== "me") checkVisitor(sender)
+      const all = areaMethods(makeArea(base + sender, { auth: true }))
+      return { get: all.get, delete: all.delete, series: all.series, list: all.list, watch: all.watch, pulses: all.pulses }
+    }
+  }
 
   const db = {
-    writeBudget: null, // latest response snapshot; never a promise of future capacity
+    space,
     clock: makeClock(server, fetchFn),
-    async limits() {
-      const { limits, usage } = await db.access()
-      return { limits, usage }
-    },
-    // All or nothing: up to 100 writes in one request and one transaction.
-    // Each is { set: path, value, ifVersion, ttl, ifBefore } or
-    // { delete: path, ifVersion, ifBefore }, with paths as in the HTTP API:
-    // "shared/title", "by/me/cursor", "to/u_.../note". Changed keys take
-    // consecutive versions, and watchers get them together. Resolves
-    // { version, items: [{ path, version, created }] }. If one write fails,
-    // nothing is written and its error is thrown with details.index.
-    async batch(ops) {
-      if (!Array.isArray(ops) || ops.length === 0) {
-        throw new KvError(0, "bad_batch", "batch takes an array of 1 to 100 writes: { set: path, value }, { delete: path } or { add: seriesPath, value }.")
-      }
-      const body = ops.map((o, index) => {
-        const { set, delete: del, add, value, ifVersion, ttl, ifBefore, t, ...rest } = o || {}
-        const bad = msg => new KvError(0, "bad_batch", msg, { index })
-        if (Object.keys(rest).length) throw bad(`Unknown field ${Object.keys(rest)[0]}. A write has set, delete or add, value, ifVersion, ttl, ifBefore, t.`)
-        if ([set, del, add].filter(x => x !== undefined).length !== 1) throw bad("A write has one of set (with value), delete, or add (a series point, with value).")
-        const query = {}
-        if (ifBefore !== undefined) query.ifBefore = ifBefore
-        if (add !== undefined) {
-          if (ifVersion !== undefined) throw bad("A point has no ifVersion.")
-          if (t !== undefined) query.t = t
-          if (ttl !== undefined) query.ttl = ttl
-          if (JSON.stringify(value) === undefined) throw new KvError(0, "invalid_value", "That value can't be stored as JSON.", { index })
-          return { method: "POST", path: add + "/series", query, body: value }
-        }
-        if (t !== undefined) throw bad("Only a point (add) takes t.")
-        if (ifVersion !== undefined) query.ifVersion = ifVersion
-        if (del !== undefined) {
-          if (value !== undefined || ttl !== undefined) throw bad("A delete has no value or ttl.")
-          return { method: "DELETE", path: del, query }
-        }
-        if (ttl !== undefined) query.ttl = ttl
-        if (JSON.stringify(value) === undefined) throw new KvError(0, "invalid_value", "That value can't be stored as JSON.", { index })
-        return { method: "PUT", path: set, query, body: value }
-      })
-      return call("POST", "batch", { body })
-    },
-    async join(invite) {
-      if (invite === null || invite === undefined || invite === "") return null
-      await call("POST", "join", { body: { invite } })
-      return db.access()
-    },
-    async access() {
-      return accessFrom(await call("GET", "access", { auth: false }))
-    },
-    // The first call on every page. It never throws for "not invited":
-    // access is "none" for a missing space and for a private one alike.
+    // Your level here, and what the space allows: { space, id, access,
+    // expires, canInvite, settings, usage, limits, invite, can() }. It never
+    // throws for "not invited": access is "none" for a missing space and a
+    // private one alike. It redeems an invite first: o.invite, or
+    // #invite=... in the address (removed once read). invite says how that
+    // went: "redeemed", "invalid" or null for none.
     async open(o = {}) {
-      const invite = "invite" in o ? o.invite : takeInvite()
-      let joined = false
-      let inviteFailed = false
+      checkOptions(o, ["invite"], "open()")
+      const invite = "invite" in o ? o.invite : takeHashParam("invite")
+      let outcome = null
       if (invite) {
         try {
-          await db.join(invite)
-          joined = true
+          await call("POST", "join", { body: { invite } })
+          outcome = "redeemed"
         } catch (err) {
           if (err.code !== "invite_invalid" && err.code !== "banned") throw err
-          inviteFailed = err.code === "invite_invalid"
+          if (err.code === "invite_invalid") outcome = "invalid"
         }
       }
       try {
-        return accessFrom(await call("GET", "access", { auth: false }), { joined, inviteFailed })
+        return makeAccess({ ...(await call("GET", "", { auth: false })), invite: outcome })
       } catch (err) {
         if (err.code !== "no_space" && err.code !== "banned") throw err
         const banned = err.code === "banned"
-        return makeAccess({ access: banned ? "banned" : "none", until: banned ? err.details.until ?? null : null,
-          joined, inviteFailed, id: ident.visitorId() ?? null, canInvite: false, settings: null })
+        return makeAccess({ space, id: ident.visitorId() ?? null, access: banned ? "banned" : "none",
+          expires: banned ? err.details.expires ?? null : null, canInvite: false, settings: null, usage: null, limits: null, invite: outcome })
       }
     },
-    // An invite link to send: this page (or base) with #invite=inv_... added.
-    async share(o = {}) {
-      const { base, ...rest } = o
-      const t = await db.invites.create(rest)
-      return { link: inviteLink(t.invite, base), invite: t.invite, id: t.id, access: t.access, uses: t.uses, until: t.until }
+    // Owners: change { anyone, inviters }; either may be left out. Resolves
+    // with the settings now.
+    settings: async patch => (await call("PATCH", "", { body: patch })).settings,
+    // Owners: delete the space and everything in it.
+    deleteSpace: async () => { await call("DELETE", "") },
+    // All or nothing: up to 100 writes in one request and one transaction,
+    // each { set: path, value }, { delete: path } or { add: path, value }
+    // with ifVersion, ifBefore, ttl and t as on single writes. { check:
+    // path, ifVersion } writes nothing and fails the batch if the key has
+    // another version (0: if it exists). Paths are as
+    // in the HTTP API: "shared/title", "by/me/cursor", "to/u_.../note".
+    // Resolves { version, items: [{ path, version, created?, t? }] }. If one
+    // write fails, nothing is written and its error has details.index.
+    async batch(writes) {
+      if (!Array.isArray(writes) || writes.length === 0) {
+        throw new KvError(0, "bad_batch", "batch takes an array of 1 to 100 writes: { set: path, value }, { delete: path } or { add: path, value }.")
+      }
+      const body = writes.map(w => {
+        const out = { ...w }
+        for (const k of ["t", "ifBefore"]) if (out[k] !== undefined) out[k] = timeMs(out[k])
+        return out
+      })
+      return call("POST", "batch", { body })
     },
-    // Invites. Owners, and members at the space's invite level (post unless
-    // changed). Members see and change only their own, and give at most
-    // their own level.
+    // Invites: owners, and members at the space's inviters level (post
+    // unless changed). Members see and change only their own, and give at
+    // most their own level.
     invites: {
-      create: (o = {}) => call("POST", "invites", { body: inviteBody(o, true) }),
+      // { label, access, uses, ttl, accessTtl, base } → the invite and its
+      // link: base (this page without its fragment) + #space=...&invite=...
+      // Defaults: access all (or your level if lower), any number of uses,
+      // 7 days. accessTtl ends the access it gives that long after redeeming.
+      async create(o = {}) {
+        checkOptions(o, ["label", "access", "uses", "ttl", "accessTtl", "base"], "invites.create()")
+        const { base, ...body } = o
+        const out = await call("POST", "invites", { body })
+        return { ...out, link: inviteLink(base, space, out.invite) }
+      },
       list: async () => (await call("GET", "invites")).items,
-      update: (id, o = {}) => call("PATCH", "invites/" + encodeURIComponent(id), { body: inviteBody(o, false) }),
+      // { uses, ttl }: how often and how long it can still be redeemed.
+      update: (id, o = {}) => {
+        checkOptions(o, ["uses", "ttl"], "invites.update()")
+        return call("PATCH", "invites/" + encodeURIComponent(id), { body: o })
+      },
+      // Revokes it and every grant redeemed from it.
       revoke: async id => { await call("DELETE", "invites/" + encodeURIComponent(id)) },
     },
-    // Who is in the space: { id, access, since }, highest level first.
-    // Owners also get until, invitedBy and lastUsedAt, and banned visitors.
-    members: async () => (await call("GET", "members")).items,
-    // Leave the space: your grants go, you're a stranger again.
-    leave: async () => (await call("DELETE", "members/me")).removed,
-    owner: {
-      // settings({ anyone, invite }): either may be left out.
-      settings: async patch => (await call("PATCH", "", { body: patch })).settings,
-      deleteSpace: async () => { await call("DELETE", "") },
-      members: {
-        // Give a visitor exactly one level, replacing what they had:
-        // "read", "post", "all", "owner", or "banned" to keep them out and
-        // close their live connections. o.until ends it.
-        set: (id, access, o = {}) => {
-          checkVisitor(id)
-          const body = { access }
-          if (o.until !== undefined) body.until = timeValue(o.until)
-          return call("PUT", "members/" + id, { body })
-        },
-        // Remove a visitor's grants and any ban: a stranger again.
-        remove: async id => {
-          checkVisitor(id)
-          return (await call("DELETE", "members/" + id)).removed
-        },
+    members: {
+      // Who is in the space: { id, access, since }, highest level first.
+      // Owners also get expires, invitedBy, lastSeen, label, and bans.
+      list: async () => (await call("GET", "members")).items,
+      // Owners: give a visitor exactly one level, replacing what they had:
+      // "read", "post", "all", "owner", or "banned" to keep them out and
+      // close their live connections. o.ttl ends it.
+      set(id, level, o = {}) {
+        checkVisitor(id)
+        checkOptions(o, ["ttl"], "members.set()")
+        return call("PUT", "members/" + id, { body: { access: level, ...o } })
+      },
+      // Owners remove a visitor's grants and any ban; "me" leaves the space.
+      remove: async id => {
+        if (id !== "me") checkVisitor(id)
+        return (await call("DELETE", "members/" + id)).removed
       },
     },
-    shared: area("shared"),
-    // Your own keys: only you write them, everyone in the space reads them.
-    mine: area(myArea),
-    // Everyone's own keys: by.list, by.watch and by.onPulse across all
-    // authors, each item with by. by(id) is one person's, to read.
-    by: Object.assign(id => {
-      checkVisitor(id)
-      return area("by/" + id, { other: id })
-    }, {
-      list: (target, o) => list(byAll, false, target, o),
-      watch: (target, onChange, o) => watch(byAll, false, target, onChange, o),
-      onPulse: (target, onPulse, o) => listenPulses(byAll, false, target, onPulse, o),
-    }),
-    // Who's here now, from pulses on your own key. See presence above.
-    presence: (key, o) => presence(key, o),
+    shared: areaMethods(makeArea("shared")),
+    // by("me"): your own keys, only you write them; by(id): someone's, to
+    // read; by("*"): everyone's together, each item with by.
+    by(who) {
+      if (who === "*") return readOnly(makeArea("by/*", { byAuthor: true }), 'by("*")', 'Write your own keys with by("me").')
+      if (!byAreas.has(who)) {
+        if (who !== "me") checkVisitor(who)
+        byAreas.set(who, areaMethods(who === "me" ? makeArea(me) : makeArea("by/" + who, { other: who })))
+      }
+      return byAreas.get(who)
+    },
     // What you send one recipient: a visitor ID, "me" (private to you) or
     // "owners". One slot per recipient, sender and key, so senders never
     // overwrite each other. Only the recipient reads it, in their inbox, and
-    // you read back what you sent.
-    to(recipient) {
-      if (recipient !== "me" && recipient !== "owners") checkVisitor(recipient)
-      return area("to/" + recipient, { needsAuth: true })
+    // you read back what you sent. to("*"): everything you sent, items with to.
+    to(who) {
+      if (who === "*") return readOnly(makeArea("to/*", { auth: true }), 'to("*")', "Write to one recipient with to(id).")
+      if (who !== "me" && who !== "owners") checkVisitor(who)
+      return areaMethods(makeArea("to/" + who, { auth: true }))
     },
-    // Everything you sent, across recipients. Items carry to.
-    sent: {
-      list: (target, o) => list(async t => `to/*/${t}`, true, target, o),
-      watch: (target, onChange, o) => watch(async t => `to/*/${t}`, true, target, onChange, o),
-      onPulse: (target, onPulse, o) => listenPulses(async t => `to/*/${t}`, true, target, onPulse, o),
-    },
-    // What others sent you. Items carry from and to. Your own to("me")
-    // entries are here too, from you. inbox.from(id) reads one sender's and
-    // can delete; inbox.owners is mail to the owners group, for owners.
-    inbox: inboxOf(""),
-    id: async () => (await ident.get()).id,
+    // What others sent you. Items carry from and to; your own to("me")
+    // entries are here too, from you. inbox("*") for everyone's, inbox(id)
+    // to read and delete one sender's. inbox.owners(...): mail to the owners.
+    inbox: Object.assign(inbox(false), { owners: inbox(true) }),
+    // Who's here now, from pulses on your own key. See presence above.
+    presence: (key, o) => presence(key, o),
     // status: "http" without live (or after falling back), else "connecting",
     // "open", "closed" (not needed right now, or between retries) or "offline".
     // Set onStatus to hear about changes. Nothing else depends on it.
@@ -1221,6 +1203,7 @@ export function kv(space, opts = {}) {
   }
   return db
 }
+
 
 // A 404 for a key that doesn't exist, as opposed to no_space for a space
 // this visitor can't see.
@@ -1235,260 +1218,76 @@ async function errorFrom(res) {
   return new KvError(res.status, b.error || "http_error", b.message || res.statusText, b)
 }
 
-// until and grantFor take a duration string ("7d"), a Date, milliseconds
-// since 1970, or null.
-function timeValue(v) {
-  if (v instanceof Date) return v.toISOString()
-  return v
+// Unknown options are refused, so a typo never quietly does something else.
+function checkOptions(o, known, where) {
+  if (o === null || typeof o !== "object") throw new KvError(0, "invalid_option", `${where} takes an options object.`)
+  for (const k of Object.keys(o)) {
+    if (!known.includes(k)) {
+      throw new KvError(0, "invalid_option", `Unknown option ${k} for ${where}. Options are ${known.filter(x => typeof x === "string").join(", ")}.`)
+    }
+  }
 }
 
-function inviteBody(o, creating) {
-  const known = creating ? ["label", "access", "uses", "until", "grantFor"] : ["uses", "until"]
-  const body = {}
-  for (const k of Object.keys(o)) {
-    if (!known.includes(k)) throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are ${known.join(", ")}.`)
-  }
-  for (const k of known) if (k in o) body[k] = k === "until" ? timeValue(o[k]) : o[k]
-  if (typeof body.grantFor === "number") body.grantFor = Math.max(1, Math.round(body.grantFor / 1000)) + "s"
-  return body
+// A time: ms since 1970, or a Date.
+function timeMs(v) {
+  return v instanceof Date ? v.getTime() : v
+}
+
+// A duration in ms, from seconds or "90s", "10m", "12h", "14d".
+function durationMs(v, name) {
+  if (typeof v === "number" && v > 0) return v * 1000
+  const m = typeof v === "string" && /^(\d+)([smhd]?)$/.exec(v)
+  if (m && Number(m[1]) > 0) return Number(m[1]) * { "": 1, s: 1, m: 60, h: 3600, d: 86400 }[m[2]] * 1000
+  throw new KvError(0, "invalid_option", `${name} is a duration: seconds, or a string like "90s", "10m", "12h" or "14d".`)
+}
+
+// Query parameters of a write, times as ms.
+function writeQuery(o) {
+  return { ifVersion: o.ifVersion, ttl: o.ttl, ifBefore: timeMs(o.ifBefore), t: timeMs(o.t) }
 }
 
 const LEVELS = ["banned", "none", "read", "post", "all", "owner"]
 
-// me from open() and access(): access is the visitor's level. can(method,
-// area) answers from it: reading takes read, writing your own keys (mine,
-// to) post, writing shared all.
+// me from open(): access is the visitor's level. can(op, area) answers
+// from it: reading takes read, writing your own keys (by("me"), to) post,
+// writing shared all.
 function makeAccess(a) {
-  a.can = (method = "read", area = "shared") => {
-    const need = method === "read" ? "read" : area === "shared" ? "all" : "post"
+  a.can = (op = "read", area = "shared") => {
+    const need = op === "read" ? "read" : area === "shared" ? "all" : "post"
     return LEVELS.indexOf(a.access) >= LEVELS.indexOf(need)
   }
   return a
 }
 
-// createSpace makes a space owned by this device's visitor, private unless
-// anyone gives every visitor a level. To get back in from another browser,
-// the person needs another paired device or a backup key: devices().backup().
-export async function createSpace(o = {}) {
-  const { server: srv, keyName, fetch: f, ...fields } = o
-  const server = (srv || SERVER).replace(/\/$/, "")
-  const fetchFn = f || globalThis.fetch.bind(globalThis)
-  const ident = identity(server, keyName || "cubby:" + server, fetchFn)
-  for (const k of Object.keys(fields)) {
-    if (!["label", "name", "anyone", "invite"].includes(k)) {
-      throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are label, name, anyone, invite.`)
-    }
-  }
-  let res
-  for (let attempt = 0; ; attempt++) {
-    const cur = await ident.get()
-    try {
-      res = await fetchFn(server + "/v1/spaces", { method: "POST", headers: { Authorization: "Bearer " + cur.token }, body: JSON.stringify(fields) })
-    } catch (err) {
-      throw new KvError(0, "network_error", String(err?.message || err))
-    }
-    if (res.status === 401 && attempt === 0) {
-      const b = await res.clone().json().catch(() => ({}))
-      if (b.error === "token_expired" || b.error === "token_not_yet_valid") { await ident.learnSkew(); continue }
-      if (b.error === "unknown_key") { ident.forget(); continue }
-    }
-    break
-  }
-  if (!res.ok) throw await errorFrom(res)
-  const out = await res.json()
-  return { space: out.space }
+function hashParams() {
+  return new URLSearchParams(typeof location === "undefined" ? "" : location.hash.slice(1))
 }
 
-// spaces: the spaces this visitor belongs to (holds an invite grant in, or
-// owns), the same on every paired device. Newest membership change first,
-// one page per call:
-//   const { items, next } = await spaces()            // up to 100
-//   if (next) more = await spaces({ after: next })
-// Each item: { space, access, via ("created", "invite", "added"), since,
-// changed, until, members, lastActive, bytes, keys, settings }. Open spaces
-// you only wrote to aren't listed. A device without a key yet gets an empty
-// list and isn't registered. Options: limit, after, and server, keyName and
-// fetch as for kv().
-export async function spaces(o = {}) {
-  const { server: srv, keyName, fetch: f, limit, after, ...rest } = o
-  for (const k of Object.keys(rest)) {
-    throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are limit, after, server, keyName, fetch.`)
+// Reads name=... from the address fragment and removes it, keeping the
+// fragment's other parameters. null if there's none.
+function takeHashParam(name) {
+  const p = hashParams()
+  const value = p.get(name)
+  if (!value) return null
+  p.delete(name)
+  const rest = p.toString()
+  if (typeof history !== "undefined") {
+    history.replaceState(history.state, "", location.pathname + location.search + (rest ? "#" + rest : ""))
   }
-  const server = (srv || SERVER).replace(/\/$/, "")
-  const fetchFn = f || globalThis.fetch.bind(globalThis)
-  const ident = identity(server, keyName || "cubby:" + server, fetchFn)
-  const q = new URLSearchParams()
-  if (limit !== undefined) q.set("limit", String(limit))
-  if (after !== undefined && after !== null) q.set("after", after)
-  const qs = q.toString()
-  for (let attempt = 0; ; attempt++) {
-    const cur = await ident.peek()
-    if (!cur) return { items: [], next: null }
-    let res
-    try {
-      res = await fetchFn(server + "/v1/spaces" + (qs ? "?" + qs : ""), { headers: { Authorization: "Bearer " + cur.token } })
-    } catch (err) {
-      throw new KvError(0, "network_error", String(err?.message || err))
-    }
-    if (res.status === 401 && attempt === 0) {
-      const b = await res.clone().json().catch(() => ({}))
-      if (b.error === "token_expired" || b.error === "token_not_yet_valid") { await ident.learnSkew(); continue }
-      if (b.error === "unknown_key") { ident.forget(); return { items: [], next: null } }
-    }
-    if (!res.ok) throw await errorFrom(res)
-    return res.json()
-  }
+  return value
 }
 
-// devices: this visitor on several devices. Not about a space, so it isn't
-// on db. One device makes a pairing code, another uses it and becomes the
-// same visitor, with every grant and all its data. Accepting replaces
-// whatever identity that device had, so ask the person first; it never
-// happens on its own.
-//   const me = devices()
-//   const code = await me.pair()           // { code, display, url, expires, done, cancel() }
-//   show(code.url, code.display); const { device } = await code.done
-//   if (me.pending() && confirm("Use this device as the same person?")) await me.accept()
-// A backup key is one more device, kept by the person as text:
-//   const text = await me.backup()         // save it in a password manager
-//   await me.restore(text)                 // on a new browser: joins that visitor
-// Options: server, keyName and fetch, as for kv().
-export function devices(o = {}) {
-  const { server: srv, keyName, fetch: f, ...rest } = o
-  for (const k of Object.keys(rest)) {
-    throw new KvError(0, "invalid_option", `Unknown option ${k}. Options are server, keyName, fetch.`)
-  }
-  const server = (srv || SERVER).replace(/\/$/, "")
-  const fetchFn = f || globalThis.fetch.bind(globalThis)
-  const ident = identity(server, keyName || "cubby:" + server, fetchFn)
-
-  async function send(method, path, body, token, signal) {
-    let res
-    try {
-      res = await fetchFn(server + path, { method, signal, headers: { Authorization: "Bearer " + token },
-        body: body === undefined ? undefined : JSON.stringify(body) })
-    } catch (err) {
-      if (err?.name === "AbortError") throw err
-      throw new KvError(0, "network_error", String(err?.message || err))
-    }
-    if (!res.ok) throw await errorFrom(res)
-    return res.json()
-  }
-  async function call(method, path, body, { signal } = {}) {
-    for (let attempt = 0; ; attempt++) {
-      const cur = await ident.get()
-      try {
-        return await send(method, path, body, cur.token, signal)
-      } catch (err) {
-        if (attempt === 0 && (err.code === "token_expired" || err.code === "token_not_yet_valid")) { await ident.learnSkew(); continue }
-        // This device was signed out: forget its visitor, so id says so
-        // and the next call starts a new one.
-        if (err.code === "unknown_key") ident.forget()
-        throw err
-      }
-    }
-  }
-  // POST /v1/pair, signed by signer with its key in the header.
-  async function usePairingCode(signer, code, label) {
-    return send("POST", "/v1/pair", { code: String(code), label }, await signer.token(ident.aud(), ident.now(), true, 300))
-  }
-
-  function makePairing(out, base) {
-    const ctl = new AbortController()
-    let done = null
-    return {
-      id: out.id, code: out.code, display: out.display, expires: out.expires,
-      url: pairUrl(out.code, base),
-      // Resolves with { device } once another device uses the code;
-      // rejects with pairing_code_expired or pairing_code_cancelled.
-      get done() {
-        if (!done) done = (async () => {
-          for (;;) {
-            let l
-            try {
-              l = await call("GET", "/v1/me/pairing-codes/" + out.id + "?wait=55", undefined, { signal: ctl.signal })
-            } catch (err) {
-              if (err?.name === "AbortError") l = await call("GET", "/v1/me/pairing-codes/" + out.id)
-              else if (err instanceof KvError && err.retryable) { await sleep(2000); continue }
-              else throw err
-            }
-            if (l.state === "used") return { device: l.device }
-            if (l.state !== "open") throw new KvError(410, "pairing_code_" + l.state, l.state === "expired" ? "The code expired before another device used it." : "The code was cancelled.", l)
-          }
-        })()
-        return done
-      },
-      async cancel() {
-        const l = await call("DELETE", "/v1/me/pairing-codes/" + out.id)
-        ctl.abort()
-        return l.state
-      },
-    }
-  }
-
-  return {
-    // This device's visitor ID, null before it has one. Doesn't register.
-    async id() { await ident.peek(); return ident.visitorId() },
-    // The code in #pair=..., without using it. null if there's none.
-    pending(param = "pair") { return hashParams().get(param) },
-    // A one-use code for another device, alive ttl seconds (30 to 3600,
-    // default 600). url is this page with #pair=CODE, or base's.
-    async pair({ ttl, base } = {}) {
-      const out = await call("POST", "/v1/me/pairing-codes", ttl === undefined ? undefined : { ttl })
-      return makePairing(out, base)
-    },
-    // Use a code: the one given, or #pair=... from the address, which is
-    // removed. This device becomes that visitor; a previous identity with
-    // no other device is deleted with its data. null if there's no code.
-    async accept(code, { label = deviceLabel(), param = "pair" } = {}) {
-      if (code == null) code = takeInvite(param)
-      if (code == null) return null
-      const out = await usePairingCode(await ident.signer(), code, label)
-      await ident.adopt(out.id)
-      return { id: out.id, device: out.device, previous: out.previous, deleted: out.deleted }
-    },
-    // A backup key: a new device of this visitor whose private key is
-    // returned as text, once, and kept nowhere here. Anyone with the text
-    // can act as this visitor, so it belongs in a password manager.
-    async backup({ label = "Backup key " + new Date().toISOString().slice(0, 10) } = {}) {
-      const code = await call("POST", "/v1/me/pairing-codes", { ttl: 60 })
-      const k = await newKeyPair(true)
-      const signer = await makeSigner(k.privateKey, k.jwk)
-      const out = await usePairingCode(signer, code.code, label)
-      const key = await crypto.subtle.exportKey("jwk", k.privateKey)
-      return JSON.stringify({ server, visitor: out.id, device: out.device, key: { kty: key.kty, crv: key.crv, x: key.x, y: key.y, d: key.d } })
-    },
-    // Restore from a backup key: the backup makes a pairing code and this
-    // device uses it, so this device becomes that visitor and the backup
-    // stays a backup.
-    async restore(backup, { label = deviceLabel() } = {}) {
-      const signer = await importCredentials(backup)
-      const code = await send("POST", "/v1/me/pairing-codes", { ttl: 60 }, await signer.token(ident.aud(), ident.now()))
-      const out = await usePairingCode(await ident.signer(), code.code, label)
-      await ident.adopt(out.id)
-      return { id: out.id, device: out.device, previous: out.previous, deleted: out.deleted }
-    },
-    // This visitor's devices, oldest first. current marks this one.
-    async list() { return (await call("GET", "/v1/me/devices")).items },
-    async rename(label, id = "current") { return (await call("PATCH", "/v1/me/devices/" + id, { label })).items },
-    // Sign a device out: its key stops working. Not the last one.
-    async remove(id) { return (await call("DELETE", "/v1/me/devices/" + id)).removed },
-    async signOutOthers() { return (await call("DELETE", "/v1/me/devices?others=1")).removed },
-    // API keys: static secrets for tools that can't sign, like webhooks. One
-    // space each, at most your level, 30 days unless until says otherwise
-    // (null: never, the weakest choice). Prefer signed tokens where you can.
-    apiKeys: {
-      create: (space, { label, access, until } = {}) => {
-        const body = { space }
-        if (label !== undefined) body.label = label
-        if (access !== undefined) body.access = access
-        if (until !== undefined) body.until = timeValue(until)
-        return call("POST", "/v1/me/api-keys", body)
-      },
-      list: async () => (await call("GET", "/v1/me/api-keys")).items,
-      revoke: async id => { await call("DELETE", "/v1/me/api-keys/" + encodeURIComponent(id)) },
-    },
-  }
+// base (default: this page) with its fragment's other parameters and
+// space=..., invite=... added.
+function inviteLink(base, space, invite) {
+  if (!base && typeof location === "undefined") return null
+  const u = new URL(base || location.href)
+  const p = new URLSearchParams(u.hash.slice(1))
+  p.delete("invite"); p.delete("pair"); p.delete("space")
+  p.set("space", space)
+  p.set("invite", invite)
+  u.hash = p.toString()
+  return u.href
 }
 
 // pairUrl adds pair=code to base's fragment, keeping its other parameters
@@ -1512,112 +1311,171 @@ function deviceLabel() {
   return os ? browser + " on " + os : browser
 }
 
-function hashParams() {
-  return new URLSearchParams(typeof location === "undefined" ? "" : location.hash.slice(1))
-}
+// visitor: you, across spaces. Your ID, the spaces you own or were invited
+// to, the devices that are you, and API keys for tools that can't sign.
+export function visitor(opts = {}) {
+  checkOptions(opts, ["server", "fetch", "keyName", "credentials"], "visitor()")
+  const server = (opts.server || SERVER).replace(/\/$/, "")
+  const fetchFn = opts.fetch || globalThis.fetch.bind(globalThis)
+  const ident = identity(server, opts.keyName || "cubby:" + server, fetchFn, { credentials: opts.credentials })
 
-// takeInvite reads #invite=... from the address bar and removes it, keeping
-// the fragment's other parameters. null if there's none.
-export function takeInvite(param = "invite") {
-  const p = hashParams()
-  const value = p.get(param)
-  if (!value) return null
-  p.delete(param)
-  const rest = p.toString()
-  if (typeof history !== "undefined") {
-    history.replaceState(history.state, "", location.pathname + location.search + (rest ? "#" + rest : ""))
-  }
-  return value
-}
-
-// openRoom: a page is a room, and its link lets others in. Finds the room
-// in the address (#s=...) or the one this browser was last in under label,
-// creates one if there's neither, opens it (redeeming #invite=...), and keeps
-// #s=<space> in the address so a reload stays in the room.
-//   const room = await openRoom("board", { live: true })
-//   if (!room.me.can("read")) ...      // gone, or a bad link
-//   const link = await room.link()     // a reusable invite, minted once per device
-// Options: param ("s"), create (true), space and invite (instead of the
-// address, outside browsers), anyone, and anything kv() takes. Members can share too, so every device makes its own link.
-export async function openRoom(label, o = {}) {
-  const { param = "s", create = true, space: given, anyone, invite, ...kvOpts } = o
-  const server = (kvOpts.server || SERVER).replace(/\/$/, "")
-  const key = `cubby-room:${server}:${label}`
-  const fromHash = hashParams().get(param)
-  let space = given || (fromHash && validSpace(fromHash) ? fromHash : null) || roomStore.get(key)
-  let created = false
-  if (!space) {
-    if (!create) return { db: null, me: makeAccess({ access: "none" }), space: null, created, link: async () => null, forget }
-    const fields = { label, server: kvOpts.server, keyName: kvOpts.keyName, fetch: kvOpts.fetch }
-    if (anyone) fields.anyone = anyone
-    space = (await createSpace(fields)).space
-    created = true
-  }
-  const db = kv(space, kvOpts)
-  const me = await db.open(invite === undefined ? {} : { invite })
-  if (me.can("read")) {
-    roomStore.set(key, space)
-    setHashParam(param, space)
-  }
-  // The invite this visitor minted for the room, reused while it still works.
-  async function link(lo = {}) {
-    const base = lo.base || (typeof location === "undefined" ? undefined : location.origin + location.pathname + location.search + "#" + param + "=" + space)
-    // One link per visitor, room and level: access "post" for people who
-    // should add their own things but not change the room's shared keys.
-    const lkey = `cubby-room-link:${server}:${space}:${me.id || await db.id()}${lo.access ? ":" + lo.access : ""}`
-    const saved = roomStore.get(lkey)
-    if (saved) {
-      const t = await db.invites.list().then(l => l.find(t => t.id === saved.id), () => null)
-      if (t?.state === "active") return inviteLink(saved.invite, base)
+  async function send(method, path, body, token, signal) {
+    let res
+    try {
+      res = await fetchFn(server + path, { method, signal, headers: token ? { Authorization: "Bearer " + token } : {},
+        body: body === undefined ? undefined : JSON.stringify(body) })
+    } catch (err) {
+      if (err?.name === "AbortError") throw err
+      throw new KvError(0, "network_error", String(err?.message || err))
     }
-    const t = await db.invites.create({ label: label + " link", uses: null, until: null, ...(lo.access ? { access: lo.access } : {}) })
-    roomStore.set(lkey, { id: t.id, invite: t.invite })
-    return inviteLink(t.invite, base)
+    if (!res.ok) throw await errorFrom(res)
+    return res.json()
   }
-  function forget() {
-    roomStore.del(key)
-    setHashParam(param, null)
+  // A signed call. peek: only with a key this device already has; null
+  // without one, and nothing is registered.
+  async function call(method, path, body, { signal, peek = false } = {}) {
+    for (let attempt = 0; ; attempt++) {
+      const cur = peek ? await ident.peek() : await ident.get()
+      if (!cur) return null
+      try {
+        return await send(method, path, body, cur.token, signal)
+      } catch (err) {
+        if (attempt === 0 && (err.code === "token_expired" || err.code === "token_not_yet_valid")) { await ident.learnSkew(); continue }
+        // This device was signed out: forget its visitor, so the next call
+        // starts a new one.
+        if (err.code === "unknown_key") {
+          ident.forget()
+          if (peek) return null
+        }
+        throw err
+      }
+    }
   }
-  return { db, me, space, created, link, forget }
-}
+  // POST /v1/pair, signed by signer with its key in the header.
+  async function usePairingCode(signer, code, label) {
+    return send("POST", "/v1/pair", { code: String(code), label }, await signer.token(ident.aud(), ident.now(), true, 300))
+  }
 
-// localStorage when there is one, memory otherwise.
-const roomStore = (() => {
-  const mem = new Map()
-  const ls = () => { try { return globalThis.localStorage || null } catch { return null } }
+  function makePairing(out, base) {
+    const ctl = new AbortController()
+    let done = null
+    return {
+      id: out.id, code: out.code, display: out.display, expires: out.expires,
+      url: pairUrl(out.code, base),
+      // Resolves with { device } once another device uses the code;
+      // rejects with pairing_code_expired or pairing_code_cancelled.
+      get done() {
+        if (!done) done = (async () => {
+          for (;;) {
+            let l
+            try {
+              l = await call("GET", "/v1/me/pairing-codes/" + out.id + "?timeout=55", undefined, { signal: ctl.signal })
+            } catch (err) {
+              if (err?.name === "AbortError") l = await call("GET", "/v1/me/pairing-codes/" + out.id)
+              else if (err instanceof KvError && err.retryable) { await sleep(2000); continue }
+              else throw err
+            }
+            if (l.state === "used") return { device: l.device }
+            if (l.state !== "open") throw new KvError(410, "pairing_code_" + l.state, l.state === "expired" ? "The code expired before another device used it." : "The code was cancelled.", l)
+          }
+        })()
+        return done
+      },
+      async cancel() {
+        const l = await call("DELETE", "/v1/me/pairing-codes/" + out.id)
+        ctl.abort()
+        return l.state
+      },
+    }
+  }
+
   return {
-    get(k) { const l = ls(); const v = l ? l.getItem(k) : mem.get(k); try { return v ? JSON.parse(v) : null } catch { return null } },
-    set(k, v) { const j = JSON.stringify(v); const l = ls(); try { l ? l.setItem(k, j) : mem.set(k, j) } catch { mem.set(k, j) } },
-    del(k) { const l = ls(); try { l?.removeItem(k) } catch {} mem.delete(k) },
+    // This device's visitor ID. Makes one (registers this device) if it
+    // has none yet.
+    async id() { return (await ident.get()).id },
+    // A space this visitor owns: { space, id, settings }. Private unless
+    // anyone gives every visitor a level. prefix goes before the random
+    // words; name is a whole name of your own.
+    async createSpace(o = {}) {
+      checkOptions(o, ["prefix", "name", "anyone", "inviters"], "createSpace()")
+      return call("POST", "/v1/spaces", o)
+    },
+    // One page of the spaces you belong to (own or were invited to), the
+    // same on every paired device, most recently active first:
+    // { items, next }; pass next back as after. Each item: { space, access,
+    // via, since, expires, members, lastActive, bytes, keys, settings }. A
+    // device without a key gets an empty list and isn't registered.
+    async spaces(o = {}) {
+      checkOptions(o, ["limit", "after"], "spaces()")
+      const q = new URLSearchParams()
+      if (o.limit !== undefined) q.set("limit", String(o.limit))
+      if (o.after !== undefined && o.after !== null) q.set("after", o.after)
+      const qs = q.toString()
+      return (await call("GET", "/v1/spaces" + (qs ? "?" + qs : ""), undefined, { peek: true })) ?? { items: [], next: null }
+    },
+    // The code in #pair=..., without using it. null if there's none.
+    pending: () => hashParams().get("pair"),
+    // A one-use code for another device, alive ttl (30s to 1h, default
+    // 10m). url is this page with #pair=CODE, or base's.
+    async pair(o = {}) {
+      checkOptions(o, ["ttl", "base"], "pair()")
+      const out = await call("POST", "/v1/me/pairing-codes", o.ttl === undefined ? {} : { ttl: o.ttl })
+      return makePairing(out, o.base)
+    },
+    // Use a code: the one given, or #pair=... from the address, which is
+    // removed. This device becomes that visitor; a previous identity with
+    // no other device is deleted with its data. null if there's no code.
+    async accept(code, o = {}) {
+      checkOptions(o, ["label"], "accept()")
+      if (code == null) code = takeHashParam("pair")
+      if (code == null) return null
+      const out = await usePairingCode(await ident.signer(), code, o.label ?? deviceLabel())
+      await ident.adopt(out.id)
+      return out
+    },
+    // A backup key: a new device of this visitor whose private key is
+    // returned as text, once, and kept nowhere here. Anyone with the text
+    // can act as this visitor, so it belongs in a password manager.
+    async backup(o = {}) {
+      checkOptions(o, ["label"], "backup()")
+      const code = await call("POST", "/v1/me/pairing-codes", { ttl: 60 })
+      const k = await newKeyPair(true)
+      const signer = await makeSigner(k.privateKey, k.jwk)
+      const out = await usePairingCode(signer, code.code, o.label ?? "Backup key " + new Date().toISOString().slice(0, 10))
+      const key = await crypto.subtle.exportKey("jwk", k.privateKey)
+      return JSON.stringify({ server, visitor: out.id, device: out.device, key: { kty: key.kty, crv: key.crv, x: key.x, y: key.y, d: key.d } })
+    },
+    // Restore from a backup key: the backup makes a pairing code and this
+    // device uses it, so this device becomes that visitor and the backup
+    // stays a backup.
+    async restore(backup, o = {}) {
+      checkOptions(o, ["label"], "restore()")
+      const signer = await importCredentials(backup)
+      const code = await send("POST", "/v1/me/pairing-codes", { ttl: 60 }, await signer.token(ident.aud(), ident.now()))
+      const out = await usePairingCode(await ident.signer(), code.code, o.label ?? deviceLabel())
+      await ident.adopt(out.id)
+      return out
+    },
+    devices: {
+      // This visitor's devices, oldest first. current marks this one.
+      list: async () => (await call("GET", "/v1/me/devices")).items,
+      rename: async (label, id = "current") => (await call("PATCH", "/v1/me/devices/" + id, { label })).items,
+      // Sign a device out: its key stops working. Not the last one.
+      remove: async id => (await call("DELETE", "/v1/me/devices/" + id)).removed,
+      removeOthers: async () => (await call("DELETE", "/v1/me/devices?others=1")).removed,
+    },
+    // API keys: static secrets for tools that can't sign, like webhooks. One
+    // space each, at most your level (all or yours, as an invite), 30 days
+    // unless ttl says otherwise (null: never, the weakest choice).
+    apiKeys: {
+      create(space, o = {}) {
+        checkOptions(o, ["label", "access", "ttl"], "apiKeys.create()")
+        return call("POST", "/v1/me/api-keys", { space, ...o })
+      },
+      list: async () => (await call("GET", "/v1/me/api-keys")).items,
+      revoke: async id => { await call("DELETE", "/v1/me/api-keys/" + encodeURIComponent(id)) },
+    },
   }
-})()
-
-function setHashParam(name, value) {
-  if (typeof location === "undefined" || typeof history === "undefined") return
-  const p = hashParams()
-  if (value === null) p.delete(name)
-  else p.set(name, value)
-  const rest = p.toString()
-  history.replaceState(history.state, "", location.pathname + location.search + (rest ? "#" + rest : ""))
-}
-
-// inviteLink adds invite=... to base's fragment, keeping its other parameters.
-export function inviteLink(invite, base = typeof location === "undefined" ? "" : location.href) {
-  const u = new URL(base)
-  const p = new URLSearchParams(u.hash.slice(1))
-  p.set("invite", invite)
-  u.hash = p.toString()
-  return u.href
-}
-
-function parseBudget(header) {
-  const buckets = {}
-  for (const member of header.split(",")) {
-    const name = member.match(/^\s*"([^"]+)"/)
-    const remaining = member.match(/;\s*r=(\d+)/)
-    if (name && remaining) buckets[name[1]] = { remaining: Number(remaining[1]) }
-  }
-  return { ...buckets, observedAt: Date.now() }
 }
 
 // A reply frame from the live connection as a fetch Response, so every

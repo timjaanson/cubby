@@ -304,7 +304,7 @@ func TestListAndWatch(t *testing.T) {
 	}
 
 	// Snapshot from 0.
-	_, _, body = c.req("GET", sp+"/shared/msg.*/watch?version=0", "")
+	_, _, body = c.req("GET", sp+"/shared/msg.*/watch?after=0", "")
 	var w struct {
 		Changes []struct {
 			Key     string
@@ -321,7 +321,7 @@ func TestListAndWatch(t *testing.T) {
 	// Long poll wakes on a write.
 	done := make(chan string)
 	go func() {
-		_, _, b := c.req("GET", sp+"/shared/msg.*/watch?timeout=5&version="+itoa(w.Version), "")
+		_, _, b := c.req("GET", sp+"/shared/msg.*/watch?timeout=5&after="+itoa(w.Version), "")
 		done <- b
 	}()
 	time.Sleep(200 * time.Millisecond)
@@ -339,22 +339,22 @@ func TestListAndWatch(t *testing.T) {
 	// A snapshot of nothing returns at once.
 	c.open("none-cedar-pilot-mango", tok)
 	start := time.Now()
-	_, _, body = c.req("GET", "/v1/none-cedar-pilot-mango/shared/*/watch?version=0", "")
+	_, _, body = c.req("GET", "/v1/none-cedar-pilot-mango/shared/*/watch?after=0", "")
 	if time.Since(start) > time.Second || !strings.Contains(body, `"changes":[]`) {
 		t.Fatalf("empty snapshot: %s after %s", body, time.Since(start))
 	}
 	// Watching a space that doesn't exist is no_space.
-	if s, _, body := c.req("GET", "/v1/gone-cedar-pilot-mango/shared/*/watch?version=0", ""); s != 404 || errCode(body) != "no_space" {
+	if s, _, body := c.req("GET", "/v1/gone-cedar-pilot-mango/shared/*/watch?after=0", ""); s != 404 || errCode(body) != "no_space" {
 		t.Fatalf("missing space watch: %d %s", s, body)
 	}
 
 	// Timeout returns empty changes.
-	_, _, body = c.req("GET", sp+"/shared/msg.*/watch?timeout=1", "")
+	_, _, body = c.req("GET", sp+"/shared/msg.*/watch?timeout=1&after=now", "")
 	if !strings.Contains(body, `"changes":[]`) {
 		t.Fatalf("timeout: %s", body)
 	}
 	// A version from the future is expired.
-	if s, _, _ := c.req("GET", sp+"/shared/msg.*/watch?version="+itoa(w.Version+1000), ""); s != 410 {
+	if s, _, _ := c.req("GET", sp+"/shared/msg.*/watch?after="+itoa(w.Version+1000), ""); s != 410 {
 		t.Fatalf("future version: %d", s)
 	}
 }
@@ -384,14 +384,14 @@ func TestSpaceFiles(t *testing.T) {
 		t.Fatal("creating didn't make the space file")
 	}
 	c.req("PUT", "/v1/"+sp+"/shared/x", "1", a...)
-	_, _, body := c.req("GET", "/v1/"+sp+"/shared/*/watch?version=0", "")
+	_, _, body := c.req("GET", "/v1/"+sp+"/shared/*/watch?after=0", "")
 	var w struct{ Version int64 }
 	json.Unmarshal([]byte(body), &w)
 
 	// Deleting the space wakes watchers with no_space, and removes the file.
 	done := make(chan int)
 	go func() {
-		s, _, _ := c.req("GET", fmt.Sprintf("/v1/%s/shared/*/watch?timeout=5&version=%d", sp, w.Version), "")
+		s, _, _ := c.req("GET", fmt.Sprintf("/v1/%s/shared/*/watch?timeout=5&after=%d", sp, w.Version), "")
 		done <- s
 	}()
 	time.Sleep(200 * time.Millisecond)
@@ -416,7 +416,7 @@ func TestSpaceFiles(t *testing.T) {
 	if v := parseInt(h.Get("ETag")); v <= w.Version {
 		t.Fatalf("recreated version %d not above %d", v, w.Version)
 	}
-	if s, _, _ := c.req("GET", fmt.Sprintf("/v1/%s/shared/*/watch?version=%d", sp, w.Version), ""); s != 410 {
+	if s, _, _ := c.req("GET", fmt.Sprintf("/v1/%s/shared/*/watch?after=%d", sp, w.Version), ""); s != 410 {
 		t.Fatalf("old version on recreated space: %d", s)
 	}
 }
@@ -501,7 +501,7 @@ func TestCreateSpace(t *testing.T) {
 	if st, _, body := c.req("POST", "/v1/spaces", `{"name":"throws"}`, a...); st != 400 || errCode(body) != "invalid_space" {
 		t.Fatalf("bad name: %d %s", st, body)
 	}
-	if st, _, body := c.req("POST", "/v1/spaces", `{"name":"throws-amber-otter-tundra","label":"x"}`, a...); st != 400 || errCode(body) != "invalid_parameter" {
+	if st, _, body := c.req("POST", "/v1/spaces", `{"name":"throws-amber-otter-tundra","prefix":"x"}`, a...); st != 400 || errCode(body) != "invalid_parameter" {
 		t.Fatalf("name and label: %d %s", st, body)
 	}
 	if st, _, body := c.req("POST", "/v1/spaces", `{"lable":"x"}`, a...); st != 400 || errCode(body) != "invalid_parameter" || !strings.Contains(body, `"parameter":"lable"`) {
@@ -521,21 +521,21 @@ func TestCreateSpace(t *testing.T) {
 	st, _, body := c.req("POST", "/v1/spaces", ``, a...)
 	var out struct {
 		Space, OwnerToken, ID, Token string
-		Settings                     struct{ Anyone, Invite string }
+		Settings                     struct{ Anyone, Inviters string }
 	}
 	json.Unmarshal([]byte(body), &out)
-	if st != 201 || !names.ValidSpace(out.Space) || out.Settings.Anyone != "none" || out.Settings.Invite != "post" || out.Token != "" {
+	if st != 201 || !names.ValidSpace(out.Space) || out.Settings.Anyone != "none" || out.Settings.Inviters != "post" || out.Token != "" {
 		t.Fatalf("empty body: %d %s", st, body)
 	}
 
 	// Creating a space takes a signed-in device.
-	if st, _, body = c.req("POST", "/v1/spaces", `{"label":"poll","anyone":"post"}`); st != 401 || errCode(body) != "missing_token" {
+	if st, _, body = c.req("POST", "/v1/spaces", `{"prefix":"poll","anyone":"post"}`); st != 401 || errCode(body) != "missing_token" {
 		t.Fatalf("create without a token: %d %s", st, body)
 	}
 	// The creator owns the space.
-	st, _, body = c.req("POST", "/v1/spaces", `{"label":"poll","anyone":"post"}`, a...)
+	st, _, body = c.req("POST", "/v1/spaces", `{"prefix":"poll","anyone":"post"}`, a...)
 	json.Unmarshal([]byte(body), &out)
-	if _, _, body := c.req("GET", "/v1/"+out.Space+"/access", "", a...); st != 201 || !strings.Contains(body, `"access":"owner"`) {
+	if _, _, body := c.req("GET", "/v1/"+out.Space, "", a...); st != 201 || !strings.Contains(body, `"access":"owner"`) {
 		t.Fatalf("creator isn't owner: %s", body)
 	}
 }
@@ -591,7 +591,7 @@ func TestBy(t *testing.T) {
 		t.Fatal("KV-By isn't exposed to browsers")
 	}
 
-	_, _, body := c.req("GET", sp+"/shared/*/watch?version=0", "")
+	_, _, body := c.req("GET", sp+"/shared/*/watch?after=0", "")
 	var w struct {
 		Changes []struct {
 			Key, By string
@@ -614,7 +614,7 @@ func TestBy(t *testing.T) {
 	// B deletes A's key: the tombstone names B.
 	v := w.Version
 	c.req("DELETE", sp+"/shared/game.1", "", b...)
-	_, _, body = c.req("GET", sp+"/shared/*/watch?version="+itoa(v), "")
+	_, _, body = c.req("GET", sp+"/shared/*/watch?after="+itoa(v), "")
 	json.Unmarshal([]byte(body), &w)
 	if len(w.Changes) != 1 || !w.Changes[0].Deleted || w.Changes[0].By != idB {
 		t.Fatalf("delete by: %s", body)

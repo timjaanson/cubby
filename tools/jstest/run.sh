@@ -3,11 +3,10 @@
 #   kv.test.mjs   kv.js end to end: private spaces, invites, owners, watch
 #   live.test.mjs kv.js with live: true, over the WebSocket
 #   pulse.test.mjs pulses, over HTTP and live
-#   room.test.mjs openRoom: rooms, remembered spaces, member links
 #   presence.test.mjs last wills and presence, over live and HTTP
 #   inbox.test.mjs to/, inbox/ and bans
 #   devices.test.mjs pairing codes, accept, sign out
-#   spaces.test.mjs spaces() and db.batch()
+#   spaces.test.mjs visitor().spaces() and db.batch()
 #   qr.test.mjs   share.js's QR encoder, decoded back with jsQR
 # Needs Go, Node 20+ and npm. Nothing here goes into the binary.
 set -eu
@@ -28,7 +27,6 @@ sed 's#from "./kv.js"#from "./kv.mjs"#' ../../web/share.js > "$tmp/share.mjs"
 S=$S MOD="$tmp/kv.mjs" node kv.test.mjs
 S=$S MOD="$tmp/kv.mjs" node live.test.mjs
 S=$S MOD="$tmp/kv.mjs" node pulse.test.mjs
-S=$S MOD="$tmp/kv.mjs" node room.test.mjs
 S=$S MOD="$tmp/kv.mjs" node presence.test.mjs
 S=$S MOD="$tmp/kv.mjs" node inbox.test.mjs
 S=$S MOD="$tmp/kv.mjs" node devices.test.mjs

@@ -9,13 +9,36 @@ import (
 )
 
 type seriesResp struct {
-	Key    string
 	Points []struct {
 		T     int64
 		Value json.RawMessage
 	}
 	Version int64
 	Next    *int64
+}
+
+// UnmarshalJSON reads a series page: items are the points.
+func (r *seriesResp) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		Items []struct {
+			T     int64
+			Value json.RawMessage
+		}
+		Version int64
+		Next    *int64
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	r.Version, r.Next = raw.Version, raw.Next
+	r.Points = r.Points[:0]
+	for _, p := range raw.Items {
+		r.Points = append(r.Points, struct {
+			T     int64
+			Value json.RawMessage
+		}{p.T, p.Value})
+	}
+	return nil
 }
 
 // mustNext returns a series response's next, as JSON.
@@ -74,9 +97,9 @@ func TestSeriesBasics(t *testing.T) {
 	}
 
 	// Points come back oldest first, values as stored.
-	_, _, b = c.req("GET", S+"/temp/series", "")
+	_, _, b = c.req("GET", S+"/temp/series?order=asc", "")
 	r := decode[seriesResp](t, b)
-	if r.Key != "temp" || len(r.Points) != 4 || r.Next != nil {
+	if len(r.Points) != 4 || r.Next != nil {
 		t.Fatalf("series: %s", b)
 	}
 	// Responses that wrap values compact JSON, as list does. A plain GET returns the bytes as sent.
@@ -93,39 +116,37 @@ func TestSeriesBasics(t *testing.T) {
 		t.Fatal("KV-Time isn't the newest point's time")
 	}
 
-	// limit without since: the newest ones.
-	_, _, b = c.req("GET", S+"/temp/series?limit=2", "")
+	// order=asc: the oldest ones, and next to continue.
+	_, _, b = c.req("GET", S+"/temp/series?order=asc&limit=3", "")
 	r = decode[seriesResp](t, b)
-	if len(r.Points) != 2 || string(r.Points[1].Value) != want[3] {
-		t.Fatalf("newest 2: %s", b)
-	}
-
-	// since pages forward with next.
-	_, _, b = c.req("GET", S+"/temp/series?since=0&limit=3", "")
-	r = decode[seriesResp](t, b)
-	if len(r.Points) != 3 || r.Next == nil || *r.Next != r.Points[2].T {
+	if len(r.Points) != 3 || string(r.Points[0].Value) != want[0] || r.Next == nil || *r.Next != r.Points[2].T {
 		t.Fatalf("page 1: %s", b)
 	}
-	_, _, b = c.req("GET", S+"/temp/series?since="+itoa(*r.Next)+"&limit=3", "")
+	_, _, b = c.req("GET", S+"/temp/series?order=asc&limit=3&after="+itoa(*r.Next), "")
 	r = decode[seriesResp](t, b)
 	if len(r.Points) != 1 || r.Next != nil || string(r.Points[0].Value) != want[3] {
 		t.Fatalf("page 2: %s", b)
 	}
 
-	// order=desc pages back with next as until; until is exclusive.
-	_, _, b = c.req("GET", S+"/temp/series?order=desc&limit=3", "")
+	// The default is newest first; next continues as after too.
+	_, _, b = c.req("GET", S+"/temp/series?limit=3", "")
 	r = decode[seriesResp](t, b)
 	if len(r.Points) != 3 || string(r.Points[0].Value) != want[3] || r.Next == nil || *r.Next != r.Points[2].T {
 		t.Fatalf("desc page 1: %s", b)
 	}
-	_, _, b = c.req("GET", S+"/temp/series?order=desc&limit=3&until="+itoa(*r.Next), "")
+	_, _, b = c.req("GET", S+"/temp/series?limit=3&after="+itoa(*r.Next), "")
 	r = decode[seriesResp](t, b)
 	if len(r.Points) != 1 || r.Next != nil || string(r.Points[0].Value) != want[0] {
 		t.Fatalf("desc page 2: %s", b)
 	}
-	_, _, b = c.req("GET", S+"/temp/series?order=asc&since=0&until="+itoa(r.Points[0].T+1), "")
+	// since is inclusive, before exclusive.
+	t0 := r.Points[0].T
+	_, _, b = c.req("GET", S+"/temp/series?since="+itoa(t0)+"&before="+itoa(t0+1), "")
 	if r = decode[seriesResp](t, b); len(r.Points) != 1 || string(r.Points[0].Value) != want[0] {
-		t.Fatalf("since and until: %s", b)
+		t.Fatalf("since and before: %s", b)
+	}
+	if _, _, b = c.req("GET", S+"/temp/series?since="+itoa(t0+1), ""); len(decode[seriesResp](t, b).Points) != 3 {
+		t.Fatalf("since inclusive: %s", b)
 	}
 	if st, _, b := c.req("GET", S+"/temp/series?limit=10000", ""); st != 200 {
 		t.Fatalf("limit 10000: %d %s", st, b)
@@ -148,7 +169,7 @@ func TestSeriesBasics(t *testing.T) {
 			t.Fatalf("t on the wrong items: %s", b)
 		}
 	}
-	_, _, b = c.req("GET", S+"/*/watch?version=0", "")
+	_, _, b = c.req("GET", S+"/*/watch?after=0", "")
 	if !strings.Contains(b, `"t":`+h.Get("KV-Time")) {
 		t.Fatalf("watch: %s", b)
 	}
@@ -178,7 +199,7 @@ func TestSeriesKinds(t *testing.T) {
 		{"POST", S + "/temp/watch", "", 405, "method_not_allowed"},
 		{"PUT", S + "/series", "5", 400, "invalid_key"},
 		{"PUT", S + "/watch", "5", 400, "invalid_key"},
-		{"GET", S + "/env.*/series", "", 400, "invalid_key"},
+		{"GET", S + "/env.*/series?after=5", "", 400, "invalid_parameter"},
 		{"GET", "/v1/home-cedar-pilot-mango/by/*/temp/series", "", 400, "invalid_key"},
 		{"GET", S + "/temp/series/watch", "", 400, "invalid_key"},
 		{"GET", S + "/temp/history", "", 400, "invalid_key"},
@@ -217,77 +238,21 @@ func TestSeriesKinds(t *testing.T) {
 	}
 }
 
-func TestSeriesBatch(t *testing.T) {
+// A point goes to one series; several at once go through a batch.
+func TestSeriesPatternRefused(t *testing.T) {
 	c := newTest(t)
 	tok, _ := c.anon()
 	c.open("home-cedar-pilot-mango", tok)
 	auth := []string{"Authorization", "Bearer " + tok}
 	S := "/v1/home-cedar-pilot-mango/shared"
-
-	st, _, b := c.req("POST", S+"/env.*/series", `{"temp": 21.4, "rh":45, "door":"open", "gps":{"lat":59.43}}`, auth...)
-	if st != 200 {
-		t.Fatalf("batch: %d %s", st, b)
-	}
-	res := decode[struct {
-		Version, T int64
-		Keys       []string
-	}](t, b)
-	if strings.Join(res.Keys, ",") != "env.temp,env.rh,env.door,env.gps" {
-		t.Fatalf("keys in member order: %v", res.Keys)
-	}
-	for key, want := range map[string]string{"env.temp": "21.4", "env.rh": "45", "env.door": `"open"`, "env.gps": `{"lat":59.43}`} {
-		_, h, b := c.req("GET", S+"/"+key, "")
-		if b != want || h.Get("KV-Time") != itoa(res.T) {
-			t.Errorf("%s = %s (t %s), want %s at %d", key, b, h.Get("KV-Time"), want, res.T)
-		}
+	if st, _, b := c.req("POST", S+"/env.*/series", `{"temp": 21.4}`, auth...); st != 400 || errCode(b) != "invalid_key" || !strings.Contains(b, "batch") {
+		t.Fatalf("pattern point: %d %s", st, b)
 	}
 	// An object posted to one key is one point.
 	c.req("POST", S+"/pos/series", `{"lat": 59.43, "lon": 24.75}`, auth...)
-	_, _, b = c.req("GET", S+"/pos/series", "")
+	_, _, b := c.req("GET", S+"/pos/series", "")
 	if r := decode[seriesResp](t, b); len(r.Points) != 1 || string(r.Points[0].Value) != `{"lat":59.43,"lon":24.75}` {
 		t.Fatalf("object point: %s", b)
-	}
-	// Bare * uses the names as they are.
-	if st, _, b := c.req("POST", S+"/*/series", `{"co2": 612}`, auth...); st != 200 || !strings.Contains(b, `"keys":["co2"]`) {
-		t.Fatalf("bare *: %d %s", st, b)
-	}
-
-	c.req("PUT", S+"/env.note", `"hi"`, auth...)
-	for _, tt := range []struct {
-		body, code, key string
-	}{
-		{`[1, 2]`, "batch_needs_object", ""},
-		{`21.4`, "batch_needs_object", ""},
-		{`not json`, "batch_needs_object", ""},
-		{`{}`, "batch_needs_object", ""},
-		{`{"temp": 1, "temp": 2}`, "batch_needs_object", "env.temp"},
-		{`{"temp": 22, "bad name": 1}`, "invalid_key", "env.bad name"},
-		{`{"temp": 22, "note": 1}`, "not_series", "env.note"},
-		{`{"temp": 22, "big": "` + strings.Repeat("x", 4200) + `"}`, "value_too_large", "env.big"},
-	} {
-		st, _, b := c.req("POST", S+"/env.*/series", tt.body, auth...)
-		if errCode(b) != tt.code || st < 400 {
-			t.Errorf("%s: %d %s, want %s", tt.body, st, b, tt.code)
-		}
-		if tt.key != "" && !strings.Contains(b, `"key":"`+tt.key+`"`) {
-			t.Errorf("%s: error doesn't name %s: %s", tt.body, tt.key, b)
-		}
-	}
-	// All or nothing: none of the failed batches added to env.temp.
-	_, _, b = c.req("GET", S+"/env.temp/series", "")
-	if r := decode[seriesResp](t, b); len(r.Points) != 1 {
-		t.Fatalf("a failed batch left points behind: %s", b)
-	}
-	// Only the bare names are reserved: env.series is a fine key, series isn't.
-	if st, _, b := c.req("POST", S+"/*/series", `{"series": 1}`, auth...); st != 400 || !strings.Contains(b, `"key":"series"`) {
-		t.Errorf("reserved member name: %d %s", st, b)
-	}
-	var members []string
-	for i := range 101 {
-		members = append(members, `"k`+itoa(int64(i))+`": 1`)
-	}
-	if st, _, b := c.req("POST", S+"/m.*/series", "{"+strings.Join(members, ",")+"}", auth...); st != 400 || errCode(b) != "batch_needs_object" {
-		t.Errorf("101 members: %d %s", st, b)
 	}
 }
 
@@ -315,7 +280,7 @@ func TestSeriesTimes(t *testing.T) {
 	}
 	// A point at an existing time replaces it.
 	c.req("POST", S+"/temp/series?t="+itoa(base+1000), "20.5", auth...)
-	_, _, b = c.req("GET", S+"/temp/series", "")
+	_, _, b = c.req("GET", S+"/temp/series?order=asc", "")
 	r := decode[seriesResp](t, b)
 	if len(r.Points) != 2 || string(r.Points[0].Value) != "20.5" {
 		t.Fatalf("replace at same t: %s", b)
@@ -347,7 +312,7 @@ func TestSeriesRetentionAndBytes(t *testing.T) {
 			t.Fatalf("point %d: %d %s", i, st, b)
 		}
 	}
-	_, _, b := c.req("GET", S+"/temp/series", "")
+	_, _, b := c.req("GET", S+"/temp/series?order=asc", "")
 	r := decode[seriesResp](t, b)
 	if len(r.Points) != 5 || string(r.Points[0].Value) != "7" || string(r.Points[4].Value) != "11" {
 		t.Fatalf("kept points: %s", b)
@@ -432,7 +397,7 @@ func TestSeriesUsersAndMe(t *testing.T) {
 // A device invited with post writes its own series and nothing common.
 func TestSeriesPostDevice(t *testing.T) {
 	c := newTest(t)
-	own := c.create(`{"label":"room","anyone":"read"}`, "")
+	own := c.create(`{"prefix":"room","anyone":"read"}`, "")
 	o := []string{"Authorization", "Bearer " + own.Token}
 	_, _, b := c.req("POST", "/v1/"+own.Space+"/invites", `{"access":"post","uses":1}`, o...)
 	tk := decode[struct{ Invite string }](t, b)
@@ -440,14 +405,92 @@ func TestSeriesPostDevice(t *testing.T) {
 	c.join(own.Space, tk.Invite, devTok)
 	d := []string{"Authorization", "Bearer " + devTok}
 	sp := "/v1/" + own.Space
-	if st, _, b := c.req("POST", sp+"/by/me/env.*/series", `{"temp":1}`, d...); st != 200 {
+	if st, _, b := c.req("POST", sp+"/by/me/env.temp/series", `1`, d...); st != 201 {
 		t.Fatalf("device write: %d %s", st, b)
 	}
-	if st, _, b := c.req("POST", sp+"/shared/env.*/series", `{"temp":1}`, d...); st != 403 || errCode(b) != "no_access" {
+	if st, _, b := c.req("POST", sp+"/shared/env.temp/series", `1`, d...); st != 403 || errCode(b) != "no_access" {
 		t.Fatalf("common keys: %d %s", st, b)
 	}
 	// Anyone reads it, without knowing the device's ID.
 	if st, _, b := c.req("GET", sp+"/by/*/env.temp", ""); st != 200 || !strings.Contains(b, `"by":"`+devID+`"`) {
 		t.Fatalf("read across: %d %s", st, b)
+	}
+}
+
+// A pattern reads every series under it, merged by time, with keys; pages
+// carry over ties at one t.
+func TestSeriesPattern(t *testing.T) {
+	c := newTest(t)
+	tok, _ := c.anon()
+	c.open("home-cedar-pilot-mango", tok)
+	auth := []string{"Authorization", "Bearer " + tok}
+	S := "/v1/home-cedar-pilot-mango/shared"
+	t0 := time.Now().UnixMilli() - 60_000
+	var w []string
+	for i := int64(0); i < 3; i++ {
+		w = append(w, `{"add":"shared/env.temp","value":`+itoa(20+i)+`,"t":`+itoa(t0+i)+`}`, `{"add":"shared/env.rh","value":`+itoa(40+i)+`,"t":`+itoa(t0+i)+`}`)
+	}
+	c.req("POST", "/v1/home-cedar-pilot-mango/batch", "["+strings.Join(w, ",")+"]", auth...)
+	c.req("PUT", S+"/env.note", `"not a series"`, auth...)
+	type page struct {
+		Items []struct {
+			Key   string
+			T     int64
+			Value json.RawMessage
+		}
+		Next *string
+	}
+	read := func(q string) page {
+		t.Helper()
+		st, _, b := c.req("GET", S+"/env.*/series"+q, "")
+		if st != 200 {
+			t.Fatalf("%s: %d %s", q, st, b)
+		}
+		return decode[page](t, b)
+	}
+	got := func(p page) string {
+		var s []string
+		for _, it := range p.Items {
+			s = append(s, it.Key+"@"+itoa(it.T-t0))
+		}
+		return strings.Join(s, " ")
+	}
+	// Newest first; one t: keys in order. Pages split a tie and carry on.
+	p := read("?limit=3")
+	if got(p) != "env.rh@2 env.temp@2 env.rh@1" || p.Next == nil || *p.Next != itoa(t0+1)+":env.rh" {
+		t.Fatalf("page 1: %s %v", got(p), p.Next)
+	}
+	p = read("?limit=3&after=" + *p.Next)
+	if got(p) != "env.temp@1 env.rh@0 env.temp@0" || p.Next != nil {
+		t.Fatalf("page 2: %s %v", got(p), p.Next)
+	}
+	if p = read("?order=asc&limit=4"); got(p) != "env.rh@0 env.temp@0 env.rh@1 env.temp@1" {
+		t.Fatalf("asc: %s", got(p))
+	}
+	if p = read("?order=asc&after=" + *p.Next); got(p) != "env.rh@2 env.temp@2" {
+		t.Fatalf("asc page 2: %s", got(p))
+	}
+	if p = read("?since=" + itoa(t0+1) + "&before=" + itoa(t0+2)); got(p) != "env.rh@1 env.temp@1" {
+		t.Fatalf("bounds: %s", got(p))
+	}
+	if p = read(""); string(p.Items[0].Value) != "42" {
+		t.Fatalf("values: %s", p.Items[0].Value)
+	}
+	// Nothing matching is an empty page; a key outside the prefix as after is refused.
+	if st, _, b := c.req("GET", S+"/nothing.*/series", ""); st != 200 || !strings.Contains(b, `"items":[]`) {
+		t.Fatalf("no series: %d %s", st, b)
+	}
+	if st, _, _ := c.req("GET", S+"/env.*/series?after="+itoa(t0)+":other", ""); st != 400 {
+		t.Fatal("after outside the prefix")
+	}
+	// More than 100 series under one prefix: narrow it.
+	w = w[:0]
+	for i := range 101 {
+		w = append(w, `{"add":"shared/many.`+itoa(int64(i))+`","value":1}`)
+	}
+	c.req("POST", "/v1/home-cedar-pilot-mango/batch", "["+strings.Join(w[:100], ",")+"]", auth...)
+	c.req("POST", S+"/many.x/series", "1", auth...)
+	if st, _, b := c.req("GET", S+"/many.*/series", ""); st != 400 || errCode(b) != "too_many_series" {
+		t.Fatalf("too many: %d %s", st, b)
 	}
 }

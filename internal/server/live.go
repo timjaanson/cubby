@@ -35,11 +35,10 @@ const (
 )
 
 // liveReadLimit is the largest message a client may send: the largest value
-// or series batch the server accepts, with room for the envelope and for
-// escaping a text value.
+// the server accepts, with room for the envelope and for escaping a text
+// value. A batch body has the same bound.
 func liveReadLimit(c *config.Config) int64 {
-	batch := int64(maxBatchMembers)*(int64(c.Limits.MaxPointSize)+160) + 2
-	return max(2*c.LargestValue(), batch) + 64<<10
+	return 2*c.LargestValue() + 64<<10
 }
 
 // liveAuthWait is a variable so tests can shorten it.

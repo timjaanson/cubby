@@ -31,7 +31,7 @@ func TestCLISeriesRange(t *testing.T) {
 	t0 := time.Now().UnixMilli() - 60_000
 	ms := func(n int64) string { return strconv.FormatInt(n, 10) }
 	for i := int64(0); i < 5; i++ {
-		args := []string{"add", space + "/shared/m1", ms(i), "--time", ms(t0 + i)}
+		args := []string{"add", space + "/shared/m1", ms(i), "--t", ms(t0 + i)}
 		if i == 4 {
 			args = append(args, "--ttl", "1h")
 		}
@@ -41,29 +41,45 @@ func TestCLISeriesRange(t *testing.T) {
 	}
 	lines := func(s string) []string { return strings.Split(s, "\n") }
 
-	// --desc pages back past the server's page; --limit stops it.
-	out, code := cli(t, home, "series", space+"/shared/m1", "--desc", "--limit", "3")
+	// --order desc pages back past the server's page; --limit stops it.
+	out, code := cli(t, home, "series", space+"/shared/m1", "--order", "desc", "--limit", "3")
 	if l := lines(out); code != 0 || len(l) != 3 || l[0] != ms(t0+4)+"\t4" || l[2] != ms(t0+2)+"\t2" {
 		t.Fatalf("desc: %d %q", code, out)
 	}
-	// Both bounds exclusive.
-	out, _ = cli(t, home, "series", space+"/shared/m1", "--since", ms(t0), "--until", ms(t0+3))
-	if out != ms(t0+1)+"\t1\n"+ms(t0+2)+"\t2" {
-		t.Fatalf("since/until: %q", out)
+	// since inclusive, before exclusive.
+	out, _ = cli(t, home, "series", space+"/shared/m1", "--since", ms(t0+1), "--before", ms(t0+3))
+	if out != ms(t0+2)+"\t2\n"+ms(t0+1)+"\t1" {
+		t.Fatalf("since/before: %q", out)
 	}
-	out, _ = cli(t, home, "series", space+"/shared/m1", "--desc", "--until", ms(t0+1))
+	out, _ = cli(t, home, "series", space+"/shared/m1", "--order", "desc", "--before", ms(t0+1))
 	if out != ms(t0)+"\t0" {
-		t.Fatalf("desc until: %q", out)
+		t.Fatalf("desc before: %q", out)
+	}
+	// Newest first by default; --order asc for oldest first.
+	if out, _ = cli(t, home, "series", space+"/shared/m1", "--limit", "2"); out != ms(t0+4)+"\t4\n"+ms(t0+3)+"\t3" {
+		t.Fatalf("newest first: %q", out)
+	}
+	if out, _ = cli(t, home, "series", space+"/shared/m1", "--order", "asc", "--limit", "2"); out != ms(t0)+"\t0\n"+ms(t0+1)+"\t1" {
+		t.Fatalf("oldest first: %q", out)
+	}
+	// Several series, merged by time, each line with its key; pages follow.
+	cli(t, home, "add", space+"/shared/m2", "9", "--t", ms(t0+4))
+	out, _ = cli(t, home, "series", space+"/shared/m*", "--limit", "3")
+	if out != "m1\t"+ms(t0+4)+"\t4\nm2\t"+ms(t0+4)+"\t9\nm1\t"+ms(t0+3)+"\t3" {
+		t.Fatalf("pattern: %q", out)
+	}
+	if out, _ = cli(t, home, "series", space+"/shared/m*", "--order", "asc"); len(lines(out)) != 6 || !strings.HasPrefix(out, "m1\t"+ms(t0)) {
+		t.Fatalf("pattern asc: %q", out)
 	}
 	// --json is NDJSON and carries expires when a point has one.
-	out, _ = cli(t, home, "series", space+"/shared/m1", "--json", "--desc", "--limit", "2")
+	out, _ = cli(t, home, "series", space+"/shared/m1", "--json", "--order", "desc", "--limit", "2")
 	l := lines(out)
 	want := `{"t":` + ms(t0+4) + `,"value":4,"expires":` + ms(t0+4+3_600_000) + `}`
 	if len(l) != 2 || l[0] != want || l[1] != `{"t":`+ms(t0+3)+`,"value":3}` {
 		t.Fatalf("json: %q", out)
 	}
-	if _, code := cli(t, home, "series", space+"/shared/m1", "--limit", "10001"); code == 0 {
-		t.Fatal("window over 10000 accepted")
+	if _, code := cli(t, home, "series", space+"/shared/m1", "--order", "newest"); code != 64 {
+		t.Fatal("bad --order accepted")
 	}
 }
 
@@ -82,8 +98,8 @@ func TestCLINewSlugifies(t *testing.T) {
 	if out, code := cli(t, home, "new", "Home environment"); code != 0 || !strings.HasPrefix(out, "home-environment-") || strings.Count(out, "-") != 5 {
 		t.Fatalf("new: %d %q", code, out)
 	}
-	if out, code := cli(t, home, "new", "--label", "  Kitchen & Bath!! "); code != 0 || !strings.HasPrefix(out, "kitchen-bath-") {
-		t.Fatalf("--label: %d %q", code, out)
+	if out, code := cli(t, home, "new", "  Kitchen & Bath!! "); code != 0 || !strings.HasPrefix(out, "kitchen-bath-") {
+		t.Fatalf("punctuation: %d %q", code, out)
 	}
 	long := strings.Repeat("Very long label ", 10)
 	if out, code := cli(t, home, "new", long); code != 0 || len(out) > 63 {

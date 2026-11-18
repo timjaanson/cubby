@@ -15,7 +15,7 @@ func TestDelegatedInvites(t *testing.T) {
 	sp := "/v1/" + own.Space
 	o := bearer(own.Token)
 	idOf := func(tok string) string {
-		_, _, b := c.req("GET", sp+"/access", "", bearer(tok)...)
+		_, _, b := c.req("GET", sp, "", bearer(tok)...)
 		var a struct{ ID string }
 		json.Unmarshal([]byte(b), &a)
 		return a.ID
@@ -26,11 +26,11 @@ func TestDelegatedInvites(t *testing.T) {
 	_, anna, _ := c.join(own.Space, annaInv, "")
 	_, vicInv := c.mint(own.Space, own.Token, `{"access":"read"}`)
 	_, vic, _ := c.join(own.Space, vicInv, "")
-	if _, _, b := c.req("GET", sp+"/access", "", bearer(anna)...); !strings.Contains(b, `"canInvite":true`) || !strings.Contains(b, `"invite":"post"`) {
+	if _, _, b := c.req("GET", sp, "", bearer(anna)...); !strings.Contains(b, `"canInvite":true`) || !strings.Contains(b, `"inviters":"post"`) {
 		t.Fatalf("access: %s", b)
 	}
 	// Below the invite level (post), a reader can't invite at all.
-	if _, _, b := c.req("GET", sp+"/access", "", bearer(vic)...); !strings.Contains(b, `"canInvite":false`) {
+	if _, _, b := c.req("GET", sp, "", bearer(vic)...); !strings.Contains(b, `"canInvite":false`) {
 		t.Fatalf("reader access: %s", b)
 	}
 	if s, _, b := c.req("POST", sp+"/invites", `{}`, bearer(vic)...); s != 403 || errCode(b) != "owner_only" {
@@ -59,7 +59,7 @@ func TestDelegatedInvites(t *testing.T) {
 	if s, _, _ := c.req("DELETE", sp+"/members/"+idOf(anna), "", o...); s != 200 {
 		t.Fatal("remove anna")
 	}
-	if _, _, b := c.req("GET", sp+"/access", "", bearer(ben)...); !strings.Contains(b, `"access":"all"`) {
+	if _, _, b := c.req("GET", sp, "", bearer(ben)...); !strings.Contains(b, `"access":"all"`) {
 		t.Fatalf("ben stays: %s", b)
 	}
 	if s, _, b := c.join(own.Space, benInv, ""); s != 404 || errCode(b) != "invite_invalid" {
@@ -72,7 +72,7 @@ func TestDelegatedInvites(t *testing.T) {
 
 	// invite owner stops members and ends their open invites. Grants stay.
 	_, danInv := c.mint(own.Space, cleo, `{}`)
-	if s, _, b := c.req("PATCH", sp, `{"invite":"owner"}`, o...); s != 200 || !strings.Contains(b, `"invite":"owner"`) {
+	if s, _, b := c.req("PATCH", sp, `{"inviters": "owner"}`, o...); s != 200 || !strings.Contains(b, `"inviters":"owner"`) {
 		t.Fatalf("settings: %d %s", s, b)
 	}
 	if s, _, b := c.req("POST", sp+"/invites", `{}`, bearer(cleo)...); s != 403 || errCode(b) != "owner_only" {
@@ -81,17 +81,17 @@ func TestDelegatedInvites(t *testing.T) {
 	if s, _, _ := c.join(own.Space, danInv, ""); s == 200 || s == 201 {
 		t.Fatal("member invite works after invite: owner")
 	}
-	if _, _, b := c.req("GET", sp+"/access", "", bearer(cleo)...); !strings.Contains(b, `"canInvite":false`) || !strings.Contains(b, `"access":"all"`) {
+	if _, _, b := c.req("GET", sp, "", bearer(cleo)...); !strings.Contains(b, `"canInvite":false`) || !strings.Contains(b, `"access":"all"`) {
 		t.Fatalf("cleo after owner only: %s", b)
 	}
 	// Owners still mint, and changing anyone doesn't reset invite.
 	c.mint(own.Space, own.Token, `{}`)
-	if _, _, b := c.req("PATCH", sp, `{"anyone":"read"}`, o...); !strings.Contains(b, `"invite":"owner"`) {
+	if _, _, b := c.req("PATCH", sp, `{"anyone":"read"}`, o...); !strings.Contains(b, `"inviters":"owner"`) {
 		t.Fatalf("anyone keeps invite: %s", b)
 	}
 	// Created with invite owner.
-	s, _, b := c.req("POST", "/v1/spaces", `{"invite":"owner"}`, o...)
-	if s != 201 || !strings.Contains(b, `"invite":"owner"`) {
+	s, _, b := c.req("POST", "/v1/spaces", `{"inviters": "owner"}`, o...)
+	if s != 201 || !strings.Contains(b, `"inviters":"owner"`) {
 		t.Fatalf("create with invite: %d %s", s, b)
 	}
 }
@@ -108,7 +108,7 @@ func TestDelegatedTokenFollowsMinterLevel(t *testing.T) {
 	_, gives := c.mint(own.Space, m, `{"access":"all"}`)
 	_, keeps := c.mint(own.Space, m, `{"access":"post"}`)
 	var a struct{ ID string }
-	_, _, b := c.req("GET", sp+"/access", "", bearer(m)...)
+	_, _, b := c.req("GET", sp, "", bearer(m)...)
 	json.Unmarshal([]byte(b), &a)
 	c.req("PUT", sp+"/members/"+a.ID, `{"access":"post"}`, o...)
 	if s, _, b := c.join(own.Space, gives, ""); s != 404 || errCode(b) != "invite_invalid" {

@@ -104,6 +104,18 @@ func (s *Store) Rights(space, visitor string) (*access.Rights, error) {
 			r.Member = max(r.Member, g.Level)
 		}
 	}
+	// When that level ends: the latest end among its live grants, 0 if one
+	// has none.
+	first := true
+	for _, g := range c.grants[visitor] {
+		if !g.Live(now) || g.Level != r.Member {
+			continue
+		}
+		if first || g.Until == 0 || (r.MemberUntil != 0 && g.Until > r.MemberUntil) {
+			r.MemberUntil = g.Until
+		}
+		first = false
+	}
 	if until, ok := c.bans[visitor]; ok && r.Member != access.Owner && (until == 0 || until > now.UnixMilli()) {
 		r.Banned, r.BannedUntil = true, until
 		return r, nil
@@ -172,13 +184,14 @@ type Invite struct {
 	ID             string       `json:"id"`
 	Label          string       `json:"label"`
 	Access         access.Level `json:"access"`
-	UsesLeft       *int64       `json:"usesLeft"`
-	Until          *int64       `json:"until"`
-	GrantFor       *int64       `json:"grantFor"`
+	UsesLeft       *int64       `json:"uses"`
+	Until          *int64       `json:"expires"`
+	GrantFor       *int64       `json:"-"`         // ms
+	AccessTTL      *int64       `json:"accessTtl"` // seconds
 	State          string       `json:"state"`
 	Members        int          `json:"members"`
-	CreatedAt      int64        `json:"createdAt"`
-	LastRedeemedAt *int64       `json:"lastRedeemedAt"`
+	CreatedAt      int64        `json:"created"`
+	LastRedeemedAt *int64       `json:"lastUsed"`
 	By             *string      `json:"by"`
 }
 
@@ -189,10 +202,10 @@ type Member struct {
 	ID         string       `json:"id"`
 	Access     access.Level `json:"access"`
 	Since      int64        `json:"since"`
-	Until      *int64       `json:"until"`
+	Until      *int64       `json:"expires"`
 	Label      *string      `json:"label"`
 	InvitedBy  *string      `json:"invitedBy"`
-	LastUsedAt *int64       `json:"lastUsedAt"`
+	LastUsedAt *int64       `json:"lastSeen"`
 }
 
 func nullable(n sql.NullInt64) *int64 {
@@ -228,6 +241,10 @@ func scanInvite(sc interface{ Scan(...any) error }, now int64) (Invite, error) {
 	}
 	t.Access, _ = access.ParseLevel(level)
 	t.UsesLeft, t.Until, t.GrantFor, t.LastRedeemedAt = nullable(uses), nullable(until), nullable(grantFor), nullable(last)
+	if t.GrantFor != nil {
+		sec := *t.GrantFor / 1000
+		t.AccessTTL = &sec
+	}
 	if by.Valid {
 		t.By = &by.String
 	}

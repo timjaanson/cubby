@@ -54,9 +54,9 @@ func TestPrivateByDefault(t *testing.T) {
 	stranger, _ := c.anon()
 	gone := "/v1/gone-cedar-pilot-mango-frost"
 	for _, r := range []struct{ method, path, body string }{
-		{"GET", "/shared/k", ""}, {"GET", "/shared/*", ""}, {"GET", "/shared/*/watch?version=0", ""},
+		{"GET", "/shared/k", ""}, {"GET", "/shared/*", ""}, {"GET", "/shared/*/watch?after=0", ""},
 		{"PUT", "/shared/k", "x"}, {"GET", "/to/me/k", ""}, {"GET", "/by/*/k", ""}, {"GET", "/shared/k/series", ""},
-		{"GET", "/access", ""}, {"GET", "/invites", ""}, {"PATCH", "", `{"anyone":"all"}`}, {"DELETE", "", ""},
+		{"GET", "", ""}, {"GET", "/invites", ""}, {"PATCH", "", `{"anyone":"all"}`}, {"DELETE", "", ""},
 	} {
 		for _, who := range [][]string{nil, bearer(stranger)} {
 			s1, h1, b1 := c.req(r.method, sp+r.path, r.body, who...)
@@ -118,7 +118,7 @@ func TestAnyoneLevels(t *testing.T) {
 		if s, _, _ := c.req("PUT", sp+"/to/me/x", `1`, bearer(stranger)...); s != want(k.to) {
 			t.Errorf("%s to write: %d", k.anyone, s)
 		}
-		if _, _, b := c.req("GET", sp+"/access", ""); !strings.Contains(b, `"anyone":"`+k.anyone+`"`) || !strings.Contains(b, `"access":"`+k.anyone+`"`) || !strings.Contains(b, `"id":null`) {
+		if _, _, b := c.req("GET", sp, ""); !strings.Contains(b, `"anyone":"`+k.anyone+`"`) || !strings.Contains(b, `"access":"`+k.anyone+`"`) || !strings.Contains(b, `"id":null`) {
 			t.Errorf("%s access: %s", k.anyone, b)
 		}
 		// Strangers neither invite nor list members, whatever the anyone level.
@@ -136,12 +136,12 @@ func TestAnyoneLevels(t *testing.T) {
 	if s, _, b := c.req("PATCH", sp, `{"anyone":"read"}`, bearer(stranger)...); s != 403 || errCode(b) != "owner_only" {
 		t.Fatalf("non-owner patch: %d %s", s, b)
 	}
-	for _, bad := range []string{`{"anyone":"owner"}`, `{"anyone":"respond"}`, `{"invite":"none"}`, `{"public":"all"}`} {
+	for _, bad := range []string{`{"anyone":"owner"}`, `{"anyone":"respond"}`, `{"inviters": "none"}`, `{"public":"all"}`} {
 		if s, _, b := c.req("PATCH", sp, bad, bearer(own.Token)...); s != 400 {
 			t.Fatalf("patch %s: %d %s", bad, s, b)
 		}
 	}
-	if s, _, b := c.req("PATCH", sp, `{"invite":"owner"}`, bearer(own.Token)...); s != 200 || !strings.Contains(b, `{"anyone":"all","invite":"owner"}`) {
+	if s, _, b := c.req("PATCH", sp, `{"inviters": "owner"}`, bearer(own.Token)...); s != 200 || !strings.Contains(b, `{"anyone":"all","inviters":"owner"}`) {
 		t.Fatalf("patch invite: %d %s", s, b)
 	}
 	if s, _, b := c.req("PATCH", sp, `{"anyone":"none"}`, bearer(own.Token)...); s != 200 || !strings.Contains(b, `"anyone":"none"`) {
@@ -155,23 +155,25 @@ func TestAnyoneLevels(t *testing.T) {
 func TestInvites(t *testing.T) {
 	c := newTest(t)
 	c.cfg.Server.RateLimits = new(bool)
-	own := c.create(`{"label":"family"}`, "")
+	own := c.create(`{"prefix":"family"}`, "")
 	sp := "/v1/" + own.Space
 
-	// Defaults: access all, 10 uses, 7 days.
+	// Defaults: access all, any number of uses, 7 days.
 	s, _, b := c.req("POST", sp+"/invites", ``, bearer(own.Token)...)
 	var mint struct {
 		ID, Invite, Access string
 		Uses               *int64
-		Until              *int64
-		GrantFor           *int64
+		Expires            *int64
+		AccessTTL          *int64 `json:"accessTtl"`
 	}
 	json.Unmarshal([]byte(b), &mint)
 	week := time.Now().Add(7 * 24 * time.Hour).UnixMilli()
-	if s != 201 || mint.Access != "all" || mint.Uses == nil || *mint.Uses != 10 ||
-		mint.Until == nil || *mint.Until < week-60_000 || *mint.Until > week+60_000 || mint.GrantFor != nil {
+	if s != 201 || mint.Access != "all" || mint.Uses != nil ||
+		mint.Expires == nil || *mint.Expires < week-60_000 || *mint.Expires > week+60_000 || mint.AccessTTL != nil {
 		t.Fatalf("defaults: %d %s", s, b)
 	}
+	_, _, b = c.req("POST", sp+"/invites", `{"uses":10}`, bearer(own.Token)...)
+	json.Unmarshal([]byte(b), &mint)
 	// Ten visitors join, the eleventh can't. Each is a new visitor.
 	var members []string
 	for i := range 10 {
@@ -239,12 +241,12 @@ func TestGrantLifetimes(t *testing.T) {
 	sp := "/v1/" + own.Space
 
 	// The token's window is for joining. The grant outlives it.
-	_, short := c.mint(own.Space, own.Token, `{"until":"1s"}`)
+	_, short := c.mint(own.Space, own.Token, `{"ttl":"1s"}`)
 	_, vt, _ := c.join(own.Space, short, "")
 	// grantFor ends each grant on its own.
-	_, brief := c.mint(own.Space, own.Token, `{"grantFor":"1s","uses":null,"until":null}`)
+	_, brief := c.mint(own.Space, own.Token, `{"accessTtl":"1s","uses":null,"ttl":null}`)
 	_, vt2, b := c.join(own.Space, brief, "")
-	if !strings.Contains(b, `"until":1`) {
+	if !strings.Contains(b, `"expires":1`) {
 		t.Fatalf("grantFor until: %s", b)
 	}
 	time.Sleep(1100 * time.Millisecond)
@@ -304,12 +306,12 @@ func TestMembers(t *testing.T) {
 	if !strings.Contains(b, `"id":"`+id+`","access":"post"`) || !strings.Contains(b, `"access":"owner"`) || strings.Contains(b, "invitedBy") {
 		t.Fatalf("member list: %s", b)
 	}
-	if _, _, b := c.req("GET", sp+"/members", "", o...); !strings.Contains(b, `"invitedBy"`) || !strings.Contains(b, `"lastUsedAt"`) {
+	if _, _, b := c.req("GET", sp+"/members", "", o...); !strings.Contains(b, `"invitedBy"`) || !strings.Contains(b, `"lastSeen"`) {
 		t.Fatalf("owner list: %s", b)
 	}
 	// Revoking one invite leaves the other grant.
 	c.req("DELETE", sp+"/invites/"+idPost, "", o...)
-	if _, _, b := c.req("GET", sp+"/access", "", a...); !strings.Contains(b, `"access":"read"`) {
+	if _, _, b := c.req("GET", sp, "", a...); !strings.Contains(b, `"access":"read"`) {
 		t.Fatalf("after revoking post: %s", b)
 	}
 
@@ -331,7 +333,7 @@ func TestMembers(t *testing.T) {
 	}
 
 	// A ban keeps them out, takes their grants, and shows to owners only.
-	if s, _, b := c.req("PUT", sp+"/members/"+id, `{"access":"banned","until":"1h"}`, o...); s != 200 || !strings.Contains(b, `"access":"banned"`) {
+	if s, _, b := c.req("PUT", sp+"/members/"+id, `{"access":"banned","ttl":"1h"}`, o...); s != 200 || !strings.Contains(b, `"access":"banned"`) {
 		t.Fatalf("ban: %d %s", s, b)
 	}
 	if s, _, b := c.req("GET", sp+"/shared/x", "", a...); s != 403 || errCode(b) != "banned" {
@@ -347,7 +349,7 @@ func TestMembers(t *testing.T) {
 	if s, _, b := c.req("DELETE", sp+"/members/"+id, "", o...); s != 200 || !strings.Contains(b, `"removed":true`) {
 		t.Fatalf("remove: %d %s", s, b)
 	}
-	if _, _, b := c.req("GET", sp+"/access", "", a...); !strings.Contains(b, `"access":"read"`) {
+	if _, _, b := c.req("GET", sp, "", a...); !strings.Contains(b, `"access":"read"`) {
 		t.Fatalf("after removing: %s", b)
 	}
 
@@ -379,7 +381,7 @@ func TestConcurrentRedeem(t *testing.T) {
 	}
 	wg.Wait()
 	_, _, b := c.req("GET", "/v1/"+own.Space+"/invites", "", bearer(own.Token)...)
-	if !strings.Contains(b, `"usesLeft":1`) || !strings.Contains(b, `"members":1`) {
+	if !strings.Contains(b, `"uses":1`) || !strings.Contains(b, `"members":1`) {
 		t.Fatalf("double redeem: %s", b)
 	}
 }
@@ -412,7 +414,7 @@ func TestAdminOwner(t *testing.T) {
 	if s, _, _ := c.req("DELETE", sp, "", bearer(own.Token)...); s != 200 {
 		t.Fatal("delete")
 	}
-	if s, _, _ := c.req("GET", sp+"/access", "", bearer(own.Token)...); s != 404 {
+	if s, _, _ := c.req("GET", sp, "", bearer(own.Token)...); s != 404 {
 		t.Fatal("deleted space still there")
 	}
 	_ = http.MethodGet

@@ -125,7 +125,7 @@ func Banned(until int64) *Error {
 	if until != 0 {
 		u = until
 	}
-	return &Error{Status: 403, Code: "banned", Message: "This visitor is banned from this space.", Extra: map[string]any{"until": u}}
+	return &Error{Status: 403, Code: "banned", Message: "This visitor is banned from this space.", Extra: map[string]any{"expires": u}}
 }
 
 // NotSender is a write to someone else's to/ slot.

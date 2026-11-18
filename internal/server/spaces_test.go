@@ -9,12 +9,12 @@ import (
 
 type spacesOut struct {
 	Items []struct {
-		Space, Access, Via         string
-		Since, Changed, LastActive int64
-		Until                      *int64
-		Members, Keys              int
-		Bytes                      int64
-		Settings                   struct{ Anyone, Invite string }
+		Space, Access, Via string
+		Since, LastActive  int64
+		Expires            *int64
+		Members, Keys      int
+		Bytes              int64
+		Settings           struct{ Anyone, Inviters string }
 	}
 	Next *string
 }
@@ -52,9 +52,19 @@ func TestSpacesList(t *testing.T) {
 	}
 	it := out.Items[0]
 	if it.Access != "owner" || it.Via != "created" || it.Members != 1 || it.Keys != 1 || it.Bytes == 0 ||
-		it.Since == 0 || it.Changed != it.Since || it.LastActive == 0 || it.Settings.Anyone != "read" || it.Until != nil {
+		it.Since == 0 || it.LastActive == 0 || it.Settings.Anyone != "read" || it.Expires != nil {
 		t.Fatalf("item %+v", it)
 	}
+
+	// Activity moves a space up: a write to A puts it first.
+	time.Sleep(1100 * time.Millisecond) // lastActive has second granularity
+	c.req("PUT", "/v1/"+a.Space+"/shared/x", `1`, bearer(aliceTok)...)
+	if got := spaceNames(c.spaces(aliceTok, "")); got[0] != a.Space {
+		t.Fatalf("most recently active first: %v", got)
+	}
+	c.req("PUT", "/v1/"+b.Space+"/shared/x", `2`, bearer(aliceTok)...)
+	time.Sleep(1100 * time.Millisecond)
+	c.req("PUT", "/v1/"+b.Space+"/shared/x", `3`, bearer(aliceTok)...)
 
 	// Paging: one at a time.
 	p1 := c.spaces(aliceTok, "?limit=1")
@@ -77,7 +87,7 @@ func TestSpacesList(t *testing.T) {
 	since := bob.Items[0].Since
 	code := c.pairingCode(bobTok, "")
 	bob2Tok, _ := c.newDevice(code.Code)
-	if b2 := c.spaces(bob2Tok, ""); len(b2.Items) != 1 || b2.Items[0].Since != since || b2.Items[0].Changed != since {
+	if b2 := c.spaces(bob2Tok, ""); len(b2.Items) != 1 || b2.Items[0].Since != since {
 		t.Fatalf("bob's second device %+v", b2)
 	}
 	// Open spaces Bob only wrote to are not his.
@@ -98,7 +108,7 @@ func TestSpacesList(t *testing.T) {
 		t.Fatalf("set member %d %s", s, body)
 	}
 	bob = c.spaces(bobTok, "")
-	if bob.Items[0].Access != "read" || bob.Items[0].Via != "added" || bob.Items[0].Since != since || bob.Items[0].Changed <= since {
+	if bob.Items[0].Access != "read" || bob.Items[0].Via != "added" || bob.Items[0].Since != since {
 		t.Fatalf("after level change %+v", bob.Items[0])
 	}
 	// Alice's A moved to the top of her list? No: her own membership didn't change.
@@ -143,7 +153,7 @@ func TestSpacesListRefusals(t *testing.T) {
 	if s, _, b := c.req("GET", "/v1/spaces", ""); s != 401 || errCode(b) != "missing_token" {
 		t.Fatalf("no token %d %s", s, b)
 	}
-	for _, q := range []string{"?limit=0", "?limit=101", "?after=x", "?after=12:NOT_A_SPACE", "?bogus=1"} {
+	for _, q := range []string{"?limit=0", "?limit=1001", "?after=1:2:x", "?after=x", "?after=12:NOT_A_SPACE", "?bogus=1"} {
 		if s, _, b := c.req("GET", "/v1/spaces"+q, "", bearer(own.Token)...); s != 400 {
 			t.Fatalf("%s: %d %s", q, s, b)
 		}

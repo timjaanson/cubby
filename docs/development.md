@@ -4,7 +4,7 @@ Go 1.26+, no C compiler (SQLite is pure Go), Node 22+ for the JS checks.
 
 ```sh
 go test -race ./... && go vet ./...
-sh tools/jstest/run.sh      # kv.js, live, pulses, rooms, presence, inbox, devices, QR, against a fresh server
+sh tools/jstest/run.sh      # kv.js, live, pulses, presence, inbox, devices, spaces and batch, QR, against a fresh server
 ./build.sh                  # dist/cubby-macos, -linux-amd64, -linux-arm64
 ```
 

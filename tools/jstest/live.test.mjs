@@ -1,7 +1,7 @@
 // kv.js with { live: true } against a real server: the same answers as HTTP,
 // requests and watches over the socket, recovery after a drop, fallback.
 const S = process.env.S
-const { kv, createSpace, devices, KvError } = await import(process.env.MOD)
+const { kv, visitor, KvError } = await import(process.env.MOD)
 const assert = (c, m) => { if (!c) { console.error("FAIL:", m); process.exit(1) } }
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const until = async (f, m, ms = 3000) => {
@@ -21,7 +21,7 @@ class TrackedWS extends WebSocket {
   constructor(url) { super(url); sockets.push(this) }
 }
 
-const { space } = await createSpace({ server: S, keyName: "owner" })
+const { space } = await visitor({ server: S, keyName: "owner" }).createSpace()
 const http = kv(space, { server: S, keyName: "owner" })
 const db = kv(space, { server: S, keyName: "owner", live: true, fetch: countingFetch, WebSocket: TrackedWS })
 assert(http.live.status === "http" && db.live.status === "closed", "initial status " + db.live.status)
@@ -36,32 +36,31 @@ const before = dataFetches
 
 // Same answers as HTTP.
 {
-  const v = await db.shared.set("note", { text: "milk", n: 1.5 }, { ttl: 30, ifVersion: 0 })
-  const a = await db.shared.getEntry("note"), b = await http.shared.getEntry("note")
-  assert(a.version === v && JSON.stringify(a) === JSON.stringify(b), "getEntry " + JSON.stringify([a, b]))
+  const { version: v } = await db.shared.set("note", { text: "milk", n: 1.5 }, { ttl: 30, ifVersion: 0 })
+  const a = await db.shared.get("note"), b = await http.shared.get("note")
+  assert(a.version === v && JSON.stringify(a) === JSON.stringify(b), "get " + JSON.stringify([a, b]))
   assert(a.expires - a.t === 30000 && a.mine, "metadata")
-  assert(db.writeBudget.visitor.remaining >= 0 && db.writeBudget.observedAt > 0, "write budget")
   assert(await db.shared.get("missing") === null, "missing key")
   await db.shared.set("t", "text")
-  assert(await db.shared.get("t") === "text", "string value")
+  assert((await db.shared.get("t")).value === "text", "string value")
   const l1 = await db.shared.list("*"), l2 = await http.shared.list("*")
   assert(JSON.stringify(l1.items) === JSON.stringify(l2.items), "list")
   await db.shared.add("temp", 21.5)
-  await db.shared.add("env.*", { rh: 40, co2: 600 })
+  await db.batch([{ add: "shared/env.rh", value: 40 }, { add: "shared/env.co2", value: 600 }])
   const pts = await db.shared.series("temp")
-  assert(pts.points.length === 1 && pts.points[0].value === 21.5, "series")
+  assert(pts.items.length === 1 && pts.items[0].value === 21.5 && pts.next === null, "series")
   let err = await db.shared.set("note", 2, { ifVersion: 1 }).catch(e => e)
   assert(err instanceof KvError && err.code === "version_conflict" && err.status === 412, "conflict " + err.code)
   err = await db.shared.set("late", 1, { ifBefore: 0 }).catch(e => e)
   assert(err.code === "too_late" && err.details.t > 0, "deadline")
-  assert(await db.shared.delete("t") === true && await db.shared.delete("t") === false, "delete")
-  assert(await db.shared.update("count", n => (n || 0) + 1) === 1, "update")
+  assert((await db.shared.delete("t")).version > 0 && await db.shared.delete("t") === null, "delete")
+  assert((await db.shared.update("count", n => (n || 0) + 1)).value === 1, "update")
   await db.to("me").set("pref", "dark")
-  await db.mine.set("name", "Tim")
-  assert(await db.to("me").get("pref") === "dark" && await http.inbox.from("me").get("pref") === "dark", "to/me")
-  const inboxItems = (await db.inbox.list("*")).items
+  await db.by("me").set("name", "Tim")
+  assert((await db.to("me").get("pref")).value === "dark" && (await http.inbox("me").get("pref")).value === "dark", "to/me")
+  const inboxItems = (await db.inbox("*").list("*")).items
   assert(inboxItems.length === 1 && inboxItems[0].from === inboxItems[0].to && inboxItems[0].mine, "own note in inbox " + JSON.stringify(inboxItems))
-  assert(await db.mine.get("name") === "Tim" && (await db.by.list("name")).items.length === 1, "by area")
+  assert((await db.by("me").get("name")).value === "Tim" && (await db.by("*").list("name")).items.length === 1, "by area")
 }
 assert(dataFetches === before, `data requests used HTTP while open: ${dataFetches - before}`)
 
@@ -86,7 +85,7 @@ assert(dataFetches === before, `data requests used HTTP while open: ${dataFetche
   const latency = Date.now() - t0
   // HTTP watchers see socket writes.
   const httpGot = []
-  const stopHttp = http.shared.watch("item.*", c => httpGot.push(c), { from: "now" })
+  const stopHttp = http.shared.watch("item.*", c => httpGot.push(c), { after: "now" })
   await sleep(100)
   await db.shared.set("item.2", "b")
   await until(() => httpGot.some(c => c.key === "item.2"), "socket write reaches http watch")
@@ -113,7 +112,7 @@ assert(dataFetches === before, `data requests used HTTP while open: ${dataFetche
 // A "now" watch syncs at once over the socket.
 {
   let synced = false
-  const stop = db.shared.watch("x.*", () => {}, { from: "now", onSync: () => { synced = true } })
+  const stop = db.shared.watch("x.*", () => {}, { after: "now", onSync: () => { synced = true } })
   await until(() => synced, "now watch syncs", 1000)
   stop()
 }
@@ -121,33 +120,33 @@ assert(dataFetches === before, `data requests used HTTP while open: ${dataFetche
 // Anonymous reads, then the first write creates a visitor and authenticates
 // the same socket.
 {
-  const { space: pub } = await createSpace({ server: S, keyName: "owner", anyone: "all" })
+  const { space: pub } = await visitor({ server: S, keyName: "owner" }).createSpace({ anyone: "all" })
   const guest = kv(pub, { server: S, keyName: "guest-" + Date.now(), live: true })
   const got = []
   const stop = guest.shared.watch("*", c => got.push(c))
   await until(() => guest.live.status === "open", "guest socket")
   await guest.shared.set("hello", "world")
   await until(() => got.some(c => c.key === "hello" && c.mine), "guest write over socket")
-  assert((await guest.id()).startsWith("u_"), "guest visitor")
+  assert((await guest.open()).id.startsWith("u_"), "guest visitor")
   stop()
 }
 
 // A device signed out elsewhere: its key comes back as a new visitor on the
 // same socket, and the write goes through.
 {
-  const { space: pub } = await createSpace({ server: S, keyName: "owner", anyone: "all" })
+  const { space: pub } = await visitor({ server: S, keyName: "owner" }).createSpace({ anyone: "all" })
   const d = kv(pub, { server: S, keyName: "stale", live: true })
   await d.shared.set("a", 0)
-  const before = await d.id()
+  const before = (await d.open()).id
   await until(() => d.live.status === "open", "stale socket")
-  const code = await devices({ server: S, keyName: "stale" }).pair()
-  const other = devices({ server: S, keyName: "stale-2" })
+  const code = await visitor({ server: S, keyName: "stale" }).pair()
+  const other = visitor({ server: S, keyName: "stale-2" })
   await other.accept(code.code)
-  await other.remove((await other.list()).find(x => !x.current).id)
+  await other.devices.remove((await other.devices.list()).find(x => !x.current).id)
   await d.shared.set("a", 1)
-  const after = await d.id()
+  const after = (await d.open()).id
   assert(after.startsWith("u_") && after !== before, "new visitor over socket " + before + " " + after)
-  assert((await d.shared.getEntry("a")).by === after, "write by the new visitor")
+  assert((await d.shared.get("a")).by === after, "write by the new visitor")
 }
 
 // No WebSocket possible: falls back to HTTP for good, everything still works.

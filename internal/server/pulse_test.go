@@ -71,7 +71,7 @@ func TestPulseHTTP(t *testing.T) {
 	_, _, lb := c.req("GET", sp+"/shared/*", "", o...)
 	var l struct{ Version int64 }
 	json.Unmarshal([]byte(lb), &l)
-	watch := c.listen(sp+"/shared/*/watch?timeout=1&version="+itoa(l.Version), o...)
+	watch := c.listen(sp+"/shared/*/watch?timeout=1&after="+itoa(l.Version), o...)
 	c.req("POST", sp+"/shared/cursor/pulse", `2`, o...)
 	if b := <-watch; !strings.Contains(b, `"changes":[]`) {
 		t.Fatalf("pulse woke a watch: %s", b)

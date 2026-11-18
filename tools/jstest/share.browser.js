@@ -8,9 +8,9 @@ async page => {
   page.on('pageerror', error => errors.push(error.message))
   await page.evaluate(async base => {
     document.documentElement.innerHTML = '<body></body>'
-    const { createSpace, kv } = await import(base + '/kv.js')
+    const { visitor, kv } = await import(base + '/kv.js')
     await import(base + '/share.js')
-    const { space } = await createSpace({ server: base })
+    const { space } = await visitor({ server: base }).createSpace()
     window.testDB = kv(space, { server: base })
     window.testSpace = space
     const el = document.createElement('cubby-share')
@@ -28,30 +28,31 @@ async page => {
   // Closed and reopened, the panel starts at invites, the key is gone.
   await page.getByRole('button', { name: 'Close', exact: true }).click()
   await page.getByRole('button', { name: 'Share', exact: true }).click()
-  await page.getByRole('button', { name: 'Create group link', exact: true }).waitFor()
+  await page.getByRole('button', { name: 'Create link', exact: true }).waitFor()
   if (await page.locator('cubby-share textarea.key').count()) throw Error('backup key shown after dismissal')
-  await page.getByRole('button', { name: 'Create group link', exact: true }).click()
+  await page.getByRole('button', { name: 'Create link', exact: true }).click()
   await page.getByRole('button', { name: 'Copy', exact: true }).waitFor()
-  // An owner link: under More options, armed by a first click, one use.
+  const groupInv = await page.evaluate(async () => (await window.testDB.invites.list()).map(i => [i.access, i.uses]))
+  if (JSON.stringify(groupInv) !== '[["all",null]]') throw Error('default link ' + JSON.stringify(groupInv))
+  // An owner link: a level under More options, one use.
   await page.locator('cubby-share summary').click()
-  const ownerBtn = page.getByRole('button', { name: 'Owner link (one person, 7 days)', exact: true })
-  await ownerBtn.click()
-  await page.getByRole('button', { name: /^Click again: whoever opens this link first/ }).click()
-  await page.waitForFunction(() => /one person/.test(document.querySelector('cubby-share').shadowRoot.textContent))
+  await page.getByRole('combobox', { name: 'Level' }).selectOption('owner')
+  await page.getByRole('button', { name: 'Create link', exact: true }).click()
+  await page.waitForFunction(() => /Owner, one person/.test(document.querySelector('cubby-share').shadowRoot.textContent))
   const ownerInv = await page.evaluate(async () => {
     const link = document.querySelector('cubby-share').shadowRoot.querySelector('input.link').value
     const list = await window.testDB.invites.list()
-    return { link, owner: list.filter(i => i.access === 'owner').map(i => i.usesLeft) }
+    return { link, owner: list.filter(i => i.access === 'owner').map(i => i.uses) }
   })
-  if (!ownerInv.link.includes('#invite=inv_') || ownerInv.owner.join() !== '1') throw Error('owner link ' + JSON.stringify(ownerInv))
+  if (!ownerInv.link.includes('#space=' ) || !ownerInv.link.includes('&invite=inv_') || ownerInv.owner.join() !== '1') throw Error('owner link ' + JSON.stringify(ownerInv))
   await page.getByRole('button', { name: 'Close', exact: true }).click()
   // The backup restores the owner under another key name, as on a new device.
   const restored = await page.evaluate(async ([base, backup]) => {
-    const { devices, kv } = await import(base + '/kv.js')
+    const { visitor, kv } = await import(base + '/kv.js')
     const keyName = 'restored-' + Date.now()
-    const r = await devices({ server: base, keyName }).restore(backup)
+    const r = await visitor({ server: base, keyName }).restore(backup)
     const me = await kv(window.testSpace, { server: base, keyName }).open({ invite: null })
-    const owner = await window.testDB.access()
+    const owner = await window.testDB.open({ invite: null })
     return { id: r.id, access: me.access, ownerId: owner.id }
   }, [base, backup])
   if (restored.id !== restored.ownerId || restored.access !== 'owner') throw Error('restore ' + JSON.stringify(restored))
@@ -65,9 +66,9 @@ async page => {
   // A member gets the panel too: invites and their own open links, nothing
   // an owner manages. The page's visitor joins someone else's space.
   const space2 = await page.evaluate(async base => {
-    const { createSpace, kv } = await import(base + '/kv.js')
+    const { visitor, kv } = await import(base + '/kv.js')
     const opt = { server: base, keyName: 'other-owner-' + Date.now() }
-    const { space } = await createSpace(opt)
+    const { space } = await visitor(opt).createSpace()
     const { invite } = await kv(space, opt).invites.create({ uses: 1 })
     const me = await kv(space, { server: base }).open({ invite })
     if (!me.canInvite) throw Error('member canInvite')
@@ -78,20 +79,20 @@ async page => {
     el.setAttribute('space', space)
   }, space2)
   await page.getByRole('button', { name: 'Share', exact: true }).click()
-  await page.getByRole('button', { name: 'Create personal link', exact: true }).click()
+  await page.getByRole('button', { name: 'Create link', exact: true }).click()
   await page.getByRole('button', { name: 'Copy', exact: true }).waitFor()
   const memberPanel = await page.evaluate(() => {
     const root = document.querySelector('cubby-share').shadowRoot
     const heads = [...root.querySelectorAll('h3')].map(h => h.textContent)
     return { heads, link: root.querySelector('input.link')?.value || '' }
   })
-  if (await page.getByRole('button', { name: 'Owner link (one person, 7 days)' }).count()) throw Error('member sees the owner link')
-  if (memberPanel.heads.includes('People') || memberPanel.heads.includes('Who can see this') || !memberPanel.link.includes('#invite=inv_')) throw Error('member panel ' + JSON.stringify(memberPanel))
+  if (await page.locator('cubby-share option[value=owner]').count()) throw Error('member sees the owner level')
+  if (memberPanel.heads.includes('People') || memberPanel.heads.includes('Who can see this') || !memberPanel.link.includes('&invite=inv_')) throw Error('member panel ' + JSON.stringify(memberPanel))
   // The key survives a reload: same visitor from IndexedDB.
-  const before = await page.evaluate(async base => (await import(base + '/kv.js')).devices({ server: base }).list().then(l => l.length), base)
-  const id1 = await page.evaluate(async base => { const { kv } = await import(base + '/kv.js'); return (await kv(window.testSpace, { server: base }).access()).id }, base)
+  const before = await page.evaluate(async base => (await import(base + '/kv.js')).visitor({ server: base }).devices.list().then(l => l.length), base)
+  const id1 = await page.evaluate(async base => { const { kv } = await import(base + '/kv.js'); return (await kv(window.testSpace, { server: base }).open({ invite: null })).id }, base)
   await page.reload()
-  const id2 = await page.evaluate(async ([base, space]) => { const { kv } = await import(base + '/kv.js'); return (await kv(space, { server: base }).access()).id }, [base, space2])
+  const id2 = await page.evaluate(async ([base, space]) => { const { kv } = await import(base + '/kv.js'); return (await kv(space, { server: base }).open({ invite: null })).id }, [base, space2])
   if (!id1 || id1 !== id2 || before < 1) throw Error('identity after reload ' + id1 + ' ' + id2)
   if (errors.length) throw Error(errors.join('\n'))
   return { backupFirst: 'passed', dismissal: 'passed', ownerLink: 'passed', restore: 'passed', clock: 'passed', memberPanel: 'passed', reload: 'passed' }

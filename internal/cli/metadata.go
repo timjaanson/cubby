@@ -6,9 +6,6 @@ import (
 	"net/url"
 	"strconv"
 	"time"
-
-	"github.com/timjaanson/cubby/internal/config"
-	"github.com/timjaanson/cubby/internal/names"
 )
 
 func writeFlags(f *flags) (url.Values, error) {
@@ -21,32 +18,18 @@ func writeFlags(f *flags) (url.Values, error) {
 		q.Set("ifBefore", strconv.FormatInt(n, 10))
 	}
 	if f.has("ttl") {
-		d, err := config.ParseDuration(f.str("ttl"))
-		if err != nil || d <= 0 || d%time.Second != 0 {
-			return nil, usageCli("--ttl takes a positive whole-second duration, like 30s or 1h")
-		}
-		q.Set("ttl", strconv.FormatInt(int64(d/time.Second), 10))
+		q.Set("ttl", f.str("ttl"))
 	}
 	return q, nil
 }
 
 func (c *client) limits(f *flags) error {
-	if len(f.args) > 1 {
-		return usageCli("limits takes at most one space")
-	}
-	path := "/v1/limits"
-	if len(f.args) == 1 {
-		if !names.ValidSpace(f.args[0]) {
-			return usageCli("limits takes a full space name")
-		}
-		path = "/v1/" + f.args[0] + "/access"
+	if len(f.args) > 0 {
+		return usageCli("limits takes no arguments. cubby info <space> shows a space's limits and usage")
 	}
 	var out map[string]any
-	if err := c.call("GET", path, nil, 200, &out); err != nil {
+	if err := c.call("GET", "/v1/limits", nil, 200, &out); err != nil {
 		return err
-	}
-	if len(f.args) > 0 {
-		out = map[string]any{"limits": out["limits"], "usage": out["usage"]}
 	}
 	b, err := json.MarshalIndent(out, "", "  ")
 	if err == nil {

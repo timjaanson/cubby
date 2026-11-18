@@ -7,18 +7,32 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/timjaanson/cubby/internal/access"
 	"github.com/timjaanson/cubby/internal/apierr"
 )
 
 func (s *Server) serverLimits() map[string]any {
-	out := map[string]any{"rate_limits": s.cfg.RateLimitsOn()}
+	out := map[string]any{"rateLimits": s.cfg.RateLimitsOn()}
 	v := reflect.ValueOf(s.cfg.Limits)
 	typ := v.Type()
 	for i := 0; i < v.NumField(); i++ {
-		out[typ.Field(i).Tag.Get("toml")] = v.Field(i).Int()
+		out[camel(typ.Field(i).Tag.Get("toml"))] = v.Field(i).Int()
 	}
 	return out
+}
+
+// camel turns a config name like max_value_size into maxValueSize, so every
+// JSON answer uses one naming style.
+func camel(s string) string {
+	parts := strings.Split(s, "_")
+	for i := 1; i < len(parts); i++ {
+		if parts[i] != "" {
+			parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
+		}
+	}
+	return strings.Join(parts, "")
 }
 
 func (s *Server) spaceLimits(space string) map[string]any {
@@ -79,9 +93,10 @@ func (s *Server) parseTTL(r *http.Request) (int64, error) {
 	if !r.URL.Query().Has("ttl") {
 		return 0, nil
 	}
-	n, ok := parseUint(r.URL.Query().Get("ttl"))
-	if !ok || n < int64(s.cfg.Limits.TTLMinSeconds) || n > int64(s.cfg.Limits.TTLMaxSeconds) {
-		return 0, apierr.BadParam("ttl", fmt.Sprintf("ttl is %d to %d seconds.", s.cfg.Limits.TTLMinSeconds, s.cfg.Limits.TTLMaxSeconds))
+	d, err := access.ParseDuration(r.URL.Query().Get("ttl"))
+	n := int64(d / time.Second)
+	if err != nil || n < int64(s.cfg.Limits.TTLMinSeconds) || n > int64(s.cfg.Limits.TTLMaxSeconds) {
+		return 0, apierr.BadParam("ttl", fmt.Sprintf(`ttl is %d to %d seconds, as seconds or a string like "90s", "10m", "12h" or "14d".`, s.cfg.Limits.TTLMinSeconds, s.cfg.Limits.TTLMaxSeconds))
 	}
 	return n, nil
 }

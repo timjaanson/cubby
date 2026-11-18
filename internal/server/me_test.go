@@ -37,6 +37,9 @@ type pairedOut struct {
 // token from s for after.
 func (c *tc) pair(s *auth.Signer, body string) (int, pairedOut, string, string) {
 	c.t.Helper()
+	if !strings.HasPrefix(body, "{") {
+		body = `{"code":"` + body + `"}`
+	}
 	st, _, b := c.req("POST", "/v1/pair", body, bearer(s.Token(c.url, time.Minute, true))...)
 	var r pairedOut
 	json.Unmarshal([]byte(b), &r)
@@ -144,7 +147,7 @@ func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
 func TestPairing(t *testing.T) {
 	c := newTest(t)
-	alice := c.create(`{"label":"notes"}`, "") // private, owned by alice
+	alice := c.create(`{"prefix":"notes"}`, "") // private, owned by alice
 	l := c.pairingCode(alice.Token, "")
 	if len(l.Code) != 10 || l.Display != l.Code[:5]+"-"+l.Code[5:] || l.State != "open" || !strings.HasPrefix(l.ID, "pc_") {
 		t.Fatalf("pairing code %+v", l)
@@ -241,7 +244,7 @@ func TestPairingErrors(t *testing.T) {
 	if st, _, b, _ := c.pair(s, l.Code); st != 410 || errCode(b) != "pairing_code_cancelled" {
 		t.Fatalf("cancelled: %d %s", st, b)
 	}
-	for _, body := range []string{`{"ttl":5}`, `{"ttl":7200}`, `{"ttl":"10m"}`, `{"uses":2}`} {
+	for _, body := range []string{`{"ttl":5}`, `{"ttl":7200}`, `{"ttl":"2h"}`, `{"uses":2}`} {
 		if st, _, b := c.req("POST", "/v1/me/pairing-codes", body, bearer(tok)...); st != 400 {
 			t.Fatalf("%s: %d %s", body, st, b)
 		}
@@ -256,7 +259,7 @@ func TestPairingErrors(t *testing.T) {
 	if st, _, _ := c.req("POST", "/v1/me/pairing-codes", ""); st != 401 {
 		t.Fatalf("anonymous create: %d", st)
 	}
-	if st, _, b := c.req("POST", "/v1/pair", "ZZZZZ-ZZZZZ"); st != 401 || errCode(b) != "missing_token" {
+	if st, _, b := c.req("POST", "/v1/pair", `{"code":"ZZZZZ-ZZZZZ"}`); st != 401 || errCode(b) != "missing_token" {
 		t.Fatalf("unsigned pair: %d %s", st, b)
 	}
 	if st, _, b, _ := c.pair(s, ""); st != 400 {
@@ -279,7 +282,7 @@ func TestPairingStatusWaits(t *testing.T) {
 	l := c.pairingCode(tok, "")
 	done := make(chan string, 1)
 	go func() {
-		_, _, b := c.req("GET", "/v1/me/pairing-codes/"+l.ID+"?wait=10", "", bearer(tok)...)
+		_, _, b := c.req("GET", "/v1/me/pairing-codes/"+l.ID+"?timeout=10", "", bearer(tok)...)
 		done <- b
 	}()
 	time.Sleep(100 * time.Millisecond)
@@ -293,7 +296,7 @@ func TestPairingStatusWaits(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("status didn't wake")
 	}
-	if st, _, _ := c.req("GET", "/v1/me/pairing-codes/"+l.ID+"?wait=61", "", bearer(tok)...); st != 400 {
+	if st, _, _ := c.req("GET", "/v1/me/pairing-codes/"+l.ID+"?timeout=61", "", bearer(tok)...); st != 400 {
 		t.Fatalf("wait 61: %d", st)
 	}
 }
@@ -341,15 +344,15 @@ func TestSignOutDevices(t *testing.T) {
 	if st, _, _ := c.req("DELETE", "/v1/me/devices/"+laptopID, "", bearer(bob)...); st != 404 {
 		t.Fatalf("other's device: %d", st)
 	}
-	if _, _, b := c.req("GET", "/v1/"+alice.Space+"/access", "", bearer(laptop)...); !strings.Contains(b, `"access":"owner"`) {
+	if _, _, b := c.req("GET", "/v1/"+alice.Space, "", bearer(laptop)...); !strings.Contains(b, `"access":"owner"`) {
 		t.Fatalf("laptop access: %s", b)
 	}
 }
 
 func TestAPIKeys(t *testing.T) {
 	c := newTest(t)
-	own := c.create(`{"label":"hook"}`, "")
-	other := c.create(`{"label":"other"}`, own.Token)
+	own := c.create(`{"prefix":"hook"}`, "")
+	other := c.create(`{"prefix":"other"}`, own.Token)
 	sp := "/v1/" + own.Space
 	o := bearer(own.Token)
 
@@ -359,11 +362,11 @@ func TestAPIKeys(t *testing.T) {
 		json.Unmarshal([]byte(b), &out)
 		return st, out, b
 	}
-	st, k, b := mk(`{"space":"` + own.Space + `","label":"github"}`)
+	st, k, b := mk(`{"space":"` + own.Space + `","label":"github","access":"post"}`)
 	key, _ := k["key"].(string)
 	month := float64(time.Now().Add(30 * 24 * time.Hour).UnixMilli())
-	if st != 201 || !strings.HasPrefix(key, "cubby_") || k["access"] != "post" || k["until"] == nil ||
-		k["until"].(float64) < month-60_000 || k["until"].(float64) > month+60_000 || k["warning"] != nil {
+	if st != 201 || !strings.HasPrefix(key, "cubby_") || k["access"] != "post" || k["expires"] == nil ||
+		k["expires"].(float64) < month-60_000 || k["expires"].(float64) > month+60_000 || k["warning"] != nil {
 		t.Fatalf("mint: %d %s", st, b)
 	}
 	kb := bearer(key)
@@ -377,7 +380,7 @@ func TestAPIKeys(t *testing.T) {
 	if st, _, b := c.req("GET", sp+"/by/me/event?token="+key, ""); st != 200 || !strings.Contains(b, `"n":1`) {
 		t.Fatalf("api key in the URL: %d %s", st, b)
 	}
-	if _, _, b := c.req("GET", sp+"/access", "", kb...); !strings.Contains(b, `"access":"post"`) || !strings.Contains(b, `"canInvite":false`) {
+	if _, _, b := c.req("GET", sp, "", kb...); !strings.Contains(b, `"access":"post"`) || !strings.Contains(b, `"canInvite":false`) {
 		t.Fatalf("access as api key: %s", b)
 	}
 	// Nothing outside its space, nothing but data.
@@ -406,7 +409,7 @@ func TestAPIKeys(t *testing.T) {
 	for _, body := range []string{
 		`{"space":"` + own.Space + `","access":"owner"}`,
 		`{"label":"no space"}`,
-		`{"space":"` + own.Space + `","until":"yesterday"}`,
+		`{"space":"` + own.Space + `","ttl":"yesterday"}`,
 	} {
 		if st, _, b := mk(body); st != 400 {
 			t.Errorf("%s: %d %s", body, st, b)
@@ -415,15 +418,15 @@ func TestAPIKeys(t *testing.T) {
 	reader, _ := c.anon()
 	_, inv := c.mint(own.Space, own.Token, `{"access":"read"}`)
 	c.join(own.Space, inv, reader)
-	if st, _, b := c.req("POST", "/v1/me/api-keys", `{"space":"`+own.Space+`"}`, bearer(reader)...); st != 403 || errCode(b) != "exceeds_rights" {
+	if st, _, b := c.req("POST", "/v1/me/api-keys", `{"space":"`+own.Space+`","access":"post"}`, bearer(reader)...); st != 403 || errCode(b) != "exceeds_rights" {
 		t.Fatalf("above the minter: %d %s", st, b)
 	}
 	if st, _, b := c.req("POST", "/v1/me/api-keys", `{"space":"`+other.Space+`"}`, bearer(reader)...); st != 404 {
 		t.Fatalf("a space they can't see: %d %s", st, b)
 	}
 	// A permanent one takes an explicit null and says what it costs.
-	st, k2, b := mk(`{"space":"` + own.Space + `","until":null,"access":"all"}`)
-	if st != 201 || k2["until"] != nil || k2["warning"] == nil {
+	st, k2, b := mk(`{"space":"` + own.Space + `","ttl":null,"access":"all"}`)
+	if st != 201 || k2["expires"] != nil || k2["warning"] == nil {
 		t.Fatalf("permanent: %d %s", st, b)
 	}
 	// Listed without secrets; deleting revokes.

@@ -13,7 +13,7 @@ type pointsResp struct {
 		T       int64
 		Value   json.RawMessage
 		Expires int64
-	}
+	} `json:"items"`
 }
 
 func TestBatchSeriesPoints(t *testing.T) {
@@ -27,10 +27,10 @@ func TestBatchSeriesPoints(t *testing.T) {
 	// The device's minute: the live value and points with their own times,
 	// two of them in one series.
 	st, _, b := c.req("POST", sp+"/batch", `[
-		{"method":"PUT","path":"shared/now","body":{"temp":21.4}},
-		{"method":"POST","path":"shared/m1/series","query":{"t":`+itoa(t0)+`,"ttl":3600},"body":{"temp":21.3}},
-		{"method":"POST","path":"shared/m1/series","query":{"t":`+itoa(t0+60_000)+`,"ttl":3600},"body":{"temp":21.4}},
-		{"method":"POST","path":"shared/m5/series","query":{"t":`+itoa(t0)+`},"body":{"temp":[21.3,21.2,21.5]}}]`, auth...)
+		{"set":"shared/now","value":{"temp":21.4}},
+		{"add":"shared/m1","t":`+itoa(t0)+`,"ttl":3600,"value":{"temp":21.3}},
+		{"add":"shared/m1","t":`+itoa(t0+60_000)+`,"ttl":3600,"value":{"temp":21.4}},
+		{"add":"shared/m5","t":`+itoa(t0)+`,"value":{"temp":[21.3,21.2,21.5]}}]`, auth...)
 	if st != 200 {
 		t.Fatalf("batch: %d %s", st, b)
 	}
@@ -49,7 +49,7 @@ func TestBatchSeriesPoints(t *testing.T) {
 	if !out.Items[1].Created || out.Items[2].Created || out.Items[2].Version != out.Items[1].Version+1 {
 		t.Fatalf("second point of one series takes the next version, not a new key: %s", b)
 	}
-	_, _, b = c.req("GET", sp+"/shared/m1/series", "")
+	_, _, b = c.req("GET", sp+"/shared/m1/series?order=asc", "")
 	r := decode[pointsResp](t, b)
 	if len(r.Points) != 2 || r.Points[0].Expires != t0+3_600_000 || r.Points[1].Expires != t0+60_000+3_600_000 {
 		t.Fatalf("points with expiry from t: %s", b)
@@ -63,7 +63,7 @@ func TestBatchSeriesPoints(t *testing.T) {
 	}
 
 	// Resending is idempotent: the same times replace their points.
-	st, _, b = c.req("POST", sp+"/batch", `[{"method":"POST","path":"shared/m1/series","query":{"t":`+itoa(t0)+`,"ttl":3600},"body":{"temp":21.3}}]`, auth...)
+	st, _, b = c.req("POST", sp+"/batch", `[{"add":"shared/m1","t":`+itoa(t0)+`,"ttl":3600,"value":{"temp":21.3}}]`, auth...)
 	if st != 200 {
 		t.Fatalf("resend: %d %s", st, b)
 	}
@@ -72,21 +72,20 @@ func TestBatchSeriesPoints(t *testing.T) {
 	}
 
 	// Points without t share the server's time, after each series' newest.
-	_, _, b = c.req("POST", sp+"/batch", `[{"method":"POST","path":"shared/a/series","body":1},{"method":"POST","path":"shared/b/series","body":2}]`, auth...)
+	_, _, b = c.req("POST", sp+"/batch", `[{"add":"shared/a","value":1},{"add":"shared/b","value":2}]`, auth...)
 	shared := decode[struct{ Items []struct{ T int64 } }](t, b)
 	if len(shared.Items) != 2 || shared.Items[0].T == 0 || shared.Items[0].T != shared.Items[1].T {
 		t.Fatalf("shared time: %s", b)
 	}
 
 	bad := []struct{ body, code string }{
-		{`[{"method":"POST","path":"shared/x/series","body":1},{"method":"POST","path":"shared/x/series","body":2}]`, "bad_batch"},
-		{`[{"method":"POST","path":"shared/x/series","query":{"t":5},"body":1},{"method":"POST","path":"shared/x/series","query":{"t":5},"body":2}]`, "bad_batch"},
-		{`[{"method":"POST","path":"shared/x/series","query":{"t":5},"body":1},{"method":"PUT","path":"shared/x","body":2}]`, "bad_batch"},
-		{`[{"method":"PUT","path":"shared/y","body":1},{"method":"POST","path":"shared/env.*/series","body":{"a":1}}]`, "bad_batch"},
-		{`[{"method":"PUT","path":"shared/y","body":1},{"method":"POST","path":"shared/y","body":2}]`, "bad_batch"},
-		{`[{"method":"PUT","path":"shared/y","body":1},{"method":"POST","path":"shared/m5/series","query":{"t":5,"ttl":60},"body":2}]`, "invalid_parameter"},
-		{`[{"method":"PUT","path":"shared/y","body":1},{"method":"POST","path":"shared/now/series","body":2}]`, "not_series"},
-		{`[{"method":"POST","path":"shared/m5/series","query":{"t":` + itoa(t0+1) + `},"body":2},{"method":"PUT","path":"shared/m1","body":2}]`, "is_series"},
+		{`[{"add":"shared/x","value":1},{"add":"shared/x","value":2}]`, "bad_batch"},
+		{`[{"add":"shared/x","t":5,"value":1},{"add":"shared/x","t":5,"value":2}]`, "bad_batch"},
+		{`[{"add":"shared/x","t":5,"value":1},{"set":"shared/x","value":2}]`, "bad_batch"},
+		{`[{"set":"shared/y","value":1},{"add":"shared/env.*","value":{"a":1}}]`, "invalid_key"},
+		{`[{"set":"shared/y","value":1},{"add":"shared/m5","t":5,"ttl":60,"value":2}]`, "invalid_parameter"},
+		{`[{"set":"shared/y","value":1},{"add":"shared/now","value":2}]`, "not_series"},
+		{`[{"add":"shared/m5","t":` + itoa(t0+1) + `,"value":2},{"set":"shared/m1","value":2}]`, "is_series"},
 	}
 	for i, tc := range bad {
 		st, _, b := c.req("POST", sp+"/batch", tc.body, auth...)
@@ -133,11 +132,11 @@ func TestSeriesPointTTL(t *testing.T) {
 	if st, _, _ := c.req("POST", S+"/m1/series?ttl=1", "0", auth...); st != 400 {
 		t.Fatalf("ttl under the minimum: %d", st)
 	}
-	// A prefix write takes the ttl for every member.
-	_, _, b = c.req("POST", S+"/env.*/series?ttl=60", `{"a":1,"b":2}`, auth...)
+	// ttl takes a duration string too.
+	_, _, b = c.req("POST", S+"/env.b/series?ttl=1m", `2`, auth...)
 	pt := decode[struct{ T int64 }](t, b).T
 	_, _, b = c.req("GET", S+"/env.b/series", "")
 	if r := decode[pointsResp](t, b); len(r.Points) != 1 || r.Points[0].Expires != pt+60_000 {
-		t.Fatalf("prefix ttl: %s", b)
+		t.Fatalf("duration ttl: %s", b)
 	}
 }

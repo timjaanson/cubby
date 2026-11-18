@@ -194,7 +194,7 @@ func TestLiveRequestsMatchHTTP(t *testing.T) {
 	if r := decode[seriesResp](t, string(f.Body)); f.Status != 200 || len(r.Points) != 1 || string(r.Points[0].Value) != "22.5" || r.Next == nil {
 		t.Fatalf("series desc: %d %s", f.Status, f.Body)
 	}
-	f = w.call(`"7d"`, `{"id":"7d","method":"GET","path":"shared/temp/series","query":{"order":"desc","until":`+string(mustNext(t, f.Body))+`}}`)
+	f = w.call(`"7d"`, `{"id":"7d","method":"GET","path":"shared/temp/series","query":{"order":"desc","after":`+string(mustNext(t, f.Body))+`}}`)
 	if r := decode[seriesResp](t, string(f.Body)); len(r.Points) != 1 || string(r.Points[0].Value) != "21.5" || r.Next != nil {
 		t.Fatalf("series desc until: %d %s", f.Status, f.Body)
 	}
@@ -257,7 +257,7 @@ func TestLiveAccessPerMessage(t *testing.T) {
 		t.Fatalf("after join: %d %s", f.Status, f.Body)
 	}
 	// A running watch ends with no_space once the grant goes.
-	w.send(`{"id":"w","method":"GET","path":"shared/*/watch","query":{"version":0}}`)
+	w.send(`{"id":"w","method":"GET","path":"shared/*/watch","query":{"after":0}}`)
 	watchBody(t, w.reply(`"w"`))
 	_, id := func() (string, string) { // stranger's ID
 		_, _, b := c.req("GET", "/v1/me", "", bearer(stranger)...)
@@ -294,7 +294,7 @@ func TestLiveWatchPushes(t *testing.T) {
 	// A socket write reaches an HTTP watch.
 	done := make(chan string)
 	go func() {
-		_, _, b := c.req("GET", sp+"/shared/item.*/watch?version="+itoa(v+1)+"&timeout=5", "", bearer(own.Token)...)
+		_, _, b := c.req("GET", sp+"/shared/item.*/watch?after="+itoa(v+1)+"&timeout=5", "", bearer(own.Token)...)
 		done <- b
 	}()
 	time.Sleep(100 * time.Millisecond)
@@ -315,12 +315,12 @@ func TestLiveWatchPushes(t *testing.T) {
 		t.Fatalf("push after stop: %s %s", f.ID, f.Body)
 	}
 	// From 0: the snapshot.
-	w.send(`{"id":"b","method":"GET","path":"shared/item.*/watch","query":{"version":0}}`)
+	w.send(`{"id":"b","method":"GET","path":"shared/item.*/watch","query":{"after":0}}`)
 	if ch, _ = watchBody(t, w.reply(`"b"`)); len(ch) != 3 {
 		t.Fatalf("snapshot: %v", ch)
 	}
 	// Too old a version: 410, as on HTTP.
-	if f := w.call(`"c"`, `{"id":"c","method":"GET","path":"shared/*/watch","query":{"version":99999999999999}}`); f.Status != 410 {
+	if f := w.call(`"c"`, `{"id":"c","method":"GET","path":"shared/*/watch","query":{"after":99999999999999}}`); f.Status != 410 {
 		t.Fatalf("future version: %d %s", f.Status, f.Body)
 	}
 }
@@ -336,7 +336,7 @@ func TestLiveAuth(t *testing.T) {
 		t.Fatalf("auth after header: %d %s", f.Status, f.Body)
 	}
 	w.call("2", `{"id":2,"method":"PUT","path":"to/me/x","body":1}`)
-	w.send(`{"id":"me","method":"GET","path":"to/me/*/watch","query":{"version":0}}`)
+	w.send(`{"id":"me","method":"GET","path":"to/me/*/watch","query":{"after":0}}`)
 	watchBody(t, w.reply(`"me"`))
 	w.send(`{"id":"sh","method":"GET","path":"shared/*/watch"}`)
 	watchBody(t, w.reply(`"sh"`))

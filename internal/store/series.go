@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"sort"
 
 	"github.com/timjaanson/cubby/internal/apierr"
 )
@@ -222,19 +224,122 @@ func (s *Store) pointStep(tx *sql.Tx, st *batchState, r WriteReq, t int64, maxPo
 	return WriteResult{Version: st.seq, Created: !live, Changed: true, T: t, Expires: expires, Grown: max(0, spaceDelta)}, nil
 }
 
-// PointsQuery selects points of one series. Since and Until are exclusive
-// bounds. Ascending without Since returns the newest Limit, oldest first.
+// PointsQuery selects points of one series, or of every series under a
+// prefix. Desc is newest first.
 type PointsQuery struct {
-	Since, Until *int64
-	Desc         bool
-	Limit        int
+	Since, Before *int64 // ms: Since inclusive, Before exclusive
+	After         *int64 // the previous page's next: past it in reading order
+	AfterKey      string // with After, across several series: the key at that time
+	Desc          bool
+	Limit         int
 }
 
-// ReadPoints returns points in t order: ascending with Since, the first
-// Limit after it; descending, the first Limit before Until (or the newest);
-// ascending without Since, the newest Limit, oldest first. When a page stops
-// early, at Limit or at PageBytes, next is the bound for the following page:
-// the next Since ascending, the next Until descending.
+// MaxSeriesPerRead is how many series one prefix read may span.
+const MaxSeriesPerRead = 100
+
+// ReadSeriesPrefix returns points of every series whose key starts with
+// prefix, merged by time (then by key), within the query's bounds. Each
+// series is read through its own index and the pages merged here, so a long
+// series costs no more than one page. next is the last point's t and key.
+func (s *Store) ReadSeriesPrefix(space, area, prefix string, pq PointsQuery) (points []Point, next *Point, version int64, err error) {
+	sp, err := s.Acquire(space)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	if sp == nil {
+		return nil, nil, 0, apierr.NoSpace
+	}
+	defer s.Release(sp)
+	if err := s.expire(sp); err != nil {
+		return nil, nil, 0, err
+	}
+	s.touchSpace(sp)
+	m, err := readMeta(sp.db)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	rows, err := sp.db.Query(`SELECT key FROM kv WHERE area = ? AND series = 1 AND value IS NOT NULL AND substr(key, 1, ?) = ? ORDER BY key`,
+		area, len(prefix), prefix)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			rows.Close()
+			return nil, nil, 0, err
+		}
+		keys = append(keys, k)
+	}
+	rows.Close()
+	if len(keys) > MaxSeriesPerRead {
+		return nil, nil, 0, &apierr.Error{Status: 400, Code: "too_many_series", Extra: map[string]any{"limit": MaxSeriesPerRead},
+			Message: fmt.Sprintf("%d series match. One read spans at most %d: use a longer prefix.", len(keys), MaxSeriesPerRead)}
+	}
+	ord := "ASC"
+	if pq.Desc {
+		ord = "DESC"
+	}
+	for _, k := range keys {
+		where, args := "area = ? AND key = ?", []any{area, k}
+		if pq.Since != nil {
+			where += " AND t >= ?"
+			args = append(args, *pq.Since)
+		}
+		if pq.Before != nil {
+			where += " AND t < ?"
+			args = append(args, *pq.Before)
+		}
+		if pq.After != nil {
+			// Past (After, AfterKey) in reading order: ties at the same t go by key.
+			cmp := map[bool]string{true: "<", false: ">"}[pq.Desc]
+			if k > pq.AfterKey {
+				cmp += "="
+			}
+			where += " AND t " + cmp + " ?"
+			args = append(args, *pq.After)
+		}
+		r, err := sp.db.Query(`SELECT t, value, is_json, expires FROM points WHERE `+where+` ORDER BY t `+ord+` LIMIT ?`, append(args, pq.Limit+1)...)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		for r.Next() {
+			p := Point{Area: area, Key: k}
+			if err := r.Scan(&p.T, &p.Value, &p.IsJSON, &p.Expires); err != nil {
+				r.Close()
+				return nil, nil, 0, err
+			}
+			points = append(points, p)
+		}
+		r.Close()
+	}
+	sort.Slice(points, func(i, j int) bool {
+		if points[i].T != points[j].T {
+			return points[i].T < points[j].T != pq.Desc
+		}
+		return points[i].Key < points[j].Key
+	})
+	size, cut := 0, len(points)
+	for i, p := range points {
+		if size >= PageBytes || i == pq.Limit {
+			cut = i
+			break
+		}
+		size += len(p.Value)
+	}
+	if cut < len(points) {
+		points = points[:cut]
+		last := points[cut-1]
+		next = &last
+	}
+	return points, next, m.seq, nil
+}
+
+// ReadPoints returns up to Limit points with Since <= t < Before, newest
+// first with Desc, else oldest first. After continues a previous page. When a
+// page stops early, at Limit or at PageBytes, next is the t to pass as
+// After.
 func (s *Store) ReadPoints(space, area, key string, pq PointsQuery) (points []Point, next *int64, version int64, err error) {
 	sp, err := s.Acquire(space)
 	if err != nil {
@@ -266,22 +371,26 @@ func (s *Store) ReadPoints(space, area, key string, pq PointsQuery) (points []Po
 
 	where, args := "area = ? AND key = ?", []any{area, key}
 	if pq.Since != nil {
-		where += " AND t > ?"
+		where += " AND t >= ?"
 		args = append(args, *pq.Since)
 	}
-	if pq.Until != nil {
+	if pq.Before != nil {
 		where += " AND t < ?"
-		args = append(args, *pq.Until)
+		args = append(args, *pq.Before)
 	}
-	// The newest window reads newest first and is turned around afterwards.
-	window := !pq.Desc && pq.Since == nil
-	ord, fetch := "ASC", pq.Limit+1
-	if pq.Desc || window {
+	ord := "ASC"
+	if pq.Desc {
 		ord = "DESC"
 	}
-	if window {
-		fetch = pq.Limit
+	if pq.After != nil {
+		if pq.Desc {
+			where += " AND t < ?"
+		} else {
+			where += " AND t > ?"
+		}
+		args = append(args, *pq.After)
 	}
+	fetch := pq.Limit + 1
 	rows, err := sp.db.Query(`SELECT t, value, is_json, expires FROM points WHERE `+where+` ORDER BY t `+ord+` LIMIT ?`, append(args, fetch)...)
 	if err != nil {
 		return nil, nil, 0, err
@@ -303,11 +412,7 @@ func (s *Store) ReadPoints(space, area, key string, pq PointsQuery) (points []Po
 	if err := rows.Err(); err != nil {
 		return nil, nil, 0, err
 	}
-	if window {
-		for i, j := 0, len(points)-1; i < j; i, j = i+1, j-1 {
-			points[i], points[j] = points[j], points[i]
-		}
-	} else if len(points) > pq.Limit || cut {
+	if len(points) > pq.Limit || cut {
 		points = points[:min(pq.Limit, len(points))]
 		nt := points[len(points)-1].T
 		next = &nt

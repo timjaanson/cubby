@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"sort"
 
 	"github.com/timjaanson/cubby/internal/access"
 )
@@ -61,8 +62,8 @@ type Membership struct {
 	Access     access.Level    `json:"access"`
 	Via        string          `json:"via"` // created, invite or added
 	Since      int64           `json:"since"`
-	Changed    int64           `json:"changed"`
-	Until      *int64          `json:"until"`
+	Changed    int64           `json:"-"`
+	Until      *int64          `json:"expires"`
 	Members    int             `json:"members"`
 	LastActive int64           `json:"lastActive"`
 	Bytes      int64           `json:"bytes"`
@@ -73,64 +74,73 @@ type Membership struct {
 // SpacesCursor is where a page of ListSpaces starts: after the space with
 // this changed time and name.
 type SpacesCursor struct {
-	Changed int64
-	Space   string
+	Active, Since int64 // of the last item, ms
+	Space         string
+}
+
+// before reports whether m sorts before the cursor's item: more recently
+// active, then the newer membership, then by name.
+func (c SpacesCursor) before(m Membership) bool {
+	if m.LastActive != c.Active {
+		return m.LastActive > c.Active
+	}
+	if m.Since != c.Since {
+		return m.Since > c.Since
+	}
+	return m.Space <= c.Space
 }
 
 // ListSpaces lists the spaces where the visitor holds a grant, the most
-// recently changed membership first. Rows whose grant is gone are cleared
-// on the way, so they cost one look.
+// recently active first (then the newer membership, then by name). Activity is kept in each space's
+// file, so it reads every membership and sorts them here; a visitor holds
+// few. Rows whose grant is gone are cleared on the way.
 func (s *Store) ListSpaces(visitor string, after *SpacesCursor, limit int) (items []Membership, next *SpacesCursor, err error) {
-	cur := after
-	items = []Membership{}
-	for len(items) <= limit {
-		want := limit + 1 - len(items)
-		q := `SELECT space, since, changed FROM visitor_spaces WHERE visitor = ? AND changed IS NOT NULL`
-		args := []any{visitor}
-		if cur != nil {
-			q += ` AND (changed < ? OR (changed = ? AND space > ?))`
-			args = append(args, cur.Changed, cur.Changed, cur.Space)
+	rows, err := s.srv.Query(`SELECT space, since, changed FROM visitor_spaces WHERE visitor = ? AND changed IS NOT NULL`, visitor)
+	if err != nil {
+		return nil, nil, err
+	}
+	type row struct {
+		space          string
+		since, changed int64
+	}
+	var rs []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.space, &r.since, &r.changed); err != nil {
+			rows.Close()
+			return nil, nil, err
 		}
-		q += ` ORDER BY changed DESC, space LIMIT ?`
-		rows, err := s.srv.Query(q, append(args, want)...)
+		rs = append(rs, r)
+	}
+	rows.Close()
+	all := []Membership{}
+	for _, r := range rs {
+		m, err := s.membership(r.space, visitor)
 		if err != nil {
 			return nil, nil, err
 		}
-		type row struct {
-			space          string
-			since, changed int64
+		if m == nil {
+			s.srv.Exec(`UPDATE visitor_spaces SET since = NULL, changed = NULL WHERE visitor = ? AND space = ?`, visitor, r.space)
+			continue
 		}
-		var rs []row
-		for rows.Next() {
-			var r row
-			if err := rows.Scan(&r.space, &r.since, &r.changed); err != nil {
-				rows.Close()
-				return nil, nil, err
-			}
-			rs = append(rs, r)
+		m.Since, m.Changed = r.since, r.changed
+		all = append(all, *m)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		a, b := all[i], all[j]
+		return SpacesCursor{Active: b.LastActive, Since: b.Since, Space: b.Space}.before(a) && a.Space != b.Space
+	})
+	items = []Membership{}
+	for _, m := range all {
+		if after != nil && after.before(m) {
+			continue
 		}
-		rows.Close()
-		for _, r := range rs {
-			cur = &SpacesCursor{Changed: r.changed, Space: r.space}
-			m, err := s.membership(r.space, visitor)
-			if err != nil {
-				return nil, nil, err
-			}
-			if m == nil {
-				s.srv.Exec(`UPDATE visitor_spaces SET since = NULL, changed = NULL WHERE visitor = ? AND space = ?`, visitor, r.space)
-				continue
-			}
-			m.Since, m.Changed = r.since, r.changed
-			items = append(items, *m)
-		}
-		if len(rs) < want {
+		if len(items) == limit {
+			last := items[limit-1]
+			next = &SpacesCursor{Active: last.LastActive, Since: last.Since, Space: last.Space}
 			break
 		}
-	}
-	if len(items) > limit {
-		items = items[:limit]
-		last := items[limit-1]
-		next = &SpacesCursor{Changed: last.Changed, Space: last.Space}
+		items = append(items, m)
 	}
 	return items, next, nil
 }

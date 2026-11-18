@@ -1,6 +1,6 @@
 // Last wills and presence through kv.js, over live and HTTP.
 const S = process.env.S
-const { kv, createSpace } = await import(process.env.MOD)
+const { kv, visitor } = await import(process.env.MOD)
 const assert = (c, m) => { if (!c) { console.error("FAIL:", m); process.exit(1) } }
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const until = async (f, m, ms = 4000) => {
@@ -11,10 +11,10 @@ const until = async (f, m, ms = 4000) => {
 const sockets = []
 class TrackedWS extends WebSocket { constructor(u) { super(u); sockets.push(this) } }
 
-const { space } = await createSpace({ server: S, keyName: "w-owner", anyone: "all" })
+const { space } = await visitor({ server: S, keyName: "w-owner" }).createSpace({ anyone: "all" })
 const watcher = kv(space, { server: S, keyName: "w-watch", live: true })
 const heard = []
-watcher.by.onPulse("here", p => heard.push(p))
+watcher.by("*").pulses("here", p => heard.push(p))
 await sleep(200)
 
 // A will fires when the socket dies, and is registered again after a reconnect.
@@ -22,7 +22,7 @@ await sleep(200)
   const a = kv(space, { server: S, keyName: "w-a", live: true, WebSocket: TrackedWS })
   await a.shared.get("x")
   await until(() => a.live.status === "open", "socket")
-  const clear = await a.mine.will("here", { left: true })
+  const clear = await a.by("me").will("here", { left: true })
   assert(typeof clear === "function", "will resolves a clear function")
   sockets.at(-1).close() // the server sees the connection end
   await until(() => heard.some(p => p.value?.left && p.by), "will fired")
@@ -42,12 +42,12 @@ await sleep(200)
   await sleep(500)
   assert(!heard.some(p => p.value?.left), "cleared will doesn't fire")
   // Errors surface at registration.
-  const other = await kv(space, { server: S, keyName: "w-b" }).id()
+  const other = await visitor({ server: S, keyName: "w-b" }).id()
   const err = await a.by(other).will("here", 1).catch(e => e)
   assert(err?.code === "not_yours", "will into another's area " + err?.code)
   // Over HTTP it's a no-op.
   const h = kv(space, { server: S, keyName: "w-http" })
-  assert(typeof await h.mine.will("here", { left: true }) === "function", "http will is a no-op")
+  assert(typeof await h.by("me").will("here", { left: true }) === "function", "http will is a no-op")
 }
 
 // Presence: join, value changes, a closed tab leaves through its will.
@@ -60,7 +60,7 @@ await sleep(200)
   pb.onJoin = (id, v) => joins.push(v.name)
   pb.onLeave = id => leaves.push(id)
   await until(() => pb.peers.size === 1 && pa.peers.size === 1, "both see each other")
-  const aId = await a.id()
+  const aId = await visitor({ server: S, keyName: "p-a" }).id()
   assert(pb.peers.get(aId).value.name === "A" && joins.join() === "A", "value and onJoin " + joins)
   let changes = 0
   pb.onChange = () => changes++
@@ -80,10 +80,10 @@ await sleep(200)
   let cut = false
   const cuttable = (url, o) => cut && o?.method === "POST" ? Promise.reject(new Error("offline")) : fetch(url, o)
   const a = kv(space, { server: S, keyName: "h-a", fetch: cuttable }), b = kv(space, { server: S, keyName: "h-b" })
-  const pa = a.presence("hall", { value: 1, interval: 200, onError: () => {} })
-  const pb = b.presence("hall", { value: 2, interval: 200 })
+  const pa = a.presence("hall", { value: 1, interval: 0.2, onError: () => {} })
+  const pb = b.presence("hall", { value: 2, interval: 0.2 })
   await until(() => pb.peers.size === 1 && pa.peers.size === 1, "http presence")
-  const aId = await a.id()
+  const aId = await visitor({ server: S, keyName: "h-a" }).id()
   cut = true // a goes quiet without saying goodbye
   await until(() => !pb.peers.has(aId), "timeout leave", 3000)
   cut = false

@@ -97,16 +97,16 @@ type Settings struct {
 	// Anyone is the level of every visitor without a higher grant:
 	// none (private, the default), read, post or all.
 	Anyone Level `json:"anyone"`
-	// Invite is the lowest member level that may mint invites: read,
+	// Inviters is the lowest member level that may mint invites: read,
 	// post (the default), all or owner. The anyone level doesn't count.
-	Invite Level `json:"invite"`
+	Inviters Level `json:"inviters"`
 }
 
 // Default is what a new space gets unless its creator says otherwise.
-var Default = Settings{Anyone: None, Invite: Post}
+var Default = Settings{Anyone: None, Inviters: Post}
 
 // Encode is the compact form stored in a space file: "anyone invite".
-func (s Settings) Encode() string { return s.Anyone.String() + " " + s.Invite.String() }
+func (s Settings) Encode() string { return s.Anyone.String() + " " + s.Inviters.String() }
 
 // Decode reads Encode's form. Anything unreadable is the default, which is
 // private.
@@ -117,7 +117,7 @@ func Decode(v string) Settings {
 	if !ok || !ok1 || !ok2 {
 		return Default
 	}
-	return Settings{Anyone: anyone, Invite: invite}
+	return Settings{Anyone: anyone, Inviters: invite}
 }
 
 // SettingsError is a problem with requested settings, for invalid_settings.
@@ -125,9 +125,9 @@ type SettingsError string
 
 func (e SettingsError) Error() string { return string(e) }
 
-// ApplyInput applies the anyone and invite fields of a request body to base.
-// Fields left out keep base's value.
-func ApplyInput(base Settings, anyone, invite json.RawMessage) (Settings, error) {
+// ApplyInput applies the anyone and inviters fields of a request body to
+// base. Fields left out keep base's value.
+func ApplyInput(base Settings, anyone, inviters json.RawMessage) (Settings, error) {
 	s := base
 	if anyone != nil {
 		l, err := ParseIn(anyone, "anyone", None, Read, Post, All)
@@ -136,12 +136,12 @@ func ApplyInput(base Settings, anyone, invite json.RawMessage) (Settings, error)
 		}
 		s.Anyone = l
 	}
-	if invite != nil {
-		l, err := ParseIn(invite, "invite", Read, Post, All, Owner)
+	if inviters != nil {
+		l, err := ParseIn(inviters, "inviters", Read, Post, All, Owner)
 		if err != nil {
 			return base, SettingsError(err.Error())
 		}
-		s.Invite = l
+		s.Inviters = l
 	}
 	return s, nil
 }
@@ -162,6 +162,8 @@ type Rights struct {
 	// Member is the highest level among the visitor's live grants, None
 	// without any.
 	Member Level
+	// MemberUntil is when Member ends, ms, 0 for no end.
+	MemberUntil int64
 	// Banned: an owner banned this visitor. Nothing else counts while it
 	// lasts.
 	Banned      bool
@@ -214,64 +216,61 @@ func (r *Rights) Allows(op Op) bool { return r.Level() >= op.Need() }
 // space's invite level or above. The anyone level doesn't count, so
 // strangers in an open space can't fill it with tokens.
 func (r *Rights) CanInvite() bool {
-	return !r.Banned && r.Cap == nil && r.Member >= Read && r.Member >= r.Settings.Invite
+	return !r.Banned && r.Cap == nil && r.Member >= Read && r.Member >= r.Settings.Inviters
 }
 
 // CanGive reports whether this visitor may hand out level l: owners any,
 // members up to their own.
 func (r *Rights) CanGive(l Level) bool { return r.Member == Owner || l <= r.Member }
 
-// ParseTime reads an until value: a duration from now ("7d", "12h"), a date
-// (end of that day, server time zone), an RFC 3339 time with or without
-// offset, or milliseconds since 1970. It returns ms.
-func ParseTime(raw json.RawMessage, now time.Time) (int64, error) {
-	var ms int64
-	if json.Unmarshal(raw, &ms) == nil {
-		if ms <= now.UnixMilli() {
-			return 0, fmt.Errorf("that time is in the past")
+// TTL reads a duration from a JSON body: whole seconds, or a string like
+// "90s", "10m", "12h" or "14d". Zero and negative durations are refused.
+func TTL(raw json.RawMessage) (time.Duration, error) {
+	var n int64
+	if json.Unmarshal(raw, &n) == nil {
+		if n <= 0 {
+			return 0, fmt.Errorf("a duration is positive")
 		}
-		return ms, nil
+		return time.Duration(n) * time.Second, nil
 	}
 	var s string
 	if json.Unmarshal(raw, &s) != nil {
-		return 0, fmt.Errorf("a time is a duration like \"7d\", a date, an RFC 3339 time, or null")
+		return 0, fmt.Errorf(`a duration is seconds or a string like "90s", "10m", "12h" or "14d"`)
 	}
-	if d, err := ParseDuration(s); err == nil {
-		if d <= 0 {
-			return 0, fmt.Errorf("the duration must be positive")
-		}
-		return now.Add(d).UnixMilli(), nil
-	}
-	if t, err := time.ParseInLocation("2006-01-02", s, time.Local); err == nil {
-		t = t.AddDate(0, 0, 1).Add(-time.Millisecond)
-		if !t.After(now) {
-			return 0, fmt.Errorf("that date is in the past")
-		}
-		return t.UnixMilli(), nil
-	}
-	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05", "2006-01-02T15:04"} {
-		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
-			if !t.After(now) {
-				return 0, fmt.Errorf("that time is in the past")
-			}
-			return t.UnixMilli(), nil
-		}
-	}
-	return 0, fmt.Errorf("%q isn't a duration, date or time", s)
+	return ParseDuration(s)
 }
 
-// ParseDuration reads "30d", "12h", "90m" or "45s".
+// ParseDuration reads whole seconds ("3600") or "90s", "10m", "12h", "14d".
+// Units don't mix, so there's one way to write each value's meaning.
 func ParseDuration(s string) (time.Duration, error) {
-	s = strings.TrimSpace(s)
-	if n, ok := strings.CutSuffix(s, "d"); ok {
-		var v int
-		if _, err := fmt.Sscanf(n, "%d", &v); err != nil || fmt.Sprint(v) != n {
-			return 0, fmt.Errorf("bad duration %q", s)
+	bad := fmt.Errorf(`%q isn't a duration: give seconds or a string like "90s", "10m", "12h" or "14d"`, s)
+	if s == "" {
+		return 0, bad
+	}
+	unit := time.Second
+	num := s
+	switch s[len(s)-1] {
+	case 's':
+		num = s[:len(s)-1]
+	case 'm':
+		unit, num = time.Minute, s[:len(s)-1]
+	case 'h':
+		unit, num = time.Hour, s[:len(s)-1]
+	case 'd':
+		unit, num = 24*time.Hour, s[:len(s)-1]
+	}
+	if num == "" || len(num) > 12 {
+		return 0, bad
+	}
+	var v int64
+	for _, c := range num {
+		if c < '0' || c > '9' {
+			return 0, bad
 		}
-		return time.Duration(v) * 24 * time.Hour, nil
+		v = v*10 + int64(c-'0')
 	}
-	if !strings.ContainsAny(s, "hms") {
-		return 0, fmt.Errorf("bad duration %q", s)
+	if v <= 0 {
+		return 0, fmt.Errorf("a duration is positive")
 	}
-	return time.ParseDuration(s)
+	return time.Duration(v) * unit, nil
 }

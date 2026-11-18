@@ -216,7 +216,7 @@ func (s *Server) route(c *reqCtx) error {
 			if len(seg) < 4 || seg[2] == "owners" && len(seg) < 5 {
 				return noRoute
 			}
-		case "access", "join", "live", "batch":
+		case "join", "live", "batch":
 			if len(seg) != 2 {
 				return noRoute
 			}
@@ -239,9 +239,10 @@ func (s *Server) route(c *reqCtx) error {
 		if space != c.apiKey.Space {
 			return apierr.APIKeySpace(c.apiKey.Space)
 		}
-		// Data and /access only: an API key never joins, invites, manages
-		// or holds a live connection.
-		if len(seg) == 1 || seg[1] == "join" || seg[1] == "invites" || seg[1] == "members" || seg[1] == "live" {
+		// Data and reading the space only: an API key never joins,
+		// invites, manages or holds a live connection.
+		if len(seg) == 1 && m != http.MethodGet && m != http.MethodHead ||
+			len(seg) > 1 && (seg[1] == "join" || seg[1] == "invites" || seg[1] == "members" || seg[1] == "live") {
 			return apierr.APIKeyNotAllowed
 		}
 	}
@@ -289,7 +290,7 @@ func (s *Server) route(c *reqCtx) error {
 		return apierr.NoSpace
 	}
 
-	if len(seg) == 1 || seg[1] == "access" || seg[1] == "invites" || seg[1] == "members" {
+	if len(seg) == 1 || seg[1] == "invites" || seg[1] == "members" {
 		return s.spaceRoute(c, space, rights, seg[1:])
 	}
 	if seg[1] == "batch" {
@@ -407,14 +408,14 @@ func (s *Server) route(c *reqCtx) error {
 		}
 		switch {
 		case isRead:
-			if t.Pattern {
-				return &apierr.Error{Status: 400, Code: "invalid_key", Message: "Series are read one key at a time. To see the newest point of each, GET the pattern without /series."}
-			}
-			if err := checkParams(c.r, "since", "until", "order", "limit"); err != nil {
+			if err := checkParams(c.r, "since", "before", "order", "limit", "after"); err != nil {
 				return err
 			}
 			h = s.seriesRead
 		case m == http.MethodPost:
+			if t.Pattern {
+				return &apierr.Error{Status: 400, Code: "invalid_key", Message: "A point goes to one series. To add to several at once, use POST /v1/{space}/batch."}
+			}
 			if err := checkParams(c.r, "t", "ttl", "ifBefore"); err != nil {
 				return err
 			}
@@ -444,15 +445,12 @@ func (s *Server) route(c *reqCtx) error {
 		if m != http.MethodGet {
 			return methodErr("GET")
 		}
-		if err := checkParams(c.r, "version", "timeout"); err != nil {
+		if err := checkParams(c.r, "after", "timeout"); err != nil {
 			return err
 		}
 		h = s.watch
 	case t.Many() || t.Pattern:
 		if !isRead {
-			if m == http.MethodPost && t.Pattern && !t.Many() {
-				return methodErrMsg("GET, HEAD", "To add a point to each of several series, POST to "+name+"/series.")
-			}
 			return methodErrMsg("GET, HEAD", "Patterns, by/*/, to/*/ and inbox/*/ are read-only. Write and delete one key at a time.")
 		}
 		if err := checkParams(c.r, "limit", "order", "after"); err != nil {
@@ -460,7 +458,11 @@ func (s *Server) route(c *reqCtx) error {
 		}
 		h = s.list
 	case isRead:
-		if err := checkParams(c.r); err != nil {
+		var params []string
+		if c.collect != nil {
+			params = []string{"ifVersion"} // a batch check
+		}
+		if err := checkParams(c.r, params...); err != nil {
 			return err
 		}
 		h = s.read

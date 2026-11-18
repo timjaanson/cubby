@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// until and desc page both ways, and the 4 MB page cap sets next.
+// since, before, after and desc page both ways, and the 4 MB page cap sets next.
 func TestReadPointsRange(t *testing.T) {
 	s, space, id := testStore(t)
 	ctx := context.Background()
@@ -32,36 +32,37 @@ func TestReadPointsRange(t *testing.T) {
 		return pts, next
 	}
 
-	// Desc: newest first, next is the following page's until.
+	// Desc: newest first, next continues as after.
 	pts, next := read(PointsQuery{Desc: true, Limit: 3})
 	if len(pts) != 3 || pts[0].T != t0+1099 || pts[2].T != t0+1097 || next == nil || *next != t0+1097 {
 		t.Fatalf("desc page 1: %d points, next %v", len(pts), next)
 	}
-	pts, next = read(PointsQuery{Desc: true, Until: next, Limit: 3})
+	pts, next = read(PointsQuery{Desc: true, After: next, Limit: 3})
 	if pts[0].T != t0+1096 || *next != t0+1094 {
 		t.Fatalf("desc page 2 starts at %d", pts[0].T)
 	}
-	// Both bounds exclusive; the last page has no next.
-	pts, next = read(PointsQuery{Desc: true, Since: p(t0 + 10), Until: p(t0 + 14), Limit: 10})
-	if len(pts) != 3 || pts[0].T != t0+13 || pts[2].T != t0+11 || next != nil {
+	// since inclusive, before exclusive; the last page has no next.
+	pts, next = read(PointsQuery{Desc: true, Since: p(t0 + 10), Before: p(t0 + 14), Limit: 10})
+	if len(pts) != 4 || pts[0].T != t0+13 || pts[3].T != t0+10 || next != nil {
 		t.Fatalf("desc between: %+v next %v", len(pts), next)
 	}
-	pts, next = read(PointsQuery{Since: p(t0 + 10), Until: p(t0 + 14), Limit: 2})
-	if len(pts) != 2 || pts[0].T != t0+11 || next == nil || *next != t0+12 {
+	pts, next = read(PointsQuery{Since: p(t0 + 10), Before: p(t0 + 14), Limit: 2})
+	if len(pts) != 2 || pts[0].T != t0+10 || next == nil || *next != t0+11 {
 		t.Fatalf("asc between: %d next %v", len(pts), next)
 	}
-	// Ascending without since: the newest before until, oldest first.
-	pts, next = read(PointsQuery{Until: p(t0 + 50), Limit: 5})
-	if len(pts) != 5 || pts[0].T != t0+45 || pts[4].T != t0+49 || next != nil {
-		t.Fatalf("window before until: %d next %v", len(pts), next)
+	pts, next = read(PointsQuery{Since: p(t0 + 10), Before: p(t0 + 14), After: next, Limit: 2})
+	if len(pts) != 2 || pts[0].T != t0+12 || next != nil {
+		t.Fatalf("asc between, page 2: %d next %v", len(pts), next)
+	}
+	// Ascending without since starts at the oldest point.
+	pts, next = read(PointsQuery{Limit: 5})
+	if len(pts) != 5 || pts[0].T != t0 || next == nil || *next != t0+4 {
+		t.Fatalf("oldest first: %d next %v", len(pts), next)
 	}
 
 	// A 10,000 limit stops at 4 MB and continues from next, both ways.
 	for _, desc := range []bool{false, true} {
-		q := PointsQuery{Desc: desc, Since: p(0), Limit: 10000}
-		if desc {
-			q.Since = nil
-		}
+		q := PointsQuery{Desc: desc, Limit: 10000}
 		seen, pages := 0, 0
 		for {
 			pts, next := read(q)
@@ -70,11 +71,7 @@ func TestReadPointsRange(t *testing.T) {
 			if next == nil {
 				break
 			}
-			if desc {
-				q.Until = next
-			} else {
-				q.Since = next
-			}
+			q.After = next
 		}
 		if seen != 1100 || pages != 2 {
 			t.Fatalf("desc=%v: %d points in %d pages", desc, seen, pages)

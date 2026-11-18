@@ -18,6 +18,7 @@ type WriteReq struct {
 	IfBefore         *int64
 	TTL              int64 // seconds, zero makes permanent; for a point, counted from T
 	Point            bool  // add a series point instead of setting the key
+	Check            bool  // only compare IfVersion with the key's version; write nothing
 	T                int64 // a point's time in ms; 0 for the server's clock
 }
 
@@ -142,7 +143,9 @@ func (s *Store) WriteBatch(ctx context.Context, reqs []WriteReq) (out []WriteRes
 	out = make([]WriteResult, len(reqs))
 	for i, r := range reqs {
 		var res WriteResult
-		if r.Point {
+		if r.Check {
+			res, err = checkStep(tx, r)
+		} else if r.Point {
 			t := r.T
 			if t == 0 {
 				t = pointT
@@ -203,6 +206,20 @@ func (s *Store) WriteBatch(ctx context.Context, reqs []WriteReq) (out []WriteRes
 		}
 	}
 	return out, nil
+}
+
+// checkStep compares a key's version, as the batch has left it so far,
+// with IfVersion: 0 means the key must not exist. It writes nothing.
+func checkStep(tx *sql.Tx, r WriteReq) (res WriteResult, err error) {
+	var cur int64
+	err = tx.QueryRow(`SELECT version FROM kv WHERE area = ? AND key = ? AND value IS NOT NULL`, r.Area, r.Key).Scan(&cur)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return res, err
+	}
+	if r.IfVersion == nil || *r.IfVersion != cur {
+		return res, &apierr.Error{Status: 412, Code: "version_conflict", Message: "The key changed since that version.", Extra: map[string]any{"currentVersion": cur}}
+	}
+	return WriteResult{Version: cur}, nil
 }
 
 // writeStep is one write inside a batch's transaction.
